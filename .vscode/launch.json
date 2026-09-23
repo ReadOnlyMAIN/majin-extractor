@@ -1,0 +1,131 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Extract ALL .pak files",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pak_extractor_optimized.py",
+            "args": [
+                "${workspaceFolder}/ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/",
+                "--out",
+                "${workspaceFolder}/DECOMPRESSED_ALL"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "Convert ALL XET textures to PNG",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/previous_work/xet_to_png_fixed.py",
+            "args": [
+                "${workspaceFolder}/DECOMPRESSED_ALL",
+                "--out",
+                "${workspaceFolder}/TEXTURES_ALL",
+                "--recursive"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "name": "Convert DDS textures to PNG",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/previous_work/dds_to_png_fixed.py",
+            "args": [
+                "${workspaceFolder}/DECOMPRESSED_ALL",
+                "--out",
+                "${workspaceFolder}/TEXTURES_ALL"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "name": "Convert ALL DDM models to OBJ",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/previous_work/ddm_decoder.py",
+            "args": [
+                "${workspaceFolder}/DECOMPRESSED_ALL",
+                "--out",
+                "${workspaceFolder}/MODELS_ALL",
+                "--batch"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "name": "Test single .pak (gim001.pak)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pak_extractor1_fixed.py",
+            "args": [
+                "${workspaceFolder}/ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/gim001.pak",
+                "--out",
+                "${workspaceFolder}/DECOMPRESSED_TEST"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "name": "Convert DECOMPRESSED_TEST to PNG",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/previous_work/xet_to_png_fixed.py",
+            "args": [
+                "${workspaceFolder}/DECOMPRESSED_TEST",
+                "--out",
+                "${workspaceFolder}/TEXTURES_TEST",
+                "--recursive"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        },
+        {
+            "name": "Classify files by magic",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/convert_by_category.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "presentation": {
+                "reveal": "always"
+            }
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Pipeline COMPLET (4 etapes)",
+            "configurations": [
+                "Extract ALL .pak files",
+                "Convert ALL XET textures to PNG",
+                "Convert DDS textures to PNG",
+                "Convert ALL DDM models to OBJ"
+            ],
+            "stopAll": true
+        }
+    ]
+}
