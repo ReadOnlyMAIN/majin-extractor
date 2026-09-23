@@ -77,7 +77,7 @@ Thumbs.db
 
 # Fichiers d'extraction et archives
 DECOMPRESSED_ALL_v2/
-#ExtractedISO/
+ExtractedISO/
 *.tar
 *.tar.gz
 *.zip
