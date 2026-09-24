@@ -10,8 +10,9 @@ Purpose:
 - decode the big-endian uint16 triangle-strip index buffer;
 - partition that buffer using the submesh primitive counts;
 - decode packed 11/11/10 normals, tangents and bitangents;
+- recover the observed legacy Phong material parameters;
 - export the reconstructed, material-separated mesh as OBJ;
-- dump JSON diagnostics and CSV-like vertex/index text files.
+- optionally dump JSON diagnostics and CSV-like vertex/index text files.
 
 Tested/reference files:
   chr300_c01     : sword-like model
@@ -22,6 +23,9 @@ Usage:
   python tools/conversion/ddm_to_obj.py INPUT_DIR OUTPUT_DIR
 
 Optional overrides:
+  --recursive
+  --final [true|false]
+  --scale 0.01
   --vertex-count N
   --position-offset 0x2191
   --index-offset 0x33d
@@ -29,8 +33,8 @@ Optional overrides:
   --debug
 
 Important:
-This is an EXPERIMENTAL decoder. It deliberately exports multiple topology
-interpretations instead of silently assuming one is correct.
+This is an EXPERIMENTAL decoder. Unsupported DDM variants are reported instead
+of being decoded with reference-file-specific offsets.
 """
 
 from __future__ import annotations
@@ -47,7 +51,9 @@ from typing import Iterable
 MAGIC = b"\x00ddm"
 POSITION_STRIDE = 24
 ATTRIBUTE_STRIDE = 16
+DEFAULT_EXPORT_SCALE = 0.01
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.\\/\-]+$")
+SUBMESH_SIGNATURE = struct.pack(">II", 1, 4)
 
 
 def be_u32(data: bytes, off: int) -> int:
@@ -328,16 +334,106 @@ def parse_materials(data: bytes, end: int, expected_count: int):
             if material_index + 1 < len(material_string_indices)
             else len(strings)
         )
+        material_strings = strings[string_index:stop]
+        parameter_end = (
+            strings[stop]["offset"] if stop < len(strings) else end
+        )
+        phong = find_phong_parameters(
+            data,
+            max(item["end"] for item in material_strings),
+            parameter_end,
+        )
         materials.append({
             "index": material_index,
             "name": strings[string_index]["text"],
             "name_offset": strings[string_index]["offset"],
             "texture_references": [
                 item["text"]
-                for item in strings[string_index + 1:stop]
+                for item in material_strings[1:]
             ],
+            "phong": phong,
+            "pbr_estimate": phong_to_pbr_estimate(phong),
         })
     return materials
+
+
+def find_phong_parameters(data: bytes, start: int, end: int):
+    """Find the observed Kd/Ka/Ks/Ns sequence in a material record.
+
+    The serialized record contains nine consecutive big-endian float32 color
+    components, an incompletely understood scalar, and a Phong shininess
+    exponent. Its absolute position varies with the texture slots and shader
+    variant, so the parser validates the value sequence instead of relying on
+    a reference offset.
+
+    This remains a structural heuristic. Returning ``None`` is preferable to
+    assigning plausible-looking values from an unsupported material variant.
+    """
+    candidates = []
+    value_size = 11 * 4
+    first_offset = max(0, start)
+    last_offset = end - value_size
+    if last_offset < first_offset:
+        return None
+
+    for offset in range(first_offset, last_offset + 1):
+        values = struct.unpack_from(">11f", data, offset)
+        colors = values[:9]
+        trailing_scalar = values[9]
+        shininess = values[10]
+
+        if not all(math.isfinite(value) for value in values):
+            continue
+        if not all(-2.001 <= value <= 4.0 for value in colors):
+            continue
+        if sum(abs(value) for value in colors) < 0.01:
+            continue
+        if not -0.001 <= trailing_scalar <= 1.001:
+            continue
+        if not 2.0 <= shininess <= 512.0:
+            continue
+
+        # Real color triplets tend to have related RGB components. This score
+        # rejects byte-shifted interpretations and integer flags seen as tiny
+        # floats while retaining intentionally tinted materials.
+        score = sum(
+            abs(colors[index] - colors[index + 1])
+            for index in (0, 1, 3, 4, 6, 7)
+        )
+        score += 4.0 * sum(
+            max(0.0, value - 1.01) for value in colors[:6]
+        )
+        score -= min(shininess, 128.0) / 10000.0
+        candidates.append((score, offset, values))
+
+    if not candidates:
+        return None
+
+    _, offset, values = min(candidates, key=lambda candidate: candidate[0])
+    return {
+        "offset": offset,
+        "diffuse": list(values[0:3]),
+        "ambient": list(values[3:6]),
+        "specular": list(values[6:9]),
+        "unknown_scalar_after_specular": values[9],
+        "shininess": values[10],
+        "encoding": "legacy_phong_candidate",
+    }
+
+
+def phong_to_pbr_estimate(phong):
+    """Return explicitly derived PBR metadata without inventing source data."""
+    if not phong:
+        return None
+
+    shininess = phong["shininess"]
+    roughness = min(1.0, max(0.0, math.sqrt(2.0 / (shininess + 2.0))))
+    return {
+        "metallic": None,
+        "roughness": roughness,
+        "roughness_source": "derived_from_phong_shininess",
+        "roughness_formula": "sqrt(2 / (Ns + 2))",
+    }
 
 
 def texture_storage_names(reference: str):
@@ -644,16 +740,25 @@ def material_export_name(material):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
 
 
-def write_obj(path: Path, vertices, mesh_parts, materials, object_name: str):
+def write_obj(
+    path: Path,
+    vertices,
+    mesh_parts,
+    materials,
+    object_name: str,
+    scale: float,
+):
     materials_by_index = {material["index"]: material for material in materials}
     with path.open("w", encoding="utf-8", newline="\n") as f:
         f.write("# Experimental DDM geometry decoder\n")
         f.write("# Primitive code 4 interpreted as triangle strips.\n")
+        f.write(f"# Source positions multiplied by {scale:.9g}.\n")
         f.write("mtllib materials.mtl\n")
         f.write(f"o {object_name}\n")
 
         for v in vertices:
             x, y, z = v["position"]
+            x, y, z = x * scale, y * scale, z * scale
             f.write(f"v {x:.9g} {y:.9g} {z:.9g}\n")
 
         for v in vertices:
@@ -696,8 +801,52 @@ def write_mtl(path: Path, materials):
         for material in materials:
             material_index = material["index"]
             r, g, b = palette[material_index % len(palette)]
+            phong = material.get("phong")
+            if phong:
+                diffuse_color = phong["diffuse"]
+                ambient_color = phong["ambient"]
+                specular_color = phong["specular"]
+                shininess = phong["shininess"]
+            else:
+                diffuse_color = (r, g, b)
+                ambient_color = (0.05, 0.05, 0.05)
+                specular_color = (0.15, 0.15, 0.15)
+                shininess = 32.0
+
+            source_colors = (
+                diffuse_color,
+                ambient_color,
+                specular_color,
+            )
+            diffuse_color, ambient_color, specular_color = (
+                tuple(min(1.0, max(0.0, value)) for value in color)
+                for color in source_colors
+            )
+
             f.write(f"newmtl {material_export_name(material)}\n")
             f.write(f'# DDM material index: {material_index}\n')
+            if phong:
+                f.write(
+                    f'# Legacy Phong parameters decoded at '
+                    f'0x{phong["offset"]:X}\n'
+                )
+                pbr = material["pbr_estimate"]
+                f.write(
+                    "# PBR roughness is not stored directly; estimate from "
+                    f'Ns: {pbr["roughness"]:.6g}\n'
+                )
+            else:
+                f.write("# Phong parameters not decoded; using fallbacks\n")
+            f.write("# No metallic parameter has been identified in DDM\n")
+            if source_colors != (
+                diffuse_color,
+                ambient_color,
+                specular_color,
+            ):
+                f.write(
+                    "# Source colors outside the MTL range [0, 1] were "
+                    "clamped for MTL compatibility\n"
+                )
             for texture in material.get("textures", []):
                 f.write(
                     f'# slot {texture["slot"]}: {texture["reference"]} '
@@ -727,13 +876,12 @@ def write_mtl(path: Path, materials):
                 ),
                 None,
             )
+            f.write("Kd " + " ".join(f"{v:.6g}" for v in diffuse_color) + "\n")
+            f.write("Ka " + " ".join(f"{v:.6g}" for v in ambient_color) + "\n")
+            f.write("Ks " + " ".join(f"{v:.6g}" for v in specular_color) + "\n")
+            f.write(f"Ns {shininess:.6g}\n")
             if diffuse:
-                f.write("Kd 1.000 1.000 1.000\n")
                 f.write(f'map_Kd {diffuse["output"]}\n')
-            else:
-                f.write(f"Kd {r:.3f} {g:.3f} {b:.3f}\n")
-            f.write("Ka 0.050 0.050 0.050\n")
-            f.write("Ks 0.150 0.150 0.150\n\n")
             if specular:
                 f.write(f'map_Ks {specular["output"]}\n')
             if normal:
@@ -744,12 +892,18 @@ def write_mtl(path: Path, materials):
             f.write("illum 2\n\n")
 
 
-def write_point_obj(path: Path, vertices, object_name: str):
+def write_point_obj(
+    path: Path,
+    vertices,
+    object_name: str,
+    scale: float,
+):
     with path.open("w", encoding="utf-8", newline="\n") as f:
         f.write("# DDM position stream only\n")
         f.write(f"o {object_name}_points\n")
         for v in vertices:
             x, y, z = v["position"]
+            x, y, z = x * scale, y * scale, z * scale
             f.write(f"v {x:.9g} {y:.9g} {z:.9g}\n")
         for i in range(len(vertices)):
             f.write(f"p {i+1}\n")
@@ -868,54 +1022,95 @@ def find_submesh_descriptors(data: bytes, vertex_count: int, search_start: int):
       base 0,    count 1005, material 0
       base 1005, count 154,  material 1
     """
-    result = []
-
-    for off in range(max(0, search_start), len(data) - 0x18):
-        try:
-            f0 = be_u32(data, off + 0x00)
-            primitive = be_u32(data, off + 0x04)
-            field08 = be_u32(data, off + 0x08)
-            base = be_u32(data, off + 0x0C)
-            count = be_u32(data, off + 0x10)
-            material = be_u32(data, off + 0x14)
-        except struct.error:
+    candidates = []
+    off = max(0, search_start)
+    while True:
+        off = data.find(SUBMESH_SIGNATURE, off)
+        if off < 0:
+            break
+        next_search = off + 1
+        if off + 0x38 > len(data):
+            off = next_search
             continue
 
-        if f0 != 1 or primitive != 4:
-            continue
+        field08, base, count, material = struct.unpack_from(">4I", data, off + 8)
         if count <= 0 or count > vertex_count:
+            off = next_search
             continue
         if base >= vertex_count:
+            off = next_search
             continue
         if base + count > vertex_count:
+            off = next_search
             continue
         if material > 256:
+            off = next_search
             continue
 
-        result.append({
+        candidates.append({
             "offset": off,
-            "field00": f0,
-            "primitive": primitive,
+            "field00": 1,
+            "primitive": 4,
             "primitive_count": field08,
             "base_vertex": base,
             "vertex_count": count,
             "material_index": material,
-            "first_index_field_0x34": (
-                be_u32(data, off + 0x34)
-                if off + 0x38 <= len(data)
-                else None
-            ),
+            "first_index_field_0x34": be_u32(data, off + 0x34),
         })
+        off = next_search
 
-    # Remove overlapping accidental matches.
-    filtered = []
-    last = -0x1000
-    for r in result:
-        if r["offset"] - last >= 0x18:
-            filtered.append(r)
-            last = r["offset"]
+    # Select a coherent vertex partition. This avoids accepting descriptors
+    # belonging to another embedded object merely because their scalar fields
+    # happen to fit the current vertex count.
+    coherent_runs = []
+    for first in candidates:
+        if first["base_vertex"] != 0:
+            continue
 
-    return filtered
+        run = [first]
+        next_base = first["vertex_count"]
+        next_index = first["primitive_count"] + 2
+        while next_base < vertex_count:
+            matches = [
+                candidate
+                for candidate in candidates
+                if candidate["offset"] > run[-1]["offset"]
+                and candidate["base_vertex"] == next_base
+            ]
+            if not matches:
+                break
+            candidate = min(
+                matches,
+                key=lambda item: (
+                    item["first_index_field_0x34"] != next_index,
+                    abs(item["offset"] - run[-1]["offset"] - 0x40),
+                    item["offset"],
+                ),
+            )
+            run.append(candidate)
+            next_base += candidate["vertex_count"]
+            first_index = candidate["first_index_field_0x34"]
+            if first_index != next_index:
+                first_index = next_index
+            next_index = first_index + candidate["primitive_count"] + 2
+
+        if next_base == vertex_count:
+            coherent_runs.append(run)
+
+    if not coherent_runs:
+        return []
+
+    return max(
+        coherent_runs,
+        key=lambda run: (
+            sum(
+                item["offset"] - previous["offset"] == 0x40
+                for previous, item in zip(run, run[1:])
+            ),
+            len(run),
+            -run[0]["offset"],
+        ),
+    )
 
 
 def build_mesh_parts(indices, submeshes):
@@ -931,7 +1126,15 @@ def build_mesh_parts(indices, submeshes):
 
         # For an ordinary triangle strip, N primitives require N + 2 indices.
         index_count = submesh["primitive_count"] + 2
-        local_indices = indices[cursor:cursor + index_count]
+        descriptor_first_index = submesh["first_index_field_0x34"]
+        if 0 <= descriptor_first_index <= len(indices) - index_count:
+            first_index = descriptor_first_index
+            first_index_source = "descriptor_0x34"
+        else:
+            first_index = cursor
+            first_index_source = "sequential_fallback"
+
+        local_indices = indices[first_index:first_index + index_count]
         if len(local_indices) != index_count:
             raise RuntimeError(
                 f"Submesh {submesh_index} requires {index_count} indices, "
@@ -953,7 +1156,8 @@ def build_mesh_parts(indices, submeshes):
         parts.append({
             "submesh_index": submesh_index,
             "material_index": submesh["material_index"],
-            "first_index": cursor,
+            "first_index": first_index,
+            "first_index_source": first_index_source,
             "index_count": index_count,
             "local_index_min": min(local_indices) if local_indices else None,
             "local_index_max": max(local_indices) if local_indices else None,
@@ -962,12 +1166,17 @@ def build_mesh_parts(indices, submeshes):
             "triangles": triangles,
             "strip_diagnostics": strip_diag,
         })
-        cursor += index_count
+        cursor = max(cursor, first_index + index_count)
 
     return parts, cursor
 
 
-def analyze_file(path: Path, out_root: Path, args):
+def analyze_file(
+    path: Path,
+    out_root: Path,
+    args,
+    relative_path: Path | None = None,
+):
     data = path.read_bytes()
 
     if len(data) < 8 or data[:4] != MAGIC:
@@ -975,7 +1184,12 @@ def analyze_file(path: Path, out_root: Path, args):
         return
 
     version = be_u32(data, 4)
-    out_dir = out_root / path.stem
+    output_key = (
+        Path(path.stem)
+        if relative_path is None
+        else relative_path.parent / path.stem
+    )
+    out_dir = out_root / output_key
     out_dir.mkdir(parents=True, exist_ok=True)
 
     periodic = find_periodic_marker_run(data)
@@ -1026,16 +1240,6 @@ def analyze_file(path: Path, out_root: Path, args):
     if index_count is None and header:
         index_count = header["index_count"]
 
-    # Known fallback signatures for the two reference files.
-    # These are used only if generic detection fails.
-    if index_offset is None or index_count is None:
-        if vertex_count == 367:
-            index_offset = 0x33D if index_offset is None else index_offset
-            index_count = 0x3B4 if index_count is None else index_count
-        elif vertex_count == 1159:
-            index_offset = 0x4D7 if index_offset is None else index_offset
-            index_count = 0x9A4 if index_count is None else index_count
-
     if index_offset is None or index_count is None:
         raise RuntimeError("Could not locate the index buffer.")
 
@@ -1080,6 +1284,8 @@ def analyze_file(path: Path, out_root: Path, args):
                 "name": f"material_{material_index}",
                 "name_offset": None,
                 "texture_references": [],
+                "phong": None,
+                "pbr_estimate": None,
             }
             for material_index in range(material_count)
         ]
@@ -1131,6 +1337,14 @@ def analyze_file(path: Path, out_root: Path, args):
         "position_end": position_end,
         "bbox": bbox,
         "max_radius_from_origin": max_radius,
+        "source_bbox": bbox,
+        "source_max_radius_from_origin": max_radius,
+        "export_scale": args.scale,
+        "exported_bbox": [
+            [lower * args.scale, upper * args.scale]
+            for lower, upper in bbox
+        ],
+        "exported_max_radius_from_origin": max_radius * args.scale,
         "header_candidate": header,
         "materials": materials,
         "submeshes": submeshes,
@@ -1177,25 +1391,45 @@ def analyze_file(path: Path, out_root: Path, args):
         except Exception:
             pass
 
-    # Always export the position cloud. If this looks like the sword/axe,
-    # the position stream hypothesis is immediately validated.
-    write_point_obj(
+    mesh_path = out_dir / f"{path.stem}.obj"
+    legacy_mesh_path = out_dir / "mesh.obj"
+    optional_outputs = (
         out_dir / "positions_only.obj",
-        vertices,
-        path.stem,
-    )
-    write_vertices_csv(
         out_dir / "vertices.csv",
-        vertices,
+        out_dir / "indices.csv",
+        out_dir / "analysis.json",
     )
-    write_indices(out_dir / "indices.csv", indices)
+
+    # Remove files generated by an earlier diagnostic export when producing a
+    # final asset, as well as the former generic mesh filename.
+    stale_outputs = optional_outputs if args.final else ()
+    if legacy_mesh_path != mesh_path:
+        stale_outputs = (*stale_outputs, legacy_mesh_path)
+    for stale_path in stale_outputs:
+        stale_path.unlink(missing_ok=True)
+
+    if not args.final:
+        # The position cloud and CSV streams are reverse-engineering aids.
+        write_point_obj(
+            out_dir / "positions_only.obj",
+            vertices,
+            path.stem,
+            args.scale,
+        )
+        write_vertices_csv(
+            out_dir / "vertices.csv",
+            vertices,
+        )
+        write_indices(out_dir / "indices.csv", indices)
+
     write_mtl(out_dir / "materials.mtl", materials)
     write_obj(
-        out_dir / "mesh.obj",
+        mesh_path,
         vertices,
         mesh_parts,
         materials,
         path.stem,
+        args.scale,
     )
 
     for part in mesh_parts:
@@ -1214,10 +1448,11 @@ def analyze_file(path: Path, out_root: Path, args):
         all_triangles,
     )
 
-    with (out_dir / "analysis.json").open(
-        "w", encoding="utf-8"
-    ) as f:
-        json.dump(report, f, indent=2)
+    if not args.final:
+        with (out_dir / "analysis.json").open(
+            "w", encoding="utf-8"
+        ) as f:
+            json.dump(report, f, indent=2)
 
     print(f"\n[{path.name}]")
     print(f"  version          : {version}")
@@ -1226,7 +1461,9 @@ def analyze_file(path: Path, out_root: Path, args):
     print(f"  position end     : 0x{position_end:X}")
     print(f"  attribute stream : 0x{attribute16_offset:X}")
     print(f"  position score   : {score:.3f}")
-    print(f"  max radius       : {max_radius:.6f}")
+    print(f"  source radius    : {max_radius:.6f}")
+    print(f"  export scale     : {args.scale:.9g}")
+    print(f"  exported radius  : {max_radius * args.scale:.6f}")
 
     if "suspected_bounding_sphere_radius_0x90" in report:
         print(
@@ -1255,8 +1492,15 @@ def analyze_file(path: Path, out_root: Path, args):
             f'{texture["reference"]}:{texture["role"]}'
             for texture in material.get("textures", [])
         )
+        phong = material.get("phong")
+        phong_summary = (
+            f' Ks={phong["specular"]} Ns={phong["shininess"]:.6g}'
+            if phong
+            else " Phong=unresolved"
+        )
         print(
             f'    #{material["index"]}: {material["name"]}'
+            + phong_summary
             + (f" [{texture_summary}]" if texture_summary else "")
         )
 
@@ -1290,11 +1534,23 @@ def parse_int(value: str):
     return int(value, 0)
 
 
-def iter_input_files(path: Path):
+def parse_bool(value: str):
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected a boolean value, got {value!r}."
+    )
+
+
+def iter_input_files(path: Path, recursive: bool = False):
     if path.is_file():
         yield path
     elif path.is_dir():
-        for p in sorted(path.iterdir()):
+        candidates = path.rglob("*") if recursive else path.iterdir()
+        for p in sorted(candidates):
             if p.is_file():
                 yield p
     else:
@@ -1307,6 +1563,38 @@ def main():
     )
     ap.add_argument("input", type=Path, help="DDM file or directory")
     ap.add_argument("output", type=Path, help="Output directory")
+    ap.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help=(
+            "Scan input directories recursively and preserve their relative "
+            "layout below the output directory."
+        ),
+    )
+    ap.add_argument(
+        "--final",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_bool,
+        metavar="BOOL",
+        help=(
+            "Generate only the named OBJ, its required MTL, and textures. "
+            "Diagnostic OBJ/CSV/JSON files are omitted. Accepts true/false; "
+            "using --final without a value means true."
+        ),
+    )
+    ap.add_argument(
+        "--scale",
+        type=float,
+        default=DEFAULT_EXPORT_SCALE,
+        help=(
+            "Multiplier applied to exported OBJ positions. The default "
+            f"({DEFAULT_EXPORT_SCALE}) converts the observed centimeter-like "
+            "DDM coordinates to meters."
+        ),
+    )
 
     ap.add_argument("--vertex-count", type=int)
     ap.add_argument("--position-offset", type=parse_int)
@@ -1337,26 +1625,48 @@ def main():
     ap.add_argument("--debug", action="store_true")
 
     args = ap.parse_args()
+    if not math.isfinite(args.scale) or args.scale <= 0.0:
+        ap.error("--scale must be a finite number greater than zero.")
     args.output.mkdir(parents=True, exist_ok=True)
 
     processed = 0
+    skipped = 0
+    failed = 0
+    input_is_directory = args.input.is_dir()
+    input_files = list(iter_input_files(args.input, args.recursive))
 
-    for path in iter_input_files(args.input):
+    for path in input_files:
         try:
             data = path.read_bytes()
             if len(data) < 8 or data[:4] != MAGIC:
                 if args.debug:
                     print(f"[SKIP] {path}: magic mismatch")
+                skipped += 1
                 continue
 
-            analyze_file(path, args.output, args)
+            relative_path = (
+                path.relative_to(args.input)
+                if input_is_directory
+                else None
+            )
+            analyze_file(
+                path,
+                args.output,
+                args,
+                relative_path=relative_path,
+            )
             processed += 1
 
         except Exception as exc:
             print(f"[ERROR] {path}: {exc}")
+            failed += 1
             if args.debug:
                 raise
 
+    print(
+        f"\nSummary: {processed} decoded, {failed} failed, "
+        f"{skipped} non-DDM files skipped."
+    )
     if processed == 0:
         print("No DDM file decoded.")
         raise SystemExit(1)

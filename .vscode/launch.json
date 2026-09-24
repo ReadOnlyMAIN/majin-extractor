@@ -57,13 +57,18 @@
             }
         },
         {
-            "name": "DDM: convert a model",
+            "name": "DDM: convert a file or directory",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/tools/conversion/ddm_to_obj.py",
             "args": [
                 "${input:ddmSource}",
-                "${input:modelOutput}"
+                "${input:modelOutput}",
+                "--recursive",
+                "--final",
+                "${input:ddmFinalOutput}",
+                "--scale",
+                "${input:ddmExportScale}"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -107,14 +112,30 @@
         {
             "id": "ddmSource",
             "type": "promptString",
-            "description": "DDM file to convert",
-            "default": "game_files/decompressed/path/to/model"
+            "description": "DDM file or directory to convert recursively",
+            "default": "game_files/decompressed/KB/chara"
         },
         {
             "id": "modelOutput",
             "type": "promptString",
             "description": "Model output directory",
             "default": "output/models"
+        },
+        {
+            "id": "ddmFinalOutput",
+            "type": "pickString",
+            "description": "Generate final assets only (OBJ, MTL, textures)",
+            "options": [
+                "true",
+                "false"
+            ],
+            "default": "true"
+        },
+        {
+            "id": "ddmExportScale",
+            "type": "promptString",
+            "description": "DDM position scale applied to OBJ export",
+            "default": "0.01"
         }
     ]
 }

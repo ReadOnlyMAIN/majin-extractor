@@ -424,7 +424,39 @@ blue RGB distribution, detects red masks from their channels, and chooses the
 albedo from the remaining detailed textures. Auxiliary textures are exported
 and documented but are not yet assigned to a non-standard MTL channel.
 
-## 12.1 XET data offset
+## 12.1 Legacy Phong parameters
+
+The material record also contains a sequence of eleven unaligned big-endian
+`float32` values. Its absolute offset varies with the texture-slot and shader
+records, but the validated sequence is:
+
+```c
+float diffuse[3];
+float ambient[3];
+float specular[3];
+float unknown;    // zero in chr300/chr310, nonzero in some variants
+float shininess;  // Phong exponent / MTL Ns
+```
+
+The converter locates this sequence structurally between the final texture
+reference and the next material or geometry header. It does not use offsets
+specific to `chr300` or `chr310`.
+
+Observed reference values:
+
+| Material  | Diffuse   | Ambient   | Specular                     | Ns |
+| --------- | --------- | --------- | ---------------------------- | -: |
+| `sword`   | `1, 1, 1` | `0, 0, 0` | `0.4, 0.4, 0.4`              | 34 |
+| `mat_ax`  | `1, 1, 1` | `0, 0, 0` | `0.05, 0.05, 0.05`           | 34 |
+| `mat_tar` | `1, 1, 1` | `0, 0, 0` | `0.00018, 0.00017, 0.000175` | 40 |
+
+These are legacy Phong parameters, not metallic/roughness PBR parameters. No
+metallic scalar has been identified in the DDM material records. Roughness is
+also not stored directly; for diagnostics the converter reports the common
+approximation `sqrt(2 / (Ns + 2))`, clearly marked as derived. The original
+`Kd`, `Ka`, `Ks`, and `Ns` values are written to MTL without this conversion.
+
+## 12.2 XET data offset
 
 The largest mip always starts at `0x90`. The old converter heuristic incorrectly
 added a "pre-mip" area whenever the total size did not match a conventional mip
@@ -710,6 +742,22 @@ Do not yet assume that the DDM stores conventional `position`, `rotation`, and
 `scale` fields at the currently identified location. The discovered rotation is
 currently proven only as an OBB-related value.
 
+## 22.3 Coordinate units
+
+The decoded position magnitudes strongly suggest centimeter-like source units:
+
+```text
+chr300_c01 bounding-sphere radius = 77.714882 source units
+chr310_c01 bounding-sphere radius = 234.970749 source units
+```
+
+Interpreting those values as centimeters gives radii of approximately `0.777 m`
+and `2.350 m`, which are plausible for the sword and large axe. OBJ has no unit
+metadata, so `ddm_to_obj.py` multiplies exported positions by `0.01` by default.
+The raw coordinates remain unchanged in the decoder and diagnostic CSV; the
+scale can be overridden with `--scale` while this hypothesis is tested on more
+characters and environment objects.
+
 ---
 
 # 23. Next reverse-engineering phase
@@ -834,6 +882,9 @@ chr310 index buffer:
     byte size = 0x1348
 
 Materials/textures:
+    legacy material model = Phong Kd / Ka / Ks / Ns
+    no native metallic or roughness field identified
+    roughness in analysis.json is derived from Ns
     chr300 sword:
         diffuse = chr910_u
         normal = chr910 (reference chr910_c)
@@ -870,8 +921,10 @@ NEXT PRIORITY:
 | `+0x14` = material index           | High              |
 | `+0x34` = first index              | High              |
 | Material names/references          | Very high         |
+| Legacy Phong Kd/Ka/Ks/Ns           | High              |
 | Diffuse/normal/mask roles          | High              |
 | Auxiliary reflection textures      | Medium            |
+| Centimeter-like coordinate units   | Medium            |
 | Actual model transform             | **Undetermined**   |
 | Complete header structure          | Partial           |
 
@@ -888,6 +941,7 @@ DDM
  ├─ index buffer partitioned by submesh
  ├─ normals/tangents/bitangents
  ├─ material names and indices
+ ├─ legacy Phong Kd/Ka/Ks/Ns and derived roughness metadata
  ├─ resolved XET references converted to PNG
  ├─ JSON/CSV diagnostics
  └─ textured OBJ/MTL grouped by submesh
