@@ -75,8 +75,15 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Fichiers d'extraction et archives
+# Extracted files, converted files, and archives
+game_files/
+DECOMPRESSED_ALL/
 DECOMPRESSED_ALL_v2/
+DECOMPRESSED_TEST/
+TEXTURES_ALL/
+TEXTURES_TEST/
+MODELS_ALL/
+output/
 ExtractedISO/
 *.tar
 *.tar.gz
@@ -84,11 +91,7 @@ ExtractedISO/
 *.7z
 *.rar
 
-# Fichiers temporaires
+# Temporary files
 *.tmp
 *.temp
 *.log
-
-# Fichiers de configuration locale
-*.md
-!README.md

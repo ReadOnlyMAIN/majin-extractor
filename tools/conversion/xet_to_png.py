@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""xet_to_png.py
+"""Convert Game Republic PS3 XET textures to PNG.
 
 Game Republic PS3 xet (.bin) -> PNG converter
 
@@ -8,22 +8,23 @@ What this version does
 - Uses the working xet layout you identified:
   * magic: b'\x00xet'
   * width/height at 0x80 (big-endian u16)
-  * texture data starts at 0x90
+  * the largest mip always starts at 0x90
   * DXT5 blocks are stored color-first, alpha-second
   * mip chain stops at 2x2 (no 1x1 mip in this format)
 - Supports single files, folders, and recursive scanning
 - Accepts files with or without an extension
+- Preserves the relative directory tree during folder conversion
 
 Usage
 -----
 Single file:
-    python xet_to_png.py path/to/file.bin --out PNG_OUT
+    python tools/conversion/xet_to_png.py path/to/file.bin --out PNG_OUT
 
 Folder:
-    python xet_to_png.py path/to/folder --out PNG_OUT
+    python tools/conversion/xet_to_png.py path/to/folder --out PNG_OUT
 
 Recursive:
-    python xet_to_png.py path/to/folder --out PNG_OUT --recursive
+    python tools/conversion/xet_to_png.py path/to/folder --out PNG_OUT --recursive
 """
 
 from __future__ import annotations
@@ -106,32 +107,25 @@ def decode_alpha_table(a0: int, a1: int) -> List[int]:
 # -----------------------------------------------------------------------------
 
 def find_offset_and_format(data: bytes, w: int, h: int) -> Tuple[int, str]:
-    """Detect the texture data offset and whether DXT1 or DXT5 fits better.
+    """Detect DXT1/DXT5 while keeping the largest mip at offset 0x90.
 
-    For the xet layout you found:
-    - If the file size matches exactly, data begins at 0x90.
-    - Otherwise, there may be pre-mips before the main image.
+    Older revisions interpreted the size difference from a conventional mip
+    chain as small mips stored *before* the main image. That shifted the main
+    DXT block stream by 0x280/0xA80 bytes and produced a block-aligned UV
+    offset. Reference textures show that these files instead start their
+    largest mip at 0x90; their mip tail simply has a non-standard size.
     """
-    filesize = len(data)
-
-    # Exact fits (no pre-mips)
-    if filesize == HEADER_SECONDARY_OFFSET + mip_total(w, h, 16):
-        return HEADER_SECONDARY_OFFSET, "DXT5"
-    if filesize == HEADER_SECONDARY_OFFSET + mip_total(w, h, 8):
-        return HEADER_SECONDARY_OFFSET, "DXT1"
-
-    # Otherwise, compute the pre-mip offset (using DXT1-sized pre-mips)
-    off = HEADER_SECONDARY_OFFSET
-    s = 16
-    while s <= max(w, h) // 16:
-        off += dxt1_size(s, s)
-        s *= 2
-
-    payload = filesize - off
-    d1 = abs(payload - mip_total(w, h, 8))
-    d5 = abs(payload - mip_total(w, h, 16))
-    fmt = "DXT5" if d5 < d1 else "DXT1"
-    return off, fmt
+    payload = max(0, len(data) - HEADER_SECONDARY_OFFSET)
+    d1 = min(
+        abs(payload - dxt1_size(w, h)),
+        abs(payload - mip_total(w, h, 8)),
+    )
+    d5 = min(
+        abs(payload - dxt5_size(w, h)),
+        abs(payload - mip_total(w, h, 16)),
+    )
+    texture_format = "DXT5" if d5 < d1 else "DXT1"
+    return HEADER_SECONDARY_OFFSET, texture_format
 
 
 # -----------------------------------------------------------------------------
@@ -248,13 +242,13 @@ def iter_inputs(root: Path, recursive: bool) -> Iterable[Path]:
 def known_magic(data: bytes) -> str:
     head = data[:4]
     known = {
-        b"\x00ddm": "Modele 3D",
+        b"\x00ddm": "3D model",
         b"\x00hsc": "Sound cue",
         b"psmr": "Motion",
-        b"\x00sme": "Inconnu",
-        b"\x00\x00\x00\x00": "Modele/Inconnu",
+        b"\x00sme": "Unknown",
+        b"\x00\x00\x00\x00": "Model/Unknown",
     }
-    return known.get(head, f"inconnu ({head.hex()})")
+    return known.get(head, f"unknown ({head.hex()})")
 
 
 # -----------------------------------------------------------------------------
@@ -268,13 +262,13 @@ def convert_one(path: Path, out_dir: Path) -> bool:
         return False
 
     if len(data) < 0x84:
-        print(f"[skip] {path.name}: dimensions nulles")
+        print(f"[skip] {path.name}: zero dimensions")
         return False
 
     w = struct.unpack_from(">H", data, 0x80)[0]
     h = struct.unpack_from(">H", data, 0x82)[0]
     if not w or not h:
-        print(f"[skip] {path.name}: dimensions nulles")
+        print(f"[skip] {path.name}: zero dimensions")
         return False
 
     offset, fmt = find_offset_and_format(data, w, h)
@@ -288,7 +282,7 @@ def convert_one(path: Path, out_dir: Path) -> bool:
     img = Image.frombytes("RGBA", (w, h), rgba)
     bg = Image.new("RGBA", (w, h), (204, 204, 204, 255))
     Image.alpha_composite(bg, img).save(out_dir / (path.stem + ".png"))
-    print(f"✓ {path.name} ({w}x{h} {fmt} off=0x{offset:X})")
+    print(f"[OK] {path.name} ({w}x{h} {fmt} off=0x{offset:X})")
     return True
 
 
@@ -312,11 +306,13 @@ def main() -> None:
         ok = 0
         for f in files:
             try:
-                if convert_one(f, out_dir):
+                relative_output = out_dir / f.relative_to(inp).parent
+                relative_output.mkdir(parents=True, exist_ok=True)
+                if convert_one(f, relative_output):
                     ok += 1
             except Exception as e:
                 print(f"✗ {f.name}: {e}")
-        print(f"\n{ok}/{len(files)} convertis dans {out_dir}/")
+        print(f"\n{ok}/{len(files)} converted into {out_dir}/")
     else:
         convert_one(inp, out_dir)
 

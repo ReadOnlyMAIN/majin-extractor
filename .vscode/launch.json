@@ -2,130 +2,119 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Extract ALL .pak files",
+            "name": "PAK: extract a file or directory",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/pak_extractor_optimized.py",
+            "program": "${workspaceFolder}/tools/extraction/pak_extractor.py",
             "args": [
-                "${workspaceFolder}/ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/",
+                "${input:pakSource}",
                 "--out",
-                "${workspaceFolder}/DECOMPRESSED_ALL"
+                "${input:decompressedDir}",
+                "--workers",
+                "${input:workerCount}"
             ],
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            },
+            "justMyCode": true,
             "env": {
                 "PYTHONUNBUFFERED": "1"
             }
         },
         {
-            "name": "Convert ALL XET textures to PNG",
+            "name": "XET: convert a file or directory",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/previous_work/xet_to_png_fixed.py",
+            "program": "${workspaceFolder}/tools/conversion/xet_to_png.py",
             "args": [
-                "${workspaceFolder}/DECOMPRESSED_ALL",
+                "${input:resourceSource}",
                 "--out",
-                "${workspaceFolder}/TEXTURES_ALL",
+                "${input:textureOutput}",
                 "--recursive"
             ],
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
             }
         },
         {
-            "name": "Convert DDS textures to PNG",
+            "name": "DDS: convert a file or directory",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/previous_work/dds_to_png_fixed.py",
+            "program": "${workspaceFolder}/tools/conversion/dds_to_png.py",
             "args": [
-                "${workspaceFolder}/DECOMPRESSED_ALL",
+                "${input:resourceSource}",
                 "--out",
-                "${workspaceFolder}/TEXTURES_ALL"
-            ],
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
-            }
-        },
-        {
-            "name": "Convert ALL DDM models to OBJ",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/previous_work/ddm_decoder.py",
-            "args": [
-                "${workspaceFolder}/DECOMPRESSED_ALL",
-                "--out",
-                "${workspaceFolder}/MODELS_ALL",
-                "--batch"
-            ],
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
-            }
-        },
-        {
-            "name": "Test single .pak (gim001.pak)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/pak_extractor1_fixed.py",
-            "args": [
-                "${workspaceFolder}/ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/gim001.pak",
-                "--out",
-                "${workspaceFolder}/DECOMPRESSED_TEST"
-            ],
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
-            }
-        },
-        {
-            "name": "Convert DECOMPRESSED_TEST to PNG",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/previous_work/xet_to_png_fixed.py",
-            "args": [
-                "${workspaceFolder}/DECOMPRESSED_TEST",
-                "--out",
-                "${workspaceFolder}/TEXTURES_TEST",
+                "${input:textureOutput}",
                 "--recursive"
             ],
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
             }
         },
         {
-            "name": "Classify files by magic",
+            "name": "DDM: convert a model",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/convert_by_category.py",
+            "program": "${workspaceFolder}/tools/conversion/ddm_to_obj.py",
+            "args": [
+                "${input:ddmSource}",
+                "${input:modelOutput}"
+            ],
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            "presentation": {
-                "reveal": "always"
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
             }
         }
     ],
-    "compounds": [
+    "inputs": [
         {
-            "name": "Pipeline COMPLET (4 etapes)",
-            "configurations": [
-                "Extract ALL .pak files",
-                "Convert ALL XET textures to PNG",
-                "Convert DDS textures to PNG",
-                "Convert ALL DDM models to OBJ"
-            ],
-            "stopAll": true
+            "id": "pakSource",
+            "type": "promptString",
+            "description": "PAK file or directory containing PAK files",
+            "default": "game_files/package"
+        },
+        {
+            "id": "decompressedDir",
+            "type": "promptString",
+            "description": "Directory for decompressed resources",
+            "default": "game_files/decompressed"
+        },
+        {
+            "id": "workerCount",
+            "type": "promptString",
+            "description": "Number of decompression threads",
+            "default": "4"
+        },
+        {
+            "id": "resourceSource",
+            "type": "promptString",
+            "description": "Resource file or directory to convert",
+            "default": "game_files/decompressed"
+        },
+        {
+            "id": "textureOutput",
+            "type": "promptString",
+            "description": "PNG texture output directory",
+            "default": "output/textures"
+        },
+        {
+            "id": "ddmSource",
+            "type": "promptString",
+            "description": "DDM file to convert",
+            "default": "game_files/decompressed/path/to/model"
+        },
+        {
+            "id": "modelOutput",
+            "type": "promptString",
+            "description": "Model output directory",
+            "default": "output/models"
         }
     ]
 }

@@ -1,32 +1,18 @@
 {
-    "editor.formatOnSave": true,
-    "editor.codeActionsOnSave": [
-        "source.fixAll"
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
     ],
-    "[python]": {
-        "editor.defaultFormatter": "ms-python.python",
-        "editor.tabSize": 4,
-        "editor.insertSpaces": true
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true
     },
-    "files.autoSave": "afterDelay",
-    "files.autoSaveDelay": 1000,
-    "terminal.integrated.profiles.windows": {
-        "PowerShell": {
-            "source": "PowerShell",
-            "args": [
-                "-NoExit",
-                "-Command"
-            ]
-        },
-        "Git Bash": {
-            "path": "C:\\Program Files\\Git\\bin\\bash.exe",
-            "args": [
-                "--login",
-                "-i"
-            ]
-        }
+    "files.watcherExclude": {
+        "**/game_files/**": true,
+        "**/output/**": true
     },
-    "terminal.integrated.defaultProfile.windows": "Git Bash",
-    "workbench.colorTheme": "Default Dark+",
-    "window.title": "Majin Reverse Engineering - PS3 Resource Extraction"
+    "search.exclude": {
+        "**/game_files/**": true,
+        "**/output/**": true
+    }
 }

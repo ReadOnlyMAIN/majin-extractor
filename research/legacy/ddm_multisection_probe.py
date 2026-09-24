@@ -1,20 +1,26 @@
 """
-Decodeur DDM FINAL -> OBJ
-========================
+Legacy multi-section DDM -> OBJ prototype
+===========================
 
-Fonctionnalités:
-- Détection automatique de toutes les sections géométriques
-- Décodage de TOUTES les sections (pas seulement la première)
-- Combinaison des vertices et triangles de toutes les sections
-- Deduplication des vertices
-- Remappage des indices
-- Détection automatique de l'endianness
-- Stratégie de décodage automatique (strip ou groupes de 6)
+Retained only as a research reference for multi-section DDM variants,
+especially chr520. The maintained converter is located at
+tools/conversion/ddm_to_obj.py.
 
-Résout les problèmes:
-- Trous dans les modèles (sections manquantes)
-- Étirements (vertices dupliqués non dédupliqués)
-- Modèles incomplets (seulement la première section décodée)
+Historical features:
+- Filtering of metadata sections (section_0 is often invalid)
+- Correct handling of triangle-strip restarts
+- Filtering of inconsistent triangles (oversized, invalid indices)
+- Automatic distinction between valid geometry and metadata sections
+- Improved restart detection ([A,A] or [A,B,B] patterns)
+
+Resolved issues:
+- Extra faces caused by incorrect restart handling
+- Section 0 containing metadata instead of geometry
+- Degenerate or inconsistent triangles
+
+Usage:
+  python ddm_decoder_clean_v2.py file.ddm --out output_directory
+  python ddm_decoder_clean_v2.py directory/ --batch --out output_directory
 """
 
 import struct
@@ -27,11 +33,49 @@ MAGIC = b"\x00ddm"
 
 
 def dist(p1, p2):
+    """Compute the Euclidean distance between two points."""
     return math.sqrt(sum((p1[k] - p2[k]) ** 2 for k in range(3)))
 
 
+def is_metadata_section(nb_verts, nb_sub, nb_idx, data, idx_start):
+    """
+    Determine whether a section probably contains metadata rather than geometry.
+    
+    Metadata criteria:
+    - Very small nb_verts (< 10) with a very large nb_idx
+    - nb_idx < 3 (too few indices to form triangles)
+    - Excessively high nb_idx/nb_verts ratio (> 100)
+    - Indices that do not form a coherent strip pattern
+    """
+    # Obvious cases
+    if nb_verts < 3 or nb_idx < 3:
+        return True
+    
+    # Excessively high ratio
+    if nb_verts > 0 and nb_idx / nb_verts > 100:
+        return True
+    
+    # Very small vertex count with many indices
+    if nb_verts < 10 and nb_idx > 100:
+        return True
+    
+    # Inspect the first indices for suspicious patterns.
+    if idx_start + 6 <= len(data):
+        first_indices = []
+        for i in range(min(6, nb_idx)):
+            idx = struct.unpack(">H", data[idx_start + i*2:idx_start + i*2 + 2])[0]
+            first_indices.append(idx)
+        
+        # Reject identical or heavily repeated initial indices.
+        unique_indices = set(first_indices)
+        if len(unique_indices) == 1:
+            return True
+    
+    return False
+
+
 def find_geometry_headers(data):
-    """Cherche tous les headers de section geo (\x00\x00\x00\x07 + nb_verts/nb_sub/nb_idx)."""
+    """Find geometry-section headers (\x00\x00\x00\x07 + counts)."""
     pat = bytes([0, 0, 0, 7])
     pos = 0
     headers = []
@@ -40,13 +84,19 @@ def find_geometry_headers(data):
         if pos == -1:
             break
         if pos + 16 <= len(data):
-            # Essayer les deux endianness
+            # Try both byte orders.
             nb_verts_be, nb_sub_be, nb_idx_be = struct.unpack(">III", data[pos + 4 : pos + 16])
             nb_verts_le, nb_sub_le, nb_idx_le = struct.unpack("<III", data[pos + 4 : pos + 16])
             
-            # Vérifier lequel donne des valeurs raisonnables
             def is_plausible(nv, ns, ni):
+                # Reject clearly implausible values.
                 if nv < 3 or ni < 3:
+                    return False
+                # Reject an excessively large vertex count.
+                if nv > 100000:
+                    return False
+                # Reject an excessively large index count.
+                if ni > 1000000:
                     return False
                 ratio = ni / nv if nv > 0 else 999
                 return ratio < 100
@@ -65,7 +115,7 @@ def find_geometry_headers(data):
 
 
 def find_vertex_buffer(data, search_start, search_end, min_run=4):
-    """Cherche le buffer de vertices (marqueur 0xFFFFFFFF à stride 24)."""
+    """Find the vertex buffer (0xFFFFFFFF marker at a 24-byte stride)."""
     search_end = min(search_end, len(data) - 16)
     if search_end <= search_start:
         return None
@@ -99,7 +149,7 @@ def find_vertex_buffer(data, search_start, search_end, min_run=4):
 
 
 def load_vertices(data, vbuf_start, n, endian='>'):
-    """Charge les vertices (positions seulement, 12 octets par vertex)."""
+    """Load vertex positions (12 position bytes per 24-byte record)."""
     vertices = []
     for i in range(n):
         base = vbuf_start + i * 24
@@ -118,7 +168,7 @@ def _to_signed16(v):
 
 
 def try_vif_vertex_buffer(data, vbuf_start, n, scale=16384.0):
-    """Charge un buffer de vertices au format VIF/GS compressé."""
+    """Load a compressed VIF/GS vertex buffer."""
     vertices = []
     tag2_matches = 0
     for i in range(n):
@@ -139,71 +189,130 @@ def try_vif_vertex_buffer(data, vbuf_start, n, scale=16384.0):
     return vertices
 
 
-def strip_decode(idxs, n_verts, offset, vertices=None, scale=None):
-    """Stratégie A : strip standard, fenêtre glissante de 3."""
-    remapped = [(v - offset) % n_verts for v in idxs]
-
-    def decode(seq):
-        triangles = []
-        for i in range(len(seq) - 2):
-            A, B, C = seq[i], seq[i + 1], seq[i + 2]
-            if A == B or B == C or A == C:
-                continue
-            triangles.append((A, B, C) if i % 2 == 0 else (B, A, C))
-        return triangles
-
-    base_triangles = decode(remapped)
-
-    if len(remapped) >= 2 and vertices and base_triangles:
-        wrapped = remapped + [remapped[1]]
-        wrapped_triangles = decode(wrapped)
-        new_tris = [t for t in wrapped_triangles if t not in base_triangles]
-        if new_tris:
-            base_max_edge = 0.0
-            for A, B, C in base_triangles:
-                pA, pB, pC = vertices[A], vertices[B], vertices[C]
-                base_max_edge = max(base_max_edge, dist(pA, pB), dist(pB, pC), dist(pC, pA))
-            thresh = base_max_edge * 1.2
-            accepted = []
-            for A, B, C in new_tris:
-                pA, pB, pC = vertices[A], vertices[B], vertices[C]
-                if max(dist(pA, pB), dist(pB, pC), dist(pC, pA)) <= thresh:
-                    accepted.append((A, B, C))
-            base_triangles = base_triangles + accepted
-
-    return base_triangles
-
-
-def group6_quads(idxs, n_verts, offset):
-    """Stratégie B : groupes de 6 [A,B,B,C,C,D]."""
-    quads = []
-    for q in range(len(idxs) // 6):
-        g = idxs[q * 6 : q * 6 + 6]
-        if len(g) < 6:
-            break
-        if not (g[1] == g[2] and g[3] == g[4]):
-            return None
-        A = (g[0] - offset) % n_verts
-        B = (g[1] - offset) % n_verts
-        C = (g[3] - offset) % n_verts
-        D = (g[5] - offset) % n_verts
-        quads.append((A, B, C, D))
-    return quads
+def decode_strip_with_restarts(idxs, n_verts, offset=0):
+    """
+    Decode a triangle strip while detecting restarts.
+    
+    In triangle strips:
+    - Each triplet (i, i+1, i+2) forms a triangle
+    - Winding alternates: (A,B,C) for even i, (B,A,C) for odd i
+    - Repeated indices indicate restarts: [A,A] or [A,B,B]
+    
+    This function:
+    1. Removes end-of-buffer markers (indices >= n_verts)
+    2. Detects restarts (pairs of identical indices)
+    3. Splits the strip into smaller bands
+    4. Decodes each band independently
+    5. Filters degenerate triangles
+    """
+    # Normalize out-of-range indices.
+    idxs = [(v - offset) % n_verts for v in idxs]
+    
+    # Detect restart positions.
+    restart_positions = []
+    for i in range(len(idxs) - 1):
+        if idxs[i] == idxs[i + 1]:
+            restart_positions.append(i + 1)  # The restart follows the pair.
+    
+    # Decode the complete strip when it has no restart.
+    if not restart_positions:
+        return decode_strip(idxs)
+    
+    # Split into bands.
+    bands = []
+    start = 0
+    for rp in restart_positions:
+        if rp > start:
+            bands.append(idxs[start:rp])
+        start = rp
+    if start < len(idxs):
+        bands.append(idxs[start:])
+    
+    # Decode each band.
+    all_triangles = []
+    for band in bands:
+        if len(band) >= 3:
+            all_triangles.extend(decode_strip(band))
+    
+    return all_triangles
 
 
-def group6_to_triangles(quads):
-    """Convertit des quads en triangles."""
+def decode_strip(idxs):
+    """
+    Decode a triangle strip without restarts.
+    
+    In a standard strip, each triplet (i, i+1, i+2) forms a triangle with
+    alternating winding.
+    """
     triangles = []
-    for A, B, C, D in quads:
-        if len({A, B, C}) == 3:
+    for i in range(len(idxs) - 2):
+        A, B, C = idxs[i], idxs[i + 1], idxs[i + 2]
+        
+        # Ignore degenerate triangles with identical indices.
+        if A == B or B == C or A == C:
+            continue
+        
+        # Alternating winding.
+        if i % 2 == 0:
             triangles.append((A, B, C))
-        if len({B, D, C}) == 3:
-            triangles.append((B, D, C))
+        else:
+            triangles.append((B, A, C))
+    
     return triangles
 
 
+def filter_invalid_triangles(triangles, vertices, scale_factor=10.0):
+    """
+    Filter inconsistent triangles.
+    
+    Filtering criteria:
+    - Edges that are too long relative to the average model scale
+    - Degenerate triangles with nearly zero area
+    """
+    if not vertices or not triangles:
+        return triangles
+    
+    # Compute the local scale from neighboring vertex distances.
+    model_scale = local_scale(vertices)
+    max_edge_threshold = model_scale * scale_factor
+    
+    filtered = []
+    for A, B, C in triangles:
+        pA, pB, pC = vertices[A], vertices[B], vertices[C]
+        
+        # Compute edge lengths.
+        edge_AB = dist(pA, pB)
+        edge_BC = dist(pB, pC)
+        edge_CA = dist(pC, pA)
+        max_edge = max(edge_AB, edge_BC, edge_CA)
+        
+        # Reject triangles with an excessively long edge.
+        if max_edge > max_edge_threshold:
+            continue
+        
+        # Filter nearly zero-area degenerate triangles using a cross product.
+        def sub(a, b):
+            return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+        
+        AB = sub(pB, pA)
+        AC = sub(pC, pA)
+        # Cross product.
+        cross_x = AB[1] * AC[2] - AB[2] * AC[1]
+        cross_y = AB[2] * AC[0] - AB[0] * AC[2]
+        cross_z = AB[0] * AC[1] - AB[1] * AC[0]
+        area = math.sqrt(cross_x**2 + cross_y**2 + cross_z**2)
+        
+        # A very small area probably indicates a degenerate triangle.
+        if area < 1e-6:
+            continue
+        
+        filtered.append((A, B, C))
+    
+    return filtered
+
+
 def local_scale(vertices, eps=1e-4):
-    """Calcule l'échelle locale basée sur les distances entre voisins."""
+    """Compute local scale from neighboring vertex distances."""
     n = len(vertices)
     if n < 2:
         return 1.0
@@ -228,7 +337,7 @@ def local_scale(vertices, eps=1e-4):
 
 
 def coherence_score(triangles, vertices, scale=None, outlier_factor=6.0):
-    """Score de cohérence pour évaluer une triangulation."""
+    """Return a coherence score for a triangulation."""
     if not triangles:
         return 0, 0
     if scale is None:
@@ -243,7 +352,7 @@ def coherence_score(triangles, vertices, scale=None, outlier_factor=6.0):
 
 
 def orient_outward(triangles, vertices):
-    """Corrige le winding des triangles."""
+    """Orient triangle winding outward."""
     if not vertices:
         return triangles
     xs = [v[0] for v in vertices]; ys = [v[1] for v in vertices]; zs = [v[2] for v in vertices]
@@ -272,21 +381,23 @@ def orient_outward(triangles, vertices):
     return oriented
 
 
-def decode_ddm(filepath, out_obj, verbose=True):
-    """Décode un fichier DDM en OBJ."""
+def decode_ddm_clean(filepath, out_obj, verbose=True):
+    """Decode a DDM file to OBJ with the experimental decoder."""
     with open(filepath, 'rb') as f:
         data = f.read()
     
     if data[:4] != MAGIC:
-        raise ValueError(f"{filepath}: pas un fichier DDM (magic={data[:4]!r})")
+        raise ValueError(f"{filepath}: not a DDM file (magic={data[:4]!r})")
 
-    # Trouver tous les headers
+    # Find all geometry headers.
     headers = find_geometry_headers(data)
     if not headers:
-        raise ValueError(f"{filepath}: aucun header de géométrie valide trouvé")
+        raise ValueError(f"{filepath}: no valid geometry header found")
 
-    # Trouver le buffer de vertices partagé
-    # Méthode 1: Chercher le marqueur 0xFFFFFFFF après le dernier header
+    if verbose:
+        print(f"Found {len(headers)} geometry headers")
+
+    # Find the shared vertex buffer.
     last_header_pos = max(h[0] for h in headers)
     last_idx_end = last_header_pos + 0x14 + max(h[3] for h in headers if h[0] == last_header_pos) * 2
     
@@ -294,12 +405,12 @@ def decode_ddm(filepath, out_obj, verbose=True):
     vif_mode = False
     
     if vbuf is None:
-        # Méthode 2: Chercher avant le premier header
+        # Method 2: search before the first header.
         first_header_pos = min(h[0] for h in headers)
         vbuf = find_vertex_buffer(data, 0, first_header_pos)
         
         if vbuf is None:
-            # Méthode 3: Chercher entre les headers
+            # Method 3: search between headers.
             for i in range(len(headers) - 1):
                 h1_pos = headers[i][0]
                 h2_pos = headers[i+1][0]
@@ -308,8 +419,7 @@ def decode_ddm(filepath, out_obj, verbose=True):
                     break
         
         if vbuf is None:
-            # Méthode 4: Essayer le format VIF
-            # Utiliser le nb_verts du premier header
+            # Method 4: try the VIF format.
             first_header = headers[0]
             if len(first_header) >= 2:
                 nb_verts_first = first_header[1]
@@ -321,29 +431,28 @@ def decode_ddm(filepath, out_obj, verbose=True):
                     vbuf_start = idx_end_first
                     vbuf_size = nb_verts_first
                 else:
-                    raise ValueError(f"{filepath}: impossible de trouver le buffer de vertices")
+                    raise ValueError(f"{filepath}: could not locate the vertex buffer")
             else:
-                raise ValueError(f"{filepath}: impossible de trouver le buffer de vertices")
+                raise ValueError(f"{filepath}: could not locate the vertex buffer")
         else:
             vbuf_start, vbuf_size = vbuf
-            # Lire tous les vertices
             vertices = load_vertices(data, vbuf_start, vbuf_size, '>')
     else:
         vbuf_start, vbuf_size = vbuf
-        # Lire tous les vertices
         vertices = load_vertices(data, vbuf_start, vbuf_size, '>')
 
     if len(vertices) < 3:
-        raise ValueError(f"{filepath}: pas assez de vertices ({len(vertices)})")
+        raise ValueError(f"{filepath}: not enough vertices ({len(vertices)})")
 
     if verbose:
-        print(f"Buffer de vertices: {vbuf_start:#x} ({vbuf_size} vertices)")
-        print(f"Vertices charés: {len(vertices)}")
+        print(f"Vertex buffer: {vbuf_start:#x} ({vbuf_size} vertices)")
+        print(f"Loaded vertices: {len(vertices)}")
 
     # Traiter chaque section géométrique
     all_triangles = []
     sections_processed = 0
     sections_failed = 0
+    sections_skipped = 0
 
     for header_data in headers:
         if len(header_data) == 5:
@@ -358,8 +467,16 @@ def decode_ddm(filepath, out_obj, verbose=True):
         if idx_start + nb_idx * 2 > len(data):
             if verbose:
                 print(f"  header@{hex(header_pos)}: ignore (indices hors limite)")
+            sections_skipped += 1
             continue
         
+        # Vérifier si c'est une section de métadonnées
+        if is_metadata_section(nb_verts, nb_sub, nb_idx, data, idx_start):
+            if verbose:
+                print(f"  header@{hex(header_pos)}: ignore (métadonnées, {nb_verts}v/{nb_idx}i)")
+            sections_skipped += 1
+            continue
+
         # Lire les indices
         if endian == '<':
             idxs_full = [
@@ -380,45 +497,32 @@ def decode_ddm(filepath, out_obj, verbose=True):
         if len(idxs) < 3:
             if verbose:
                 print(f"  header@{hex(header_pos)}: ignore (trop peu d'indices)")
+            sections_skipped += 1
             continue
 
-        # Essayer les deux stratégies
+        # Essayer le décodage avec gestion des restarts
         try:
-            # Stratégie A: strip standard
-            strip_tris = strip_decode(idxs, len(vertices), 0, vertices=vertices)
+            tris = decode_strip_with_restarts(idxs, len(vertices), 0)
             
-            # Stratégie B: groupes de 6
-            quads = group6_quads(idxs, len(vertices), 0)
-            if quads:
-                group_tris = group6_to_triangles(quads)
-            else:
-                group_tris = []
-
-            # Choisir la meilleure
-            if strip_tris and group_tris:
-                # Choisir celle avec le plus de triangles
-                if len(strip_tris) >= len(group_tris):
-                    tris = strip_tris
-                    strategy = "strip"
-                else:
-                    tris = group_tris
-                    strategy = "group6"
-            elif strip_tris:
-                tris = strip_tris
-                strategy = "strip"
-            elif group_tris:
-                tris = group_tris
-                strategy = "group6"
-            else:
+            if not tris:
                 if verbose:
-                    print(f"  header@{hex(header_pos)}: aucune stratégie n'a fonctionné")
+                    print(f"  header@{hex(header_pos)}: aucun triangle décodé")
+                sections_failed += 1
+                continue
+
+            # Filtrer les triangles invalides
+            tris = filter_invalid_triangles(tris, vertices, scale_factor=10.0)
+            
+            if not tris:
+                if verbose:
+                    print(f"  header@{hex(header_pos)}: tous les triangles filtrés")
                 sections_failed += 1
                 continue
 
             all_triangles.extend(tris)
             sections_processed += 1
             if verbose:
-                print(f"  header@{hex(header_pos)}: {strategy}, {len(tris)} triangles")
+                print(f"  header@{hex(header_pos)}: {len(tris)} triangles (après filtrage)")
 
         except Exception as e:
             if verbose:
@@ -428,8 +532,11 @@ def decode_ddm(filepath, out_obj, verbose=True):
     if not all_triangles:
         raise ValueError(f"{filepath}: aucune section n'a pu être décodée")
 
+    if verbose:
+        print(f"\nSections: {sections_processed} traitées, {sections_failed} échouées, {sections_skipped} ignorées")
+        print(f"Triangles totaux: {len(all_triangles)}")
+
     # Dedupliquer les vertices finaux et remapper
-    # (Créer un mapping unique)
     vertex_to_idx = {}
     unique_vertices = []
     for v in vertices:
@@ -451,14 +558,13 @@ def decode_ddm(filepath, out_obj, verbose=True):
 
     if verbose:
         print(f"Deduplication: {len(vertices)} vertices uniques")
-        print(f"Total: {len(all_triangles)} triangles")
 
     # Corriger le winding
     all_triangles = orient_outward(all_triangles, vertices)
 
     # Écrire le fichier OBJ
     with open(out_obj, 'w') as f:
-        f.write(f"# {os.path.basename(filepath)} - decode FINAL ({len(vertices)} verts, {len(all_triangles)} tris)\n")
+        f.write(f"# {os.path.basename(filepath)} - CLEAN V2 ({len(vertices)} verts, {len(all_triangles)} tris)\n")
         for v in vertices:
             f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
         for A, B, C in all_triangles:
@@ -490,11 +596,11 @@ def batch_process(root, out_dir, verbose=False):
 
     results = []
     for p in ddm_files:
-        out_name = out_dir / (p.stem + "_final.obj")
+        out_name = out_dir / (p.stem + "_clean_v2.obj")
         try:
             if verbose:
                 print(f"=== {p.name} ===")
-            n_verts, n_tris = decode_ddm(str(p), str(out_name), verbose=verbose)
+            n_verts, n_tris = decode_ddm_clean(str(p), str(out_name), verbose=verbose)
             results.append((p, "OK", n_verts, n_tris))
             if verbose:
                 print()
@@ -506,9 +612,9 @@ def batch_process(root, out_dir, verbose=False):
     ok = [r for r in results if r[1] == "OK"]
     failed = [r for r in results if r[1] != "OK"]
 
-    report_path = out_dir / "_rapport_final.txt"
+    report_path = out_dir / "_rapport_clean_v2.txt"
     with open(report_path, 'w') as f:
-        f.write(f"Rapport de decodage DDM FINAL en lot\n")
+        f.write(f"Rapport de decodage DDM CLEAN V2 en lot\n")
         f.write(f"Total: {len(results)}  OK: {len(ok)}  Echecs: {len(failed)}\n\n")
         f.write("=== ECHECS ===\n")
         for p, status, _, _ in failed:
@@ -525,7 +631,7 @@ def batch_process(root, out_dir, verbose=False):
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="Decodeur DDM FINAL -> OBJ")
+    ap = argparse.ArgumentParser(description="Decodeur DDM CLEAN V2 -> OBJ")
     ap.add_argument("input", nargs="+", help="Fichier(s) .ddm/.bin, ou un dossier avec --batch")
     ap.add_argument("--batch", action="store_true", help="Traiter l'entrée comme un dossier (recursif)")
     ap.add_argument("--out", default=".", help="Dossier de sortie (mode --batch uniquement)")
@@ -537,7 +643,7 @@ if __name__ == "__main__":
         for fname in args.input:
             try:
                 print(f"=== {fname} ===")
-                out = os.path.splitext(fname)[0] + "_final.obj"
-                decode_ddm(fname, out)
+                out = os.path.splitext(fname)[0] + "_clean_v2.obj"
+                decode_ddm_clean(fname, out)
             except Exception as e:
                 print(f"ERREUR : {e}\n")

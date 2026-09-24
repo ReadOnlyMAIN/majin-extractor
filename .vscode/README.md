@@ -1,140 +1,80 @@
-# Configuration VSCode pour le projet Majin Reverse Engineering
+# Shared VS Code configuration
 
-Ce dossier contient les configurations pour exécuter et déboguer les scripts Python directement depuis Visual Studio Code.
+This directory contains a portable configuration for Windows, Linux, and macOS.
+It does not enforce absolute paths, a terminal, a theme, or personal editor
+preferences.
 
-## 📁 Fichiers de Configuration
+## Files
 
-| Fichier | Description |
-|---------|-------------|
-| `launch.json` | Configurations de lancement pour exécuter les scripts individuels |
-| `tasks.json` | Tâches VSCode pour l'automatisation (pipeline complet) |
-| `settings.json` | Paramètres VSCode optimisés pour Python |
+- `launch.json`: interactive launch configurations that request paths at runtime;
+- `tasks.json`: reproducible tasks that use the conventional project layout;
+- `settings.json`: minimal repository-specific settings;
+- `extensions.json`: recommended Python extensions, without forced installation.
 
----
+## Prerequisites
 
-## 🚀 Utilisation
+1. Open the repository root in VS Code.
+2. Install the recommended extensions when VS Code offers them.
+3. Create or select a Python environment with `Python: Select Interpreter`.
+4. Install the dependencies:
 
-### **Méthode 1 : Exécuter une configuration individuelle**
-1. Ouvrez VSCode dans le projet
-2. Allez dans l'onglet **"Exécuter et Déboguer"** (Ctrl+Shift+D)
-3. Sélectionnez la configuration souhaitée dans le menu déroulant
-4. Cliquez sur le bouton ▶️ **Démarrer le débogage** (F5)
+   ```text
+   python -m pip install -r requirements.txt
+   ```
 
-**Configurations disponibles** :
-- 📦 **Extraire TOUS les .pak** → Extrait tous les fichiers .pak vers `DECOMPRESSED_ALL_v2/`
-- 🎨 **Convertir TOUTES les textures XET** → Convertit les XET en PNG
-- 🎨 **Convertir textures DDS** → Convertit les DDS en PNG
-- 🗾 **Convertir TOUS les modèles DDM** → Convertit les DDM en OBJ
-- 📦➡️🎨 **Pipeline COMPLET** → Exécute les 4 étapes en séquence
-- 🔍 **Tester un seul .pak (gim001.pak)** → Pour les tests rapides
-- 🎯 **Convertir gims extraits en PNG** → Convertit les fichiers décompressés
-- 📊 **Classifier les fichiers par magic** → Analyse les fichiers extraits
+Tasks use the interpreter selected by the Python extension instead of a
+platform-specific `python` executable.
 
----
+## Paths
 
-### **Méthode 2 : Utiliser les tâches VSCode**
-1. Ouvrez la palette de commandes (Ctrl+Shift+P)
-2. Tapez `Run Task`
-3. Sélectionnez la tâche souhaitée
+Each debug configuration requests its input and output paths. Relative paths are
+resolved from the repository root, and absolute paths are also accepted. The
+suggested values follow this convention:
 
-**Tâches disponibles** :
-- Toutes les configurations de la Méthode 1
-- 🧹 **Nettoyer les dossiers temporaires** → Supprime `DECOMPRESSED_TEST/` et `TEXTURES_TEST/`
-- 📊 **Compter les fichiers par type** → Affiche les magics des fichiers
-
----
-
-### **Méthode 3 : Exécuter le pipeline complet en une seule commande**
-1. Ouvrez la palette de commandes (Ctrl+Shift+P)
-2. Tapez `Run Task`
-3. Sélectionnez **"📦➡️🎨 Pipeline COMPLET (4 étapes)"**
-
-**Ce que fait le pipeline** :
-```
-Étape 1 : Extraction de tous les .pak → DECOMPRESSED_ALL_v2/
-Étape 2 : Conversion des textures XET → TEXTURES_ALL/
-Étape 3 : Conversion des textures DDS → TEXTURES_ALL/
-Étape 4 : Conversion des modèles DDM → MODELS_ALL/
+```text
+game_files/package       PAK files from the ISO
+game_files/decompressed  extracted binary resources
+output/textures          PNG textures
+output/models            OBJ/MTL models
 ```
 
----
+This layout is optional. Replace the suggested values before launching a
+configuration if your files are stored elsewhere.
 
-## 🔧 Paramètres Recommandés
+## Debugging with F5
 
-### **Raccourcis clavier utiles**
-| Raccourci | Action |
-|-----------|--------|
-| `F5` | Démarrer le débogage (exécute la configuration active) |
-| `Ctrl+F5` | Exécuter sans débogage |
-| `Ctrl+Shift+P` | Ouvrir la palette de commandes |
-| `Ctrl+Shift+D` | Ouvrir l'onglet Exécuter/Déboguer |
-| `Ctrl+Shift+B` | Exécuter la tâche de build |
+`launch.json` provides four configurations:
 
-### **Personnalisation**
-Vous pouvez modifier les chemins dans `launch.json` et `tasks.json` pour :
-- Changer les dossiers de sortie
-- Ajouter des arguments supplémentaires
-- Configurer des variables d'environnement
+- `PAK: extract a file or directory`;
+- `XET: convert a file or directory`;
+- `DDS: convert a file or directory`;
+- `DDM: convert a model`.
 
----
+Recursive mode is enabled for the XET and DDS converters. The PAK extractor asks
+for a worker count and defaults to `4`.
 
-## 📝 Workflow Typique
+## Tasks
 
-### **Pour une extraction complète**
-1. Sélectionnez **"📦 Extraire TOUS les .pak"** (F5)
-2. Attendez la fin de l'extraction (~1h pour 697 fichiers)
-3. Sélectionnez **"🎨 Convertir TOUTES les textures XET"** (F5)
-4. Sélectionnez **"🎨 Convertir textures DDS"** (F5)
-5. Sélectionnez **"🗾 Convertir TOUS les modèles DDM"** (F5)
+Open `Terminal > Run Task` to run a step without the debugger. Unlike the F5
+configurations, tasks use the conventional relative layout shown above. This
+allows them to run sequentially without repeatedly requesting the same paths.
 
-### **Pour un test rapide**
-1. Sélectionnez **"🔍 Tester un seul .pak (gim001.pak)"** (F5)
-2. Sélectionnez **"🎯 Convertir gims extraits en PNG"** (F5)
-3. Vérifiez les résultats dans `TEXTURES_TEST/`
+The `Pipeline: extraction and textures` task, also available through
+`Ctrl+Shift+B`, runs:
 
----
+1. PAK extraction;
+2. recursive XET conversion;
+3. recursive DDS conversion.
 
-## 💡 Conseils
+Use the corresponding F5 configurations when working with a different layout.
+Tasks use the interpreter selected with `Python: Select Interpreter`.
 
-1. **Console intégrée** : Toutes les configurations utilisent la console intégrée de VSCode pour une meilleure visualisation
-2. **Just My Code** : Désactivé pour permettre le débogage des bibliothèques (Pillow, numpy, etc.)
-3. **Problèmes de codage** : Certains scripts utilisent des caractères Unicode. VSCode gère cela correctement
-4. **Timeout** : Pour les fichiers DDM très grands, le script `ddm_decoder.py` a un timeout de 30s par fichier
+DDM conversion remains separate because the decoder does not support every
+layout yet. Its status is documented in `REVERSE_DDM.md`.
 
----
+## Shared settings
 
-## 🛠️ Dépannage
-
-### **Problème : La console ne s'affiche pas**
-**Solution** : Vérifiez que `"console": "integratedTerminal"` est bien présent dans la configuration
-
-### **Problème : Le script plante avec des erreurs d'encodage**
-**Solution** : Les scripts `*_fixed.py` ont été corrigés pour éviter les problèmes d'encodage Windows
-
-### **Problème : Les chemins ne sont pas trouvés**
-**Solution** : Vérifiez que vous avez ouvert le bon dossier dans VSCode (le dossier racine du projet)
-
-### **Problème : Je veux modifier les chemins de sortie**
-**Solution** : Éditez les arguments `--out` dans les configurations `launch.json`
-
----
-
-## 📚 Documentation Complète
-
-Pour plus de détails sur le workflow et les scripts, consultez :
-- `EXTRACTION_SUMMARY.md` → Résumé complet du projet
-- `README_CONVERSION.md` → Guide détaillé de conversion
-
----
-
-## 🎯 Résumé des Configurations
-
-| Nom | Type | Action | Dossier de sortie |
-|-----|------|--------|-------------------|
-| Extraire TOUS les .pak | Python | Extraction complète | `DECOMPRESSED_ALL_v2/` |
-| Convertir TOUTES les textures XET | Python | Conversion XET → PNG | `TEXTURES_ALL/` |
-| Convertir textures DDS | Python | Conversion DDS → PNG | `TEXTURES_ALL/` |
-| Convertir TOUS les modèles DDM | Python | Conversion DDM → OBJ | `MODELS_ALL/` |
-| Pipeline COMPLET | Shell | 4 étapes en séquence | Plusieurs dossiers |
-| Tester gim001.pak | Python | Test rapide | `DECOMPRESSED_TEST/` |
-| Convertir gims extraits | Python | Conversion test | `TEXTURES_TEST/` |
+`settings.json` only contains repository-specific settings: Python environment
+activation, import resolution, and exclusion of large resource directories from
+search and file watching. Terminal, theme, auto-save, and formatter choices
+remain in each developer's user settings.

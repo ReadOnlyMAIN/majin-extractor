@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Convertit les .dds (DXT1/DXT5) directement en PNG
+Converts DDS textures (DXT1/DXT5) directly to PNG.
+Directories can be scanned recursively regardless of file extensions, and their
+relative directory structure is preserved in the output.
 Usage:
-  python dds_to_png.py DOSSIER_DDS/ --out DOSSIER_PNG/
+  python tools/conversion/dds_to_png.py DDS_DIRECTORY/ --out PNG_DIRECTORY/ --recursive
 """
 import struct, argparse
 from pathlib import Path
@@ -89,7 +91,7 @@ def convert_dds(path, out_dir):
         print(f"[skip] {Path(path).name}")
         return False
 
-    # Parser le header DDS (128 bytes)
+    # Parse the 128-byte DDS header.
     h      = struct.unpack_from('<I', data, 12)[0]
     w      = struct.unpack_from('<I', data, 16)[0]
     fourcc = data[84:88]
@@ -97,7 +99,7 @@ def convert_dds(path, out_dir):
     if w == 0 or h == 0:
         return False
 
-    # Données après le header de 128 bytes
+    # Pixel data follows the 128-byte header.
     pixel_data = data[128:]
 
     if fourcc == b'DXT1':
@@ -105,7 +107,7 @@ def convert_dds(path, out_dir):
     elif fourcc == b'DXT5':
         rgba = decode_dxt5(pixel_data, w, h)
     else:
-        print(f"[skip] {Path(path).name}: format {fourcc} non supporté")
+        print(f"[skip] {Path(path).name}: unsupported format {fourcc}")
         return False
 
     img = Image.frombytes('RGBA', (w,h), rgba)
@@ -118,14 +120,40 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('input')
     ap.add_argument('--out', default='PNG_OUT')
+    ap.add_argument(
+        '--recursive',
+        action='store_true',
+        help='also scan subdirectories',
+    )
     args = ap.parse_args()
-    inp = Path(args.input); out_dir = Path(args.out); out_dir.mkdir(exist_ok=True)
+    inp = Path(args.input)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
     if inp.is_dir():
-        files = sorted(list(inp.glob('*.dds')) + list(inp.glob('*.bin')))
-        ok = sum(1 for f in files if convert_dds(f, out_dir))
-        print(f"\n{ok}/{len(files)} convertis dans {out_dir}/")
-    else:
+        candidates = inp.rglob('*') if args.recursive else inp.iterdir()
+        files = []
+        for path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                with path.open('rb') as stream:
+                    magic = stream.read(4)
+                if magic == b'DDS ':
+                    files.append(path)
+            except OSError as exc:
+                print(f"[skip] {path}: {exc}")
+        files.sort()
+        ok = 0
+        for path in files:
+            relative_output = out_dir / path.relative_to(inp).parent
+            relative_output.mkdir(parents=True, exist_ok=True)
+            if convert_dds(path, relative_output):
+                ok += 1
+        print(f"\n{ok}/{len(files)} converted into {out_dir}/")
+    elif inp.is_file():
         convert_dds(inp, out_dir)
+    else:
+        ap.error(f"input not found: {inp}")
 
 if __name__ == '__main__':
     main()

@@ -2,91 +2,74 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Extract ALL .pak files",
-            "type": "shell",
-            "command": "python pak_extractor1_fixed.py \"ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/\" --out DECOMPRESSED_ALL_v2",
-            "group": "build",
+            "label": "PAK: extract",
+            "type": "process",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "tools/extraction/pak_extractor.py",
+                "game_files/package",
+                "--out",
+                "game_files/decompressed",
+                "--quiet"
+            ],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PYTHONUNBUFFERED": "1"
+                }
             },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            }
+            "problemMatcher": []
         },
         {
-            "label": "Convert ALL XET textures to PNG",
-            "type": "shell",
-            "command": "python previous_work/xet_to_png_fixed.py DECOMPRESSED_ALL_v2 --out TEXTURES_ALL --recursive",
-            "group": "build",
-            "dependsOn": [
-                "Extract ALL .pak files"
+            "label": "XET: recursive conversion",
+            "type": "process",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "tools/conversion/xet_to_png.py",
+                "game_files/decompressed",
+                "--out",
+                "output/textures",
+                "--recursive"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
-            }
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PYTHONUNBUFFERED": "1"
+                }
+            },
+            "problemMatcher": []
         },
         {
-            "label": "Convert DDS textures to PNG",
-            "type": "shell",
-            "command": "python previous_work/dds_to_png_fixed.py DECOMPRESSED_ALL_v2 --out TEXTURES_ALL",
-            "group": "build",
-            "dependsOn": [
-                "Extract ALL .pak files"
+            "label": "DDS: recursive conversion",
+            "type": "process",
+            "command": "${command:python.interpreterPath}",
+            "args": [
+                "tools/conversion/dds_to_png.py",
+                "game_files/decompressed",
+                "--out",
+                "output/textures",
+                "--recursive"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
-            }
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "PYTHONUNBUFFERED": "1"
+                }
+            },
+            "problemMatcher": []
         },
         {
-            "label": "Convert ALL DDM models to OBJ",
-            "type": "shell",
-            "command": "python previous_work/ddm_decoder.py DECOMPRESSED_ALL_v2 --out MODELS_ALL --batch",
-            "group": "build",
+            "label": "Pipeline: extraction and textures",
+            "dependsOrder": "sequence",
             "dependsOn": [
-                "Extract ALL .pak files"
+                "PAK: extract",
+                "XET: recursive conversion",
+                "DDS: recursive conversion"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            }
-        },
-        {
-            "label": "Test single .pak (gim001.pak)",
-            "type": "shell",
-            "command": "python pak_extractor1_fixed.py \"ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/gim001.pak\" --out DECOMPRESSED_TEST",
-            "group": "test",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            }
-        },
-        {
-            "label": "Convert DECOMPRESSED_TEST to PNG",
-            "type": "shell",
-            "command": "python previous_work/xet_to_png_fixed.py DECOMPRESSED_TEST --out TEXTURES_TEST --recursive",
-            "group": "test",
-            "dependsOn": [
-                "Test single .pak (gim001.pak)"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            }
-        },
-        {
-            "label": "Clean temp directories",
-            "type": "shell",
-            "command": "rm -rf DECOMPRESSED_TEST TEXTURES_TEST",
-            "group": "none",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            }
-        },
-        {
-            "label": "Count files by type",
-            "type": "shell",
-            "command": "python -c \"import os; from collections import Counter; mc = Counter(); [mc.update([open(os.path.join(r,f),'rb').read(4)]) for r,d,fs in os.walk('DECOMPRESSED_ALL_v2') for f in fs]; [print(f'{m.hex()}: {c} files') for m,c in mc.most_common()]\"",
-            "group": "test",
-            "options": {
-                "cwd": "${workspaceFolder}"
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
             }
         }
     ]
