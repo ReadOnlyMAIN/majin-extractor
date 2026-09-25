@@ -12,7 +12,7 @@ tools/
   conversion/
     xet_to_png.py          XET textures to PNG
     dds_to_png.py          DDS textures (DXT1/DXT5) to PNG
-    ddm_to_obj.py          DDM models to OBJ/MTL/PNG
+    ddm_to_obj.py          DDM models to GLB (or OBJ/MTL/PNG)
 research/
   legacy/                  archived prototypes and historical documents
 REVERSE_DDM.md             current DDM reverse-engineering notes
@@ -59,18 +59,41 @@ one line per resource and reduces terminal overhead.
 Recursive texture conversion preserves the relative directory structure so
 resources with identical names do not overwrite each other.
 
-DDM conversion remains experimental. It exports OBJ geometry, UVs, legacy Phong
-material values, and resolved XET textures for supported DDM v3 geometry
-layouts. Recursive scans skip non-DDM files and report unsupported variants
-without applying offsets tied to a reference model. Known findings and
-limitations are recorded in [`REVERSE_DDM.md`](REVERSE_DDM.md).
+DDM conversion remains experimental. It exports GLB scenes with geometry,
+UVs, normals, vertex colors, material estimates and embedded XET textures for
+supported DDM v3 layouts. Recursive scans skip non-DDM files and report
+unsupported variants. Findings are recorded in [`REVERSE_DDM.md`](REVERSE_DDM.md).
 
-Each exported mesh uses the source filename with an `.obj` extension. Final
-mode keeps only that OBJ, its required `materials.mtl`, and resolved textures;
-omit `--final` to also generate the position cloud, vertex/index CSV files, and
-`analysis.json`. OBJ positions are multiplied by `0.01` by default to convert
-the observed centimeter-like DDM coordinates to meters. Override this with
-`--scale`, for example `--scale 0.1` when testing another unit hypothesis.
+Each source produces `<name>/<name>.glb`. With `--final`, a fresh output folder
+contains only the self-contained GLB. Omit it for JSON/CSV and position-cloud
+diagnostics. `--format obj` retains the former OBJ/MTL/PNG export. Positions are
+scaled by `0.01` to convert the observed centimeter-like units to meters;
+use `--scale` to override this.
+
+For maps, `--object-mode auto` (the default) creates one selectable GLB node per
+connected geometry component, joining exact shared edges across material/UV
+seams while preserving vertex attributes. Other models remain one object with
+multiple material primitives. Each node has a local origin at its component's
+bounding-box center and a translation preserving its placement. Exactly
+identical exported local meshes share mesh data between nodes.
+
+This reconstructs editable objects from baked geometry; it does **not** recover
+original authoring instances or their pivots. Disconnected pieces of one prop
+can become separate objects, and connected props can remain together. Use
+`--object-mode submeshes` for DDM descriptor groups, `connected` to explicitly
+split any model, or `single` to keep one object. These modes apply to GLB only.
+Legacy Phong materials are approximated as nonmetallic PBR materials; original
+Phong values remain in GLB extras. GLB roughness defaults to `0.8`, because the
+Phong-derived values make map surfaces unrealistically glossy without the
+original game shader. Set `--roughness 0.5` explicitly, or use a negative value
+to restore the mathematical Phong conversion. Exact coincident normal-only
+passes are omitted when a diffuse surface occupies the same triangle, avoiding
+the z-fighting produced by legacy multipass terrain. Auxiliary shader textures
+are not mapped.
+
+```bash
+python tools/conversion/ddm_to_obj.py game_files/decompressed/KB/map/map101 output/models_glb --final --texture-root game_files/decompressed/KB/texture/common/area1
+```
 
 Equivalent configurations are available in VS Code. The
 `Pipeline: extraction and textures` task runs PAK extraction followed by both

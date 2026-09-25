@@ -950,3 +950,40 @@ DDM
 The **minimal geometry decoder works** on `chr300_c01` and `chr310_c01`. The
 next step is to generalize it to other DDM variants and provide a richer glTF
 export than MTL allows.
+
+
+## Map GLB export
+
+`map101_R0` has three validated geometry sections and 38 descriptors containing
+79,567 vertices and 76,395 nondegenerate-index triangles. The map positions are
+already placed in world space. Descriptor +0x28 indexes the 64-entry OBB table
+(count at 0xB0, records at 0xB4, stride 0x30): all 38 referenced boxes match the
+corresponding submesh vertices. These are bounds, not instance transforms.
+Some descriptors cover large spatial batches rather than individual props.
+
+The GLB exporter reconstructs objects by connectivity: original shared vertex
+indices and exact shared geometric edges (including material/UV seams). It does
+not weld nearby coordinates or merge duplicated vertices touching at one point.
+This produces 1,881 nodes / 1,842 distinct meshes for map101_R0. Geometry and
+material assignments are retained. Centers are reconstructed AABB centers;
+local coordinates plus node translation preserve world positions. Only exactly
+identical exported local geometry and materials share mesh data. No original
+instance hierarchy, rotations, authoring pivots or semantic object names have
+been recovered. Disconnected prop pieces can split; connected props can merge.
+
+GLB embeds resolved diffuse/normal PNGs and uses the source UV orientation
+(top-left, unlike the OBJ V flip). Metallic defaults to zero. The mathematical
+Phong conversion gives roughness 0.174 for Ns=64 and 0.243 for Ns=32, but this
+looks excessively glossy without the original game shader. GLB therefore uses
+0.8 by default and records both the exported and derived values in material
+extras; a negative `--roughness` restores the derived value.
+
+14,267 map101_R0 triangles are exact overlaps where `gake102__multi` provides
+only a normal-map pass over a diffuse surface (including 26 overlaps shared
+with another diffuse material). Core glTF cannot reproduce this legacy
+multipass shader, and exporting both copies causes z-fighting. The GLB exporter
+omits only a coincident normal-only face that has a diffuse counterpart. It
+retains standalone normal-only geometry and faces whose attributes differ.
+The final GLB contains 62,128 triangles. Auxiliary shader maps are otherwise
+not represented.
+Specification: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html

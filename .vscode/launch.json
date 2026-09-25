@@ -57,18 +57,22 @@
             }
         },
         {
-            "name": "DDM: convert a file or directory",
+            "name": "DDM: convert to GLB",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/tools/conversion/ddm_to_obj.py",
             "args": [
                 "${input:ddmSource}",
                 "${input:modelOutput}",
+                "--format",
+                "glb",
                 "--recursive",
                 "--final",
                 "${input:ddmFinalOutput}",
                 "--scale",
-                "${input:ddmExportScale}"
+                "${input:ddmExportScale}",
+                "--roughness",
+                "${input:ddmRoughness}"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -124,7 +128,7 @@
         {
             "id": "ddmFinalOutput",
             "type": "pickString",
-            "description": "Generate final assets only (OBJ, MTL, textures)",
+            "description": "Generate final GLB only (embedded textures)",
             "options": [
                 "true",
                 "false"
@@ -134,8 +138,14 @@
         {
             "id": "ddmExportScale",
             "type": "promptString",
-            "description": "DDM position scale applied to OBJ export",
+            "description": "DDM position scale applied to GLB export",
             "default": "0.01"
+        },
+        {
+            "id": "ddmRoughness",
+            "type": "promptString",
+            "description": "GLB material roughness (negative uses Phong-derived values)",
+            "default": "0.8"
         }
     ]
 }

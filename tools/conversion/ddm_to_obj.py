@@ -9,14 +9,16 @@ Purpose:
 - decode big-endian XYZ float32 + half-float UV from 24-byte records;
 - decode the big-endian uint16 triangle-strip index buffer;
 - partition that buffer using the submesh primitive counts;
+- combine validated map sections and decode their triangle lists/strips;
 - decode packed 11/11/10 normals, tangents and bitangents;
 - recover the observed legacy Phong material parameters;
-- export the reconstructed, material-separated mesh as OBJ;
+- export maps as separate connected objects in GLB (default), or OBJ/MTL;
 - optionally dump JSON diagnostics and CSV-like vertex/index text files.
 
 Tested/reference files:
   chr300_c01     : sword-like model
   chr310_c01(1)  : large axe-like model
+  map101_R0     : three map sections with 0x3C-byte descriptors
 
 Usage:
   python tools/conversion/ddm_to_obj.py INPUT OUTPUT_DIR
@@ -44,6 +46,12 @@ import json
 import math
 import re
 import struct
+import tempfile
+
+try:
+    from .glb_export import write_glb
+except ImportError:
+    from glb_export import write_glb
 from pathlib import Path
 from typing import Iterable
 
@@ -546,7 +554,10 @@ def convert_xet_texture(source: Path, destination: Path):
 
 def classify_material_textures(textures):
     for texture in textures:
-        stats = texture.get("conversion", {}).get("content", {})
+        if not texture.get("conversion"):
+            texture["role"] = "unresolved"
+            continue
+        stats = texture["conversion"].get("content", {})
         if stats.get("blue_normal_ratio", 0.0) >= 0.80:
             texture["role"] = "normal"
         elif stats.get("red_mask_ratio", 0.0) >= 0.60:
@@ -751,7 +762,7 @@ def write_obj(
     materials_by_index = {material["index"]: material for material in materials}
     with path.open("w", encoding="utf-8", newline="\n") as f:
         f.write("# Experimental DDM geometry decoder\n")
-        f.write("# Primitive code 4 interpreted as triangle strips.\n")
+        f.write("# Primitive codes: 3 = triangle lists, 4 = triangle strips.\n")
         f.write(f"# Source positions multiplied by {scale:.9g}.\n")
         f.write("mtllib materials.mtl\n")
         f.write(f"o {object_name}\n")
@@ -1118,14 +1129,17 @@ def build_mesh_parts(indices, submeshes):
     cursor = 0
 
     for submesh_index, submesh in enumerate(submeshes):
-        if submesh["primitive"] != 4:
+        if submesh["primitive"] not in (3, 4):
             raise RuntimeError(
                 f'Unsupported primitive code {submesh["primitive"]} '
                 f"in submesh {submesh_index}."
             )
 
-        # For an ordinary triangle strip, N primitives require N + 2 indices.
-        index_count = submesh["primitive_count"] + 2
+        # Lists use three indices per primitive; strips use N + 2 indices.
+        index_count = (
+            submesh["primitive_count"] * 3 if submesh["primitive"] == 3
+            else submesh["primitive_count"] + 2
+        )
         descriptor_first_index = submesh["first_index_field_0x34"]
         if 0 <= descriptor_first_index <= len(indices) - index_count:
             first_index = descriptor_first_index
@@ -1143,7 +1157,8 @@ def build_mesh_parts(indices, submeshes):
 
         local_limit = submesh["vertex_count"]
         invalid = [value for value in local_indices if value >= local_limit]
-        local_triangles, strip_diag = triangle_strip(
+        decode_triangles = triangle_list if submesh["primitive"] == 3 else triangle_strip
+        local_triangles, strip_diag = decode_triangles(
             local_indices,
             local_limit,
         )
@@ -1171,12 +1186,103 @@ def build_mesh_parts(indices, submeshes):
     return parts, cursor
 
 
+def find_map_geometry_sections(data: bytes):
+    """Detect the observed map layout, validating complete vertex/index partitions.
+
+    Map sections use 0x3C-byte descriptors, a variable first word, and an
+    explicit index count at +0x38. Their streams have the same encoding as
+    character meshes. Never infer a section from the header signature alone.
+    """
+    sections = []
+    search = 0
+    while True:
+        off = data.find(struct.pack(">I", 7), search)
+        if off < 0 or off + 16 > len(data):
+            break
+        search = off + 1
+        _, vertex_count, buffers, index_count = struct.unpack_from(">4I", data, off)
+        if buffers != 1 or vertex_count < 3 or index_count < 3:
+            continue
+        attribute_offset = off + 16 + index_count * 2
+        position_offset = attribute_offset + vertex_count * ATTRIBUTE_STRIDE - 4
+        position_end = position_offset + vertex_count * POSITION_STRIDE
+        if position_end + 64 > len(data):
+            continue
+        # The first map descriptor starts after the trailing position word.
+        descriptor_offset = position_end + 4
+        if be_u32(data, descriptor_offset) != 0xFFFFFFFF:
+            continue
+        submeshes = []
+        base = first_index = 0
+        while base < vertex_count and descriptor_offset + 60 <= len(data):
+            words = struct.unpack_from(">15I", data, descriptor_offset)
+            primitive, primitives, local_base, count, material = words[1:6]
+            if primitive not in (3, 4):
+                break
+            count_indices = primitives * 3 if primitive == 3 else primitives + 2
+            if (local_base != base or count == 0 or base + count > vertex_count
+                    or material > 256 or words[13] != first_index
+                    or words[14] != count_indices
+                    or first_index + count_indices > index_count):
+                break
+            submeshes.append({
+                "offset": descriptor_offset,
+                "field00": words[0],
+                "primitive": primitive,
+                "primitive_count": primitives,
+                "base_vertex": base,
+                "vertex_count": count,
+                "material_index": material,
+                "first_index_field_0x34": first_index,
+                "descriptor_stride": 60,
+            })
+            base += count
+            first_index += count_indices
+            descriptor_offset += 60
+        if base != vertex_count or first_index != index_count:
+            continue
+        score, diagnostics = score_position_stream(data, position_offset, vertex_count)
+        if (diagnostics.get("finite_ratio") != 1.0
+                or diagnostics.get("uv_reasonable_ratio") != 1.0):
+            continue
+        indices = decode_u16_buffer(data, off + 16, index_count)
+        if any(
+            value >= sm["vertex_count"]
+            for sm in submeshes
+            for value in indices[sm["first_index_field_0x34"]:
+                sm["first_index_field_0x34"] + (
+                    sm["primitive_count"] * 3 if sm["primitive"] == 3
+                    else sm["primitive_count"] + 2)]
+        ):
+            continue
+        sections.append({
+            "offset": off,
+            "vertex_attribute_count": 7,
+            "vertex_count": vertex_count,
+            "index_buffer_count": 1,
+            "index_count": index_count,
+            "index_offset": off + 16,
+            "index_end": attribute_offset,
+            "gap_to_attribute16": 0,
+            "attribute16_offset": attribute_offset,
+            "position_offset": position_offset,
+            "position_end": position_end,
+            "position_stream_score": score,
+            "position_diagnostics": diagnostics,
+            "submeshes": submeshes,
+        })
+        search = descriptor_offset
+    return sections
+
+
 def analyze_file(
     path: Path,
     out_root: Path,
     args,
     relative_path: Path | None = None,
 ):
+    export_format = getattr(args, "format", "glb")
+    image_data = {}
     data = path.read_bytes()
 
     if len(data) < 8 or data[:4] != MAGIC:
@@ -1194,80 +1300,123 @@ def analyze_file(
 
     periodic = find_periodic_marker_run(data)
 
-    if args.vertex_count is not None:
-        vertex_count = args.vertex_count
-    elif periodic:
-        vertex_count = periodic["vertex_count"]
+    overrides = any(value is not None for value in (
+        args.vertex_count, args.position_offset, args.index_offset, args.index_count,
+    ))
+    sections = [] if overrides else find_map_geometry_sections(data)
+    if sections:
+        vertices, attributes, indices, submeshes = [], [], [], []
+        for section_index, section in enumerate(sections):
+            vertex_base, index_base = len(vertices), len(indices)
+            section_vertices = decode_vertices24(
+                data, section["position_offset"], section["vertex_count"],
+            )
+            section_attributes = decode_vertices16(
+                data, section["attribute16_offset"], section["vertex_count"],
+            )
+            for vertex, attribute in zip(section_vertices, section_attributes):
+                vertex["index"] += vertex_base
+                vertex.update({
+                    "normal": attribute["normal"],
+                    "tangent": attribute["tangent"],
+                    "bitangent": attribute["bitangent"],
+                    "attribute_marker": attribute["marker"],
+                })
+            vertices.extend(section_vertices)
+            attributes.extend(section_attributes)
+            indices.extend(decode_u16_buffer(
+                data, section["index_offset"], section["index_count"],
+            ))
+            for sm in section["submeshes"]:
+                submeshes.append(sm | {
+                    "section_index": section_index,
+                    "base_vertex": sm["base_vertex"] + vertex_base,
+                    "first_index_field_0x34": sm["first_index_field_0x34"] + index_base,
+                })
+        header = sections[0]
+        vertex_count, index_count = len(vertices), len(indices)
+        position_offset = header["position_offset"]
+        position_end = sections[-1]["position_end"]
+        index_offset = header["index_offset"]
+        attribute16_offset = header["attribute16_offset"]
+        detected_attribute16_offset = attribute16_offset
+        score = min(section["position_stream_score"] for section in sections)
+        position_diag = {"sections": [s["position_diagnostics"] for s in sections]}
     else:
-        raise RuntimeError("Could not auto-detect vertex count; use --vertex-count.")
+        if args.vertex_count is not None:
+            vertex_count = args.vertex_count
+        elif periodic:
+            vertex_count = periodic["vertex_count"]
+        else:
+            raise RuntimeError("Could not auto-detect vertex count; use --vertex-count.")
 
-    if args.position_offset is not None:
-        position_offset = args.position_offset
-    elif periodic:
-        position_offset = periodic["position_offset"]
-    else:
-        raise RuntimeError("Could not auto-detect position stream; use --position-offset.")
+        if args.position_offset is not None:
+            position_offset = args.position_offset
+        elif periodic:
+            position_offset = periodic["position_offset"]
+        else:
+            raise RuntimeError("Could not auto-detect position stream; use --position-offset.")
 
-    score, position_diag = score_position_stream(
-        data, position_offset, vertex_count
-    )
-
-    if score < 0:
-        raise RuntimeError(
-            f"Position stream candidate 0x{position_offset:X} is invalid."
+        score, position_diag = score_position_stream(
+            data, position_offset, vertex_count
         )
 
-    vertices = decode_vertices24(data, position_offset, vertex_count)
+        if score < 0:
+            raise RuntimeError(
+                f"Position stream candidate 0x{position_offset:X} is invalid."
+            )
 
-    attribute16_offset = (
-        periodic["attribute16_offset"] if periodic else None
-    )
+        vertices = decode_vertices24(data, position_offset, vertex_count)
 
-    # Geometry/index header.
-    header = None
-    if args.index_offset is None or args.index_count is None:
-        header = find_geometry_header(
+        attribute16_offset = (
+            periodic["attribute16_offset"] if periodic else None
+        )
+
+        # Geometry/index header.
+        header = None
+        if args.index_offset is None or args.index_count is None:
+            header = find_geometry_header(
+                data,
+                vertex_count,
+                attribute16_offset if attribute16_offset is not None else position_offset,
+            )
+
+        index_offset = args.index_offset
+        index_count = args.index_count
+
+        if index_offset is None and header:
+            index_offset = header["index_offset"]
+        if index_count is None and header:
+            index_count = header["index_count"]
+
+        if index_offset is None or index_count is None:
+            raise RuntimeError("Could not locate the index buffer.")
+
+        indices = decode_u16_buffer(data, index_offset, index_count)
+        if len(indices) != index_count:
+            raise RuntimeError("The detected index buffer exceeds the file.")
+
+        detected_attribute16_offset = index_offset + index_count * 2
+        if attribute16_offset is None:
+            attribute16_offset = detected_attribute16_offset
+        attributes = decode_vertices16(data, attribute16_offset, vertex_count)
+        for vertex, attribute in zip(vertices, attributes):
+            vertex.update({
+                "normal": attribute["normal"],
+                "tangent": attribute["tangent"],
+                "bitangent": attribute["bitangent"],
+                "attribute_marker": attribute["marker"],
+            })
+
+        # Search descriptors after the position stream.
+        position_end = position_offset + vertex_count * POSITION_STRIDE
+        submeshes = find_submesh_descriptors(
             data,
             vertex_count,
-            attribute16_offset if attribute16_offset is not None else position_offset,
+            max(0, position_end - 0x20),
         )
-
-    index_offset = args.index_offset
-    index_count = args.index_count
-
-    if index_offset is None and header:
-        index_offset = header["index_offset"]
-    if index_count is None and header:
-        index_count = header["index_count"]
-
-    if index_offset is None or index_count is None:
-        raise RuntimeError("Could not locate the index buffer.")
-
-    indices = decode_u16_buffer(data, index_offset, index_count)
-    if len(indices) != index_count:
-        raise RuntimeError("The detected index buffer exceeds the file.")
-
-    detected_attribute16_offset = index_offset + index_count * 2
-    if attribute16_offset is None:
-        attribute16_offset = detected_attribute16_offset
-    attributes = decode_vertices16(data, attribute16_offset, vertex_count)
-    for vertex, attribute in zip(vertices, attributes):
-        vertex.update({
-            "normal": attribute["normal"],
-            "tangent": attribute["tangent"],
-            "bitangent": attribute["bitangent"],
-            "attribute_marker": attribute["marker"],
-        })
-
-    # Search descriptors after the position stream.
-    position_end = position_offset + vertex_count * POSITION_STRIDE
-    submeshes = find_submesh_descriptors(
-        data,
-        vertex_count,
-        max(0, position_end - 0x20),
-    )
-    if not submeshes:
-        raise RuntimeError("No submesh descriptor found.")
+        if not submeshes:
+            raise RuntimeError("No submesh descriptor found.")
 
     material_count = max(
         submesh["material_index"] for submesh in submeshes
@@ -1290,12 +1439,23 @@ def analyze_file(
             for material_index in range(material_count)
         ]
     if not args.no_textures:
-        materials = resolve_material_textures(
-            materials,
-            path,
-            out_dir,
-            args.texture_root,
-        )
+        if export_format == "glb":
+            # GLB embeds PNGs; keep intermediate conversions outside the output.
+            with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:
+                texture_output = Path(temp)
+                materials = resolve_material_textures(
+                    materials, path, texture_output, args.texture_root,
+                )
+                for material in materials:
+                    for texture in material.get("textures", []):
+                        output = texture.get("output")
+                        if output:
+                            image_data[output] = (texture_output / output).read_bytes()
+                            texture["embedded_in_glb"] = texture["role"] in ("diffuse", "normal")
+        else:
+            materials = resolve_material_textures(
+                materials, path, out_dir, args.texture_root,
+            )
     else:
         for material in materials:
             material["textures"] = []
@@ -1320,9 +1480,11 @@ def analyze_file(
         "file_size": len(data),
         "version": version,
         "auto_periodic_detection": periodic,
+        "geometry_sections": sections,
         "vertex_count": vertex_count,
         "position_offset": position_offset,
         "position_stride": POSITION_STRIDE,
+        "streams_are_contiguous": len(sections) <= 1,
         "attribute16_offset": attribute16_offset,
         "attribute16_stride": ATTRIBUTE_STRIDE,
         "attribute16_boundary_matches_index_end": (
@@ -1391,7 +1553,7 @@ def analyze_file(
         except Exception:
             pass
 
-    mesh_path = out_dir / f"{path.stem}.obj"
+    mesh_path = out_dir / f"{path.stem}.{export_format}"
     legacy_mesh_path = out_dir / "mesh.obj"
     optional_outputs = (
         out_dir / "positions_only.obj",
@@ -1422,15 +1584,20 @@ def analyze_file(
         )
         write_indices(out_dir / "indices.csv", indices)
 
-    write_mtl(out_dir / "materials.mtl", materials)
-    write_obj(
-        mesh_path,
-        vertices,
-        mesh_parts,
-        materials,
-        path.stem,
-        args.scale,
-    )
+    if export_format == "glb":
+        object_mode = getattr(args, "object_mode", "auto")
+        if object_mode == "auto":
+            object_mode = "connected" if sections else "single"
+        report["glb_export"] = write_glb(
+            mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
+            mode=object_mode, image_data=image_data,
+            roughness=getattr(args, "roughness", 0.8),
+        )
+    else:
+        write_mtl(out_dir / "materials.mtl", materials)
+        write_obj(
+            mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
+        )
 
     for part in mesh_parts:
         topology = topology_stats(vertices, part["triangles"])
@@ -1456,6 +1623,8 @@ def analyze_file(
 
     print(f"\n[{path.name}]")
     print(f"  version          : {version}")
+    if sections:
+        print(f"  geometry sections: {len(sections)}")
     print(f"  vertices         : {vertex_count}")
     print(f"  position stream  : 0x{position_offset:X}")
     print(f"  position end     : 0x{position_end:X}")
@@ -1527,7 +1696,17 @@ def analyze_file(
         f'median={normals.get("median_dot", 0.0):.6f}'
     )
 
-    print(f"  output           : {out_dir}")
+    if "glb_export" in report:
+        glb = report["glb_export"]
+        print(f"  GLB objects      : {glb['object_count']} ({glb['separation']})")
+        print(f"  GLB meshes       : {glb['mesh_count']}")
+        print(f"  GLB triangles    : {glb['triangle_count']}")
+        print(
+            "  removed overlays : "
+            f"{glb['removed_normal_only_surface_passes']} normal-only, "
+            f"{glb['removed_exact_duplicate_faces']} exact duplicates"
+        )
+    print(f"  output           : {mesh_path}")
 
 
 def parse_int(value: str):
@@ -1559,10 +1738,26 @@ def iter_input_files(path: Path, recursive: bool = False):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Experimental PS3 DDM to OBJ/MTL converter"
+        description="Experimental PS3 DDM to GLB or OBJ/MTL converter"
     )
     ap.add_argument("input", type=Path, help="DDM file or directory")
     ap.add_argument("output", type=Path, help="Output directory")
+    ap.add_argument("--format", choices=("glb", "obj"), default="glb",
+                    help="Export format (default: self-contained GLB).")
+    ap.add_argument("--object-mode", choices=("auto", "connected", "submeshes", "single"),
+                    default="auto", help=(
+                        "GLB object separation: auto splits map geometry into connected "
+                        "components and keeps character models together. Components "
+                        "are reconstructed, not original DDM authoring instances."))
+    ap.add_argument(
+        "--roughness",
+        type=float,
+        default=0.8,
+        help=(
+            "GLB PBR roughness (default: 0.8, suitable for dry map surfaces). "
+            "Use a negative value to derive it from legacy Phong shininess."
+        ),
+    )
     ap.add_argument(
         "-r",
         "--recursive",
@@ -1580,7 +1775,7 @@ def main():
         type=parse_bool,
         metavar="BOOL",
         help=(
-            "Generate only the named OBJ, its required MTL, and textures. "
+            "Generate only the GLB, or OBJ/MTL/textures with --format obj. "
             "Diagnostic OBJ/CSV/JSON files are omitted. Accepts true/false; "
             "using --final without a value means true."
         ),
@@ -1590,7 +1785,7 @@ def main():
         type=float,
         default=DEFAULT_EXPORT_SCALE,
         help=(
-            "Multiplier applied to exported OBJ positions. The default "
+            "Multiplier applied to exported positions. The default "
             f"({DEFAULT_EXPORT_SCALE}) converts the observed centimeter-like "
             "DDM coordinates to meters."
         ),
@@ -1627,6 +1822,10 @@ def main():
     args = ap.parse_args()
     if not math.isfinite(args.scale) or args.scale <= 0.0:
         ap.error("--scale must be a finite number greater than zero.")
+    if not math.isfinite(args.roughness) or args.roughness > 1.0:
+        ap.error("--roughness must be at most 1.0 (negative means Phong-derived).")
+    if args.roughness < 0.0:
+        args.roughness = None
     args.output.mkdir(parents=True, exist_ok=True)
 
     processed = 0
