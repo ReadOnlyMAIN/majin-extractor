@@ -311,3 +311,283 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
             'triangle_count': sum(len(p['triangles']) for p in mesh_parts),
             'separation': mode, 'embedded_image_count': len(doc.get('images', [])),
             **filtering}
+
+
+def _joint_global_matrices(joints, scale):
+    """Build row-major global bind matrices from glTF-order XYZW quaternions."""
+    globals_ = [None] * len(joints)
+
+    def matrix_for(index):
+        if globals_[index] is not None:
+            return globals_[index]
+        joint = joints[index]
+        x, y, z, w = joint['rotation']
+        tx, ty, tz = (value * scale for value in joint['translation'])
+        local = [
+            1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w), tx,
+            2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w), ty,
+            2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y), tz,
+            0.0, 0.0, 0.0, 1.0,
+        ]
+        parent = joint['parent']
+        if parent is None:
+            result = local
+        else:
+            a, b = matrix_for(parent), local
+            result = [
+                sum(a[row*4+k] * b[k*4+column] for k in range(4))
+                for row in range(4) for column in range(4)
+            ]
+        globals_[index] = result
+        return result
+
+    return [matrix_for(index) for index in range(len(joints))]
+
+
+def _inverse_rigid_matrix_column_major(matrix):
+    rotation_t = [[matrix[column*4+row] for column in range(3)] for row in range(3)]
+    translation = matrix[3], matrix[7], matrix[11]
+    inverse_translation = [
+        -sum(rotation_t[row][column] * translation[column] for column in range(3))
+        for row in range(3)
+    ]
+    row_major = [
+        rotation_t[0][0], rotation_t[0][1], rotation_t[0][2], inverse_translation[0],
+        rotation_t[1][0], rotation_t[1][1], rotation_t[1][2], inverse_translation[1],
+        rotation_t[2][0], rotation_t[2][1], rotation_t[2][2], inverse_translation[2],
+        0.0, 0.0, 0.0, 1.0,
+    ]
+    return [row_major[row*4+column] for column in range(4) for row in range(4)]
+
+
+def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
+                      object_name, scale, image_data=None, roughness=0.8):
+    """Write one skinned glTF mesh with joints, weights and bind matrices."""
+    if not vertices or not mesh_parts or not skeleton.get('joints'):
+        raise ValueError('Skinned GLB requires vertices, triangles, and joints.')
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError('GLB scale must be finite and positive.')
+    if roughness is not None and (not math.isfinite(roughness) or not 0 <= roughness <= 1):
+        raise ValueError('GLB roughness must be between zero and one.')
+    image_data = image_data or {}
+    doc = {
+        'asset': {'version': '2.0', 'generator': 'majin-extractor'},
+        'scene': 0, 'scenes': [{'name': object_name, 'nodes': []}],
+        'nodes': [], 'meshes': [], 'materials': [], 'skins': [],
+        'buffers': [], 'bufferViews': [], 'accessors': [],
+    }
+    binary = bytearray()
+
+    def view(payload, target=None):
+        binary.extend(b'\0' * (-len(binary) % 4))
+        item = {'buffer': 0, 'byteOffset': len(binary), 'byteLength': len(payload)}
+        if target is not None:
+            item['target'] = target
+        binary.extend(payload)
+        doc['bufferViews'].append(item)
+        return len(doc['bufferViews']) - 1
+
+    def accessor(payload, count, kind, component=5126, bounds=None, target=None):
+        item = {'bufferView': view(payload, target), 'componentType': component,
+                'count': count, 'type': kind}
+        if bounds is not None:
+            item.update(min=bounds[0], max=bounds[1])
+        doc['accessors'].append(item)
+        return len(doc['accessors']) - 1
+
+    texture_cache = {}
+
+    def texture_index(output):
+        if output not in texture_cache:
+            payload = image_data.get(output)
+            if payload is None:
+                payload = (path.parent / output).read_bytes()
+            if not payload.startswith(b'\x89PNG\r\n\x1a\n'):
+                raise ValueError(f'Expected a PNG texture: {output}')
+            images = doc.setdefault('images', [])
+            textures = doc.setdefault('textures', [])
+            images.append({'bufferView': view(payload), 'mimeType': 'image/png',
+                           'name': output})
+            textures.append({'source': len(images) - 1})
+            texture_cache[output] = len(textures) - 1
+        return texture_cache[output]
+
+    material_indices = {}
+    materials_by_index = {material['index']: material for material in materials}
+    for material in materials:
+        phong = material.get('phong') or {}
+        diffuse = [min(1.0, max(0.0, x)) for x in phong.get('diffuse', [1, 1, 1])]
+        derived = (material.get('pbr_estimate') or {}).get('roughness', 1.0)
+        exported = derived if roughness is None else roughness
+        pbr = {'baseColorFactor': diffuse + [1.0], 'metallicFactor': 0.0,
+               'roughnessFactor': exported}
+        item = {
+            'name': material.get('name', f"material_{material['index']}"),
+            'pbrMetallicRoughness': pbr,
+            'extras': {
+                'ddm_material_index': material['index'],
+                'legacy_phong': phong,
+                'roughness': {'exported': exported,
+                              'derived_from_phong_shininess': derived,
+                              'source': 'phong_shininess' if roughness is None else 'export_override'},
+            },
+        }
+        for texture in material.get('textures', []):
+            output, role = texture.get('output'), texture.get('role')
+            if not output or role not in ('diffuse', 'normal'):
+                continue
+            info = {'index': texture_index(output)}
+            if role == 'diffuse':
+                pbr['baseColorTexture'] = info
+            else:
+                item['normalTexture'] = info
+        material_indices[material['index']] = len(doc['materials'])
+        doc['materials'].append(item)
+
+    joints = skeleton['joints']
+    for joint in joints:
+        doc['nodes'].append({
+            'name': joint['name'],
+            'translation': [value * scale for value in joint['translation']],
+            'rotation': list(joint['rotation']),
+            'extras': {'ddm_global_bone_id': joint['global_id']},
+        })
+    roots = []
+    for index, joint in enumerate(joints):
+        parent = joint['parent']
+        if parent is None:
+            roots.append(index)
+        else:
+            doc['nodes'][parent].setdefault('children', []).append(index)
+    global_matrices = _joint_global_matrices(joints, scale)
+    inverse_bind = b''.join(
+        struct.pack('<16f', *_inverse_rigid_matrix_column_major(matrix))
+        for matrix in global_matrices
+    )
+    inverse_accessor = accessor(
+        inverse_bind, len(joints), 'MAT4', target=None,
+    )
+    doc['skins'].append({
+        'name': f'{object_name}_skeleton',
+        'inverseBindMatrices': inverse_accessor,
+        'joints': list(range(len(joints))),
+        'skeleton': roots[0] if len(roots) == 1 else roots[0],
+    })
+
+    primitives = []
+    surfaces = defaultdict(list)
+    for part in mesh_parts:
+        signature = tuple(
+            tuple(
+                (
+                    tuple(vertices[index]['position']),
+                    tuple(vertices[index]['normal']),
+                    tuple(vertices[index]['tangent']),
+                    tuple(vertices[index]['bitangent']),
+                    tuple(vertices[index]['uv']),
+                    tuple(vertices[index]['joints']),
+                    tuple(vertices[index]['weights']),
+                    vertices[index].get('color'),
+                )
+                for index in triangle
+            )
+            for triangle in part['triangles']
+        )
+        surfaces[signature].append(part)
+    variant_indices = {}
+    exported_triangle_count = 0
+    for _surface_signature, surface_parts in surfaces.items():
+        triangles = surface_parts[0]['triangles']
+        surface_materials = [part['material_index'] for part in surface_parts]
+        material = surface_materials[0]
+        exported_triangle_count += len(triangles)
+        used = sorted({index for triangle in triangles for index in triangle})
+        remap = {index: local for local, index in enumerate(used)}
+        positions, normals, tangents, uvs, colors, joint_values, weights = (
+            [], [], [], [], [], [], []
+        )
+        for index in used:
+            vertex = vertices[index]
+            positions.append(tuple(value * scale for value in vertex['position']))
+            normal = normalized(vertex['normal'])
+            normals.append(normal)
+            tangents.append(tangent_frame(vertex, normal))
+            uvs.append(vertex['uv'])
+            color = vertex.get('color', 0xFFFFFFFF)
+            colors.append(tuple(((color >> shift) & 255) / 255 for shift in (24, 16, 8, 0)))
+            joint_values.append(vertex['joints'])
+            weights.append(vertex['weights'])
+        if not all(math.isfinite(x) for values in (positions, normals, tangents, uvs, weights)
+                   for value in values for x in value):
+            raise ValueError('Non-finite skinned vertex attribute.')
+        position_bytes = b''.join(struct.pack('<3f', *value) for value in positions)
+        float_positions = list(struct.iter_unpack('<3f', position_bytes))
+        bounds = [[fn(p[axis] for p in float_positions) for axis in range(3)]
+                  for fn in (min, max)]
+        attributes = {
+            'POSITION': accessor(position_bytes, len(used), 'VEC3', bounds=bounds, target=34962),
+            'NORMAL': accessor(b''.join(struct.pack('<3f', *v) for v in normals), len(used), 'VEC3', target=34962),
+            'TANGENT': accessor(b''.join(struct.pack('<4f', *v) for v in tangents), len(used), 'VEC4', target=34962),
+            'TEXCOORD_0': accessor(b''.join(struct.pack('<2f', *v) for v in uvs), len(used), 'VEC2', target=34962),
+            'COLOR_0': accessor(b''.join(struct.pack('<4f', *v) for v in colors), len(used), 'VEC4', target=34962),
+            'JOINTS_0': accessor(b''.join(struct.pack('<4H', *v) for v in joint_values), len(used), 'VEC4', 5123, target=34962),
+            'WEIGHTS_0': accessor(b''.join(struct.pack('<4f', *v) for v in weights), len(used), 'VEC4', target=34962),
+        }
+        local_indices = [remap[index] for triangle in triangles for index in triangle]
+        index_accessor = accessor(
+            struct.pack(f'<{len(local_indices)}I', *local_indices),
+            len(local_indices), 'SCALAR', 5125, target=34963,
+        )
+        primitive = {
+            'attributes': attributes,
+            'indices': index_accessor,
+            'material': material_indices[material],
+            'mode': 4,
+        }
+        if len(surface_materials) > 1:
+            mappings = []
+            variants = doc.setdefault('extensions', {}).setdefault(
+                'KHR_materials_variants', {'variants': []},
+            )['variants']
+            for variant_material in surface_materials[1:]:
+                if variant_material not in variant_indices:
+                    variant_indices[variant_material] = len(variants)
+                    variant = materials_by_index[variant_material]
+                    variants.append({'name': variant.get(
+                        'name', f'material_{variant_material}'
+                    )})
+                mappings.append({
+                    'material': material_indices[variant_material],
+                    'variants': [variant_indices[variant_material]],
+                })
+            primitive['extensions'] = {
+                'KHR_materials_variants': {'mappings': mappings},
+            }
+            if 'KHR_materials_variants' not in doc.setdefault('extensionsUsed', []):
+                doc['extensionsUsed'].append('KHR_materials_variants')
+        primitives.append(primitive)
+    doc['meshes'].append({'name': f'{object_name}_mesh', 'primitives': primitives})
+    mesh_node = len(doc['nodes'])
+    doc['nodes'].append({'name': object_name, 'mesh': 0, 'skin': 0})
+    doc['scenes'][0]['nodes'] = roots + [mesh_node]
+    doc['buffers'] = [{'byteLength': len(binary)}]
+    json_bytes = json.dumps(doc, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    json_bytes += b' ' * (-len(json_bytes) % 4)
+    binary.extend(b'\0' * (-len(binary) % 4))
+    total = 12 + 8 + len(json_bytes) + 8 + len(binary)
+    with path.open('wb') as stream:
+        stream.write(struct.pack('<4sII', b'glTF', 2, total))
+        stream.write(struct.pack('<I4s', len(json_bytes), b'JSON'))
+        stream.write(json_bytes)
+        stream.write(struct.pack('<I4s', len(binary), b'BIN\0'))
+        stream.write(binary)
+    return {
+        'object_count': 1,
+        'mesh_count': 1,
+        'triangle_count': exported_triangle_count,
+        'source_triangle_count': sum(len(part['triangles']) for part in mesh_parts),
+        'joint_count': len(joints),
+        'embedded_image_count': len(doc.get('images', [])),
+        'animation_count': 0,
+        'material_variant_count': len(variant_indices),
+    }

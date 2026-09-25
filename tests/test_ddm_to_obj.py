@@ -101,6 +101,75 @@ class MapGeometryTests(unittest.TestCase):
         ddm.classify_material_textures([texture])
         self.assertEqual(texture['role'], 'unresolved')
 
+    def test_skinned_layout_is_identified_before_static_stream_heuristics(self):
+        data = bytearray(ddm.MAGIC + struct.pack('>I', 3))
+        data.extend(b'\0' * 24)
+        offset = len(data)
+        data.extend(struct.pack('>6I', 2, 1, 8, 891, 32, 2204))
+        data.extend(b'\0' * (2204 * 2 + 891 * 44))
+        header = ddm.find_skinned_geometry_header(data)
+        self.assertEqual(header, {
+            'offset': offset,
+            'section_count': 2,
+            'first_submesh_count': 1,
+            'vertex_attribute_count': 8,
+            'vertex_count': 891,
+            'bone_palette_count': 32,
+            'vertex_stride': 28,
+            'index_count': 2204,
+        })
+        args = SimpleNamespace(
+            vertex_count=None, position_offset=None, index_offset=None,
+            index_count=None, no_textures=True, texture_root=None,
+            final=True, scale=0.01,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / 'skinned'
+            source.write_bytes(data)
+            output = Path(root) / 'out'
+            with self.assertRaisesRegex(RuntimeError, 'skeleton transform count'):
+                ddm.analyze_file(source, output, args)
+            self.assertFalse((output / 'skinned').exists())
+
+    def test_empty_output_cleanup_never_removes_nonempty_parent(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / 'output'
+            parent = output / 'character'
+            failed = parent / 'failed'
+            failed.mkdir(parents=True)
+            marker = parent / 'successful.glb'
+            marker.write_bytes(b'glTF')
+            ddm.prune_empty_output_directories(failed, output)
+            self.assertFalse(failed.exists())
+            self.assertEqual(marker.read_bytes(), b'glTF')
+
+    def test_external_motion_boundary_table_is_detected(self):
+        with tempfile.TemporaryDirectory() as root:
+            kb = Path(root) / 'KB'
+            model = kb / 'chara/chr300/chr300'
+            sequence = kb / 'motionSequence/chr300/chr300'
+            package = kb / 'motionPackage/chr300/BigEndian/chr300'
+            for path in (model, sequence, package):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            model.write_bytes(b'')
+            # Three relative boundaries describe two clips. The last boundary
+            # is the end-of-file sentinel.
+            motion = bytearray(0xC0)
+            struct.pack_into('>I3I', motion, 0x80, 3, 0x20, 0x30, 0x40)
+            motion[0xA0] = 3
+            # A two-byte header plus two hierarchy words precede the IDs;
+            # equivalently the ID table begins at clip + 2 * bone_count.
+            motion[0xA6:0xA9] = bytes((7, 3, 9))
+            sequence.write_bytes(motion)
+            package.write_bytes(b'\0crg' + struct.pack('>2I', 2, 9))
+            result = ddm.find_external_character_motion(model)
+            self.assertEqual(result['clip_count'], 2)
+            self.assertEqual(result['first_clip_offset'], 0xA0)
+            self.assertEqual(result['sequence_end_offset'], 0xC0)
+            self.assertEqual(result['skeleton_bone_ids'], [7, 3, 9])
+            self.assertEqual(result['package_entry_count'], 9)
+            self.assertFalse(result['decoded'])
+
 
 if __name__ == '__main__':
     unittest.main()

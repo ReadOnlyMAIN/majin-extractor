@@ -11,6 +11,7 @@ from tools.conversion.glb_export import (
     split_objects,
     tangent_frame,
     write_glb,
+    write_skinned_glb,
 )
 
 
@@ -42,8 +43,9 @@ def read_glb(path):
 def values(doc, blob, index):
     acc = doc['accessors'][index]
     view = doc['bufferViews'][acc['bufferView']]
-    width = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4}[acc['type']]
-    fmt = '<' + str(width) + ('I' if acc['componentType'] == 5125 else 'f')
+    width = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4, 'MAT4': 16}[acc['type']]
+    component = {5123: 'H', 5125: 'I', 5126: 'f'}[acc['componentType']]
+    fmt = '<' + str(width) + component
     stride = struct.calcsize(fmt)
     assert acc['count'] * stride == view['byteLength']
     rows = [struct.unpack_from(fmt, blob, view['byteOffset'] + i * stride) for i in range(acc['count'])]
@@ -54,6 +56,51 @@ def values(doc, blob, index):
 
 
 class GlbExportTests(unittest.TestCase):
+    def test_skinned_export_contains_bind_matrices_weights_and_material_variant(self):
+        vertices = [vertex(p) for p in (
+            (0, 0, 0), (1, 0, 0), (0, 1, 0),
+            (0, 0, 0), (1, 0, 0), (0, 1, 0),
+        )]
+        for item in vertices:
+            item.update(tangent=(1, 0, 0), bitangent=(0, 1, 0),
+                        joints=(0, 1, 0, 0), weights=(0.75, 0.25, 0, 0))
+        parts = [part(0, [(0, 1, 2)], 3), part(1, [(3, 4, 5)], 7)]
+        materials = [
+            {'index': 3, 'name': 'default'},
+            {'index': 7, 'name': 'leader'},
+        ]
+        skeleton = {'joints': [
+            {'name': 'root', 'global_id': 0, 'parent': None,
+             'translation': (1, 2, 3), 'rotation': (0, 0, 0, 1)},
+            {'name': 'child', 'global_id': 1, 'parent': 0,
+             'translation': (0, 1, 0), 'rotation': (0, 0, 0, 1)},
+        ]}
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'skin.glb'
+            result = write_skinned_glb(
+                path, vertices, parts, materials, skeleton, 'skin', 0.01,
+            )
+            doc, blob = read_glb(path)
+        self.assertEqual(result['source_triangle_count'], 2)
+        self.assertEqual(result['triangle_count'], 1)
+        self.assertEqual(result['material_variant_count'], 1)
+        self.assertEqual(len(doc['skins']), 1)
+        self.assertEqual(doc['nodes'][0]['children'], [1])
+        self.assertEqual(doc['nodes'][2]['skin'], 0)
+        primitive = doc['meshes'][0]['primitives'][0]
+        self.assertEqual(values(doc, blob, primitive['attributes']['JOINTS_0']),
+                         [(0, 1, 0, 0)] * 3)
+        for weights in values(doc, blob, primitive['attributes']['WEIGHTS_0']):
+            self.assertAlmostEqual(sum(weights), 1.0)
+        matrices = values(doc, blob, doc['skins'][0]['inverseBindMatrices'])
+        self.assertEqual(len(matrices), 2)
+        self.assertNotIn('target', doc['bufferViews'][
+            doc['accessors'][doc['skins'][0]['inverseBindMatrices']]['bufferView']])
+        self.assertEqual(
+            doc['extensions']['KHR_materials_variants']['variants'][0]['name'],
+            'leader',
+        )
+
     def test_removes_coincident_normal_only_pass_and_same_material_duplicates(self):
         vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
         triangle = (0, 1, 2)

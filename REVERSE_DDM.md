@@ -940,16 +940,18 @@ DDM
  ├─ decoded vertex buffers
  ├─ index buffer partitioned by submesh
  ├─ normals/tangents/bitangents
+ ├─ character skeletons, joint indices and skin weights
  ├─ material names and indices
  ├─ legacy Phong Kd/Ka/Ks/Ns and derived roughness metadata
  ├─ resolved XET references converted to PNG
  ├─ JSON/CSV diagnostics
- └─ textured OBJ/MTL grouped by submesh
+ └─ self-contained GLB (or textured OBJ/MTL for static geometry)
 ```
 
-The **minimal geometry decoder works** on `chr300_c01` and `chr310_c01`. The
-next step is to generalize it to other DDM variants and provide a richer glTF
-export than MTL allows.
+Static geometry is decoded for weapons such as `chr300_c01` and `chr310_c01`.
+The skinned character layout is decoded for the undecorated character DDMs,
+including the observed `chr300`, `chr302`, `chr310`, `chr314`, and `chr330`
+variants.
 
 
 ## Map GLB export
@@ -987,3 +989,39 @@ retains standalone normal-only geometry and faces whose attributes differ.
 The final GLB contains 62,128 triangles. Auxiliary shader maps are otherwise
 not represented.
 Specification: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
+
+## Skinned character DDM variant
+
+The undecorated `chara/chr300/chr300` file is a valid skinned DDM v3, rather
+than a scene/prefab that merely points to `chr300_c01`. It contains three
+material records (`tar`, `armor`, and `armor_leader`) and a geometry group at
+0x1ADE. Each section begins with:
+
+```text
+submesh count
+attribute count  = 8
+vertex count
+bone-palette count
+index count
+```
+
+The vertex stream uses a 28-byte record containing position, color, half-float
+UVs, four local bone-palette indices and four normalized byte weights. A
+parallel 16-byte stream supplies normal, tangent and bitangent data. Compact
+bone ID, parent ID, translation and quaternion arrays near offset 0xB0 define
+the bind skeleton. The exporter maps each section's local palette to this
+global skeleton and writes glTF `JOINTS_0`, `WEIGHTS_0`, a node hierarchy and
+inverse bind matrices.
+
+For `chr300`, this produces 2,357 source vertices and 62 joints. The `armor`
+and `armor_leader` surfaces contain the same 719 faces with alternate
+materials; the GLB stores them once and exposes `armor_leader` through
+`KHR_materials_variants`, leaving 2,697 distinct triangles. `chr300_c01`
+remains the separate 367-vertex sword mesh.
+
+No animation stream is embedded in the character DDM. The matching
+`motionSequence/chr300/chr300` resource contains a validated boundary table
+for 152 clips, while `motionPackage/chr300/BigEndian/chr300` contains nine
+package records. These external motion resources are detected and included in
+the analysis report, but their compressed animation tracks are not decoded
+into glTF animation channels yet.

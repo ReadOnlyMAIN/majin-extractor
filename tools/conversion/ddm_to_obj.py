@@ -49,9 +49,9 @@ import struct
 import tempfile
 
 try:
-    from .glb_export import write_glb
+    from .glb_export import write_glb, write_skinned_glb
 except ImportError:
-    from glb_export import write_glb
+    from glb_export import write_glb, write_skinned_glb
 from pathlib import Path
 from typing import Iterable
 
@@ -62,6 +62,10 @@ ATTRIBUTE_STRIDE = 16
 DEFAULT_EXPORT_SCALE = 0.01
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.\\/\-]+$")
 SUBMESH_SIGNATURE = struct.pack(">II", 1, 4)
+
+
+class UnsupportedDDMVariant(RuntimeError):
+    """A valid DDM whose geometry layout is not implemented yet."""
 
 
 def be_u32(data: bytes, off: int) -> int:
@@ -651,6 +655,442 @@ def find_geometry_header(data: bytes, vertex_count: int, before: int):
         "index_end": off + 16 + index_count * 2,
         "gap_to_attribute16": gap,
     }
+
+
+def find_skinned_geometry_header(data: bytes):
+    """Identify the observed eight-attribute character layout.
+
+    Unlike the supported static layout, this header begins with the buffer
+    count and includes an explicit vertex stride. Detection is deliberately
+    strict so arbitrary metadata is never mislabeled as skinned geometry.
+    """
+    signature = struct.pack(">I", 8)
+    search = 8
+    while True:
+        attribute_offset = data.find(signature, search)
+        if attribute_offset < 0:
+            return None
+        search = attribute_offset + 1
+        offset = attribute_offset - 8
+        if offset + 24 > len(data):
+            continue
+        sections, submeshes, attributes, vertices, palette_size, indices = (
+            struct.unpack_from(">6I", data, offset)
+        )
+        if (
+            1 <= sections <= 64
+            and 1 <= submeshes <= 64
+            and attributes == 8
+            and 3 <= vertices <= 1_000_000
+            and 1 <= palette_size <= 256
+            and 3 <= indices <= 10_000_000
+            and offset + 24 + indices * 2 + vertices * 44 <= len(data)
+        ):
+            return {
+                "offset": offset,
+                "section_count": sections,
+                "first_submesh_count": submeshes,
+                "vertex_attribute_count": attributes,
+                "vertex_count": vertices,
+                "bone_palette_count": palette_size,
+                "vertex_stride": 28,
+                "index_count": indices,
+            }
+
+
+def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
+    """Decode the observed compact bone-id/parent/TR layout near DDM offset B0."""
+    if len(data) < 0xB4:
+        raise RuntimeError("Skinned DDM is too small for its skeleton header.")
+    transform_count = be_u32(data, 0xB0)
+    if not 1 <= transform_count <= 1024:
+        raise RuntimeError(f"Invalid skeleton transform count {transform_count}.")
+    id_offset = 0xB4
+    padded_count = (transform_count + 3) & ~3
+    parent_offset = id_offset + padded_count
+    translation_offset = parent_offset + padded_count
+    rotation_offset = translation_offset + transform_count * 16
+    flags_offset = rotation_offset + transform_count * 16
+    if flags_offset + transform_count * 4 > len(data):
+        raise RuntimeError("Skeleton arrays exceed the DDM file.")
+
+    raw_ids = list(data[id_offset:id_offset + padded_count])
+    raw_parents = list(data[parent_offset:parent_offset + transform_count])
+    # Some files insert duplicate zero bytes before their final global ids.
+    # Reading the padded id area and preserving unique values reconstructs the
+    # declared transform count across chr300/302/310/314/330 variants.
+    bone_ids = []
+    seen = set()
+    for bone_id in raw_ids:
+        if bone_id in seen:
+            continue
+        seen.add(bone_id)
+        bone_ids.append(bone_id)
+    if len(bone_ids) != transform_count:
+        raise RuntimeError(
+            f"Skeleton declares {transform_count} transforms but exposes "
+            f"{len(bone_ids)} unique bone ids."
+        )
+    parent_by_id = {
+        bone_id: raw_parents[index]
+        for index, bone_id in enumerate(bone_ids)
+    }
+    if transform_bone_ids is None:
+        transform_bone_ids = bone_ids
+    else:
+        transform_bone_ids = list(transform_bone_ids)
+        if (
+            len(transform_bone_ids) != transform_count
+            or len(set(transform_bone_ids)) != transform_count
+            or set(transform_bone_ids) != set(bone_ids)
+        ):
+            raise RuntimeError(
+                "Motion skeleton order does not match the DDM bone identifiers."
+            )
+    id_to_joint = {
+        bone_id: index for index, bone_id in enumerate(transform_bone_ids)
+    }
+    joints = []
+    for index, bone_id in enumerate(transform_bone_ids):
+        parent_id = parent_by_id[bone_id]
+        if parent_id == 0xFF:
+            parent = None
+        elif parent_id in id_to_joint:
+            parent = id_to_joint[parent_id]
+        else:
+            raise RuntimeError(
+                f"Bone {bone_id} references unknown parent id {parent_id}."
+            )
+        translation = struct.unpack_from(">3f", data, translation_offset + index * 16)
+        rotation = struct.unpack_from(">4f", data, rotation_offset + index * 16)
+        if not finite3(translation) or not all(math.isfinite(x) for x in rotation):
+            raise RuntimeError(f"Bone {bone_id} has a non-finite bind transform.")
+        norm = math.sqrt(sum(x * x for x in rotation))
+        if not 0.99 <= norm <= 1.01:
+            raise RuntimeError(f"Bone {bone_id} has invalid quaternion norm {norm}.")
+        joints.append({
+            "index": index,
+            "global_id": bone_id,
+            "parent": parent,
+            "translation": translation,
+            "rotation": tuple(x / norm for x in rotation),
+            "name": f"bone_{bone_id:03d}",
+        })
+    return {
+        "transform_count": transform_count,
+        "joint_count": len(joints),
+        "joints": joints,
+        "id_to_joint": id_to_joint,
+        "transform_bone_ids": transform_bone_ids,
+    }
+
+
+def decode_skinned_geometry(data: bytes, header, skeleton):
+    """Decode all 8-attribute sections following a skinned geometry group."""
+    group_offset = header["offset"]
+    section_count = be_u32(data, group_offset)
+    if not 1 <= section_count <= 64:
+        raise RuntimeError(f"Invalid skinned section count {section_count}.")
+    cursor = group_offset + 4
+    vertices = []
+    mesh_parts = []
+    sections = []
+    id_to_joint = skeleton["id_to_joint"]
+    for section_index in range(section_count):
+        if cursor + 20 > len(data):
+            if not any(data[cursor:]):
+                break
+            raise RuntimeError("Truncated skinned section header.")
+        descriptor_count, attributes, vertex_count, palette_count, index_count = (
+            struct.unpack_from(">5I", data, cursor)
+        )
+        section_offset = cursor
+        cursor += 20
+        if attributes != 8 or not vertex_count or not index_count:
+            raise RuntimeError(
+                f"Unsupported skinned section layout at 0x{section_offset:X}."
+            )
+        indices = decode_u16_buffer(data, cursor, index_count)
+        if len(indices) != index_count:
+            raise RuntimeError("Skinned index buffer exceeds the file.")
+        index_offset = cursor
+        cursor += index_count * 2
+        attribute_offset = cursor
+        attributes16 = decode_vertices16(data, cursor, vertex_count)
+        cursor += vertex_count * ATTRIBUTE_STRIDE
+        position_offset = cursor
+        section_vertices = []
+        for local_index in range(vertex_count):
+            offset = cursor + local_index * 28
+            if offset + 28 > len(data):
+                raise RuntimeError("Skinned vertex buffer exceeds the file.")
+            position = struct.unpack_from(">3f", data, offset)
+            color = be_u32(data, offset + 12)
+            uv = decode_half2_be(data, offset + 16)
+            palette_indices = tuple(data[offset + 20:offset + 24])
+            raw_weights = tuple(data[offset + 24:offset + 28])
+            if sum(raw_weights) != 255:
+                raise RuntimeError(
+                    f"Skinned vertex {local_index} weights sum to {sum(raw_weights)}."
+                )
+            section_vertices.append({
+                "index": len(vertices) + local_index,
+                "position": position,
+                "color": color,
+                "uv": uv,
+                "normal": attributes16[local_index]["normal"],
+                "tangent": attributes16[local_index]["tangent"],
+                "bitangent": attributes16[local_index]["bitangent"],
+                "joint_palette_indices": palette_indices,
+                "weights": tuple(value / 255.0 for value in raw_weights),
+            })
+        cursor += vertex_count * 28
+        if cursor + palette_count * 4 > len(data):
+            raise RuntimeError("Skinned bone palette exceeds the file.")
+        palette_ids = struct.unpack_from(">" + "I" * palette_count, data, cursor)
+        palette_offset = cursor
+        cursor += palette_count * 4
+        try:
+            palette = tuple(id_to_joint[bone_id] for bone_id in palette_ids)
+        except KeyError as exc:
+            raise RuntimeError(f"Bone palette references unknown id {exc.args[0]}.") from exc
+        for vertex in section_vertices:
+            try:
+                vertex["joints"] = tuple(
+                    palette[index] if weight else 0
+                    for index, weight in zip(
+                        vertex.pop("joint_palette_indices"), vertex["weights"]
+                    )
+                )
+            except IndexError as exc:
+                raise RuntimeError("Vertex joint index exceeds its bone palette.") from exc
+        vertex_base = len(vertices)
+        vertices.extend(section_vertices)
+        section_parts = []
+        for descriptor_index in range(descriptor_count):
+            if cursor + 60 > len(data):
+                raise RuntimeError("Truncated skinned submesh descriptor.")
+            words = struct.unpack_from(">15I", data, cursor)
+            primitive, primitive_count, base, count, material = words[:5]
+            first_index, descriptor_index_count, bone_count = words[12:15]
+            if primitive not in (3, 4):
+                raise RuntimeError(f"Unsupported skinned primitive {primitive}.")
+            expected = primitive_count * 3 if primitive == 3 else primitive_count + 2
+            if descriptor_index_count != expected:
+                raise RuntimeError("Skinned descriptor index count is inconsistent.")
+            local_indices = indices[first_index:first_index + expected]
+            decoder = triangle_list if primitive == 3 else triangle_strip
+            triangles, diagnostics = decoder(local_indices, count)
+            triangles = [
+                (a + base + vertex_base, b + base + vertex_base, c + base + vertex_base)
+                for a, b, c in triangles
+            ]
+            part = {
+                "submesh_index": len(mesh_parts),
+                "section_index": section_index,
+                "descriptor_index": descriptor_index,
+                "material_index": material,
+                "first_index": first_index,
+                "index_count": expected,
+                "triangles": triangles,
+                "strip_diagnostics": diagnostics,
+            }
+            section_parts.append(part)
+            mesh_parts.append(part)
+            cursor += 60
+            if cursor + bone_count * 4 > len(data):
+                raise RuntimeError("Submesh bone list exceeds the file.")
+            part["bone_ids"] = list(struct.unpack_from(">" + "I" * bone_count, data, cursor))
+            cursor += bone_count * 4
+        sections.append({
+            "offset": section_offset,
+            "vertex_count": vertex_count,
+            "index_count": index_count,
+            "index_offset": index_offset,
+            "attribute16_offset": attribute_offset,
+            "position_offset": position_offset,
+            "palette_offset": palette_offset,
+            "palette_ids": list(palette_ids),
+            "submesh_count": descriptor_count,
+        })
+    return {
+        "vertices": vertices,
+        "mesh_parts": mesh_parts,
+        "sections": sections,
+        "end_offset": cursor,
+    }
+
+
+def find_external_character_motion(model_path: Path):
+    """Locate and validate the separate motion files belonging to a character."""
+    kb_root = next(
+        (parent for parent in model_path.parents if parent.name.lower() == "kb"),
+        None,
+    )
+    if kb_root is None:
+        return None
+    name = model_path.stem
+    sequence_path = kb_root / "motionSequence" / name / name
+    package_path = kb_root / "motionPackage" / name / "BigEndian" / name
+    result = {
+        "sequence_path": str(sequence_path) if sequence_path.is_file() else None,
+        "package_path": str(package_path) if package_path.is_file() else None,
+        "clip_count": 0,
+        "package_entry_count": None,
+        "decoded": False,
+    }
+    if sequence_path.is_file():
+        motion = sequence_path.read_bytes()
+        if len(motion) >= 0x88:
+            count = be_u32(motion, 0x80)
+            if 0 < count <= 100_000 and 0x84 + count * 4 <= len(motion):
+                offsets = struct.unpack_from(">" + "I" * count, motion, 0x84)
+                absolute = [0x80 + offset for offset in offsets]
+                if absolute == sorted(absolute) and all(
+                    0x84 + count * 4 <= offset <= len(motion)
+                    for offset in absolute
+                ):
+                    # The table stores clip boundaries, including the EOF
+                    # sentinel as its final entry.
+                    result["clip_count"] = max(0, count - 1)
+                    result["first_clip_offset"] = absolute[0]
+                    result["last_clip_offset"] = absolute[-2] if len(absolute) > 1 else None
+                    result["sequence_end_offset"] = absolute[-1]
+                    first_clip = absolute[0]
+                    if first_clip < len(motion):
+                        bone_count = motion[first_clip]
+                        bone_ids_offset = first_clip + bone_count * 2
+                        bone_ids_end = bone_ids_offset + bone_count
+                        if (
+                            bone_count > 0
+                            and bone_ids_end <= absolute[1]
+                            and len(set(motion[bone_ids_offset:bone_ids_end]))
+                                == bone_count
+                        ):
+                            # The first clip supplies the canonical transform
+                            # order. DDM bone IDs/parents use another order.
+                            result["skeleton_bone_ids"] = list(
+                                motion[bone_ids_offset:bone_ids_end]
+                            )
+    if package_path.is_file():
+        package = package_path.read_bytes()
+        if len(package) >= 12 and package[:4] == b"\x00crg":
+            result["package_entry_count"] = be_u32(package, 8)
+    if not result["sequence_path"] and not result["package_path"]:
+        return None
+    return result
+
+
+def analyze_skinned_file(path, data, out_dir, args, header):
+    """Decode and export the observed character skin/skeleton DDM variant."""
+    if getattr(args, "format", "glb") != "glb":
+        raise UnsupportedDDMVariant(
+            "skinned characters require GLB export; OBJ cannot store skins"
+        )
+    external_motion = find_external_character_motion(path)
+    transform_bone_ids = (
+        external_motion.get("skeleton_bone_ids")
+        if external_motion else None
+    )
+    skeleton = decode_skinned_skeleton(data, transform_bone_ids)
+    geometry = decode_skinned_geometry(data, header, skeleton)
+    vertices = geometry["vertices"]
+    mesh_parts = geometry["mesh_parts"]
+    material_count = max(part["material_index"] for part in mesh_parts) + 1
+    materials = parse_materials(data, header["offset"], material_count)
+    if len(materials) != material_count:
+        materials = [
+            {
+                "index": index,
+                "name": f"material_{index}",
+                "texture_references": [],
+                "phong": None,
+                "pbr_estimate": None,
+            }
+            for index in range(material_count)
+        ]
+    image_data = {}
+    if not args.no_textures:
+        with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:
+            texture_output = Path(temp)
+            materials = resolve_material_textures(
+                materials, path, texture_output, args.texture_root,
+            )
+            for material in materials:
+                for texture in material.get("textures", []):
+                    output = texture.get("output")
+                    if output:
+                        image_data[output] = (texture_output / output).read_bytes()
+                        texture["embedded_in_glb"] = texture["role"] in (
+                            "diffuse", "normal",
+                        )
+    else:
+        for material in materials:
+            material["textures"] = []
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mesh_path = out_dir / f"{path.stem}.glb"
+    result = write_skinned_glb(
+        mesh_path,
+        vertices,
+        mesh_parts,
+        materials,
+        skeleton,
+        path.stem,
+        args.scale,
+        image_data=image_data,
+        roughness=getattr(args, "roughness", 0.8),
+    )
+    report = {
+        "file": str(path),
+        "file_size": len(data),
+        "version": be_u32(data, 4),
+        "geometry_variant": "skinned_8_attribute_28_byte_vertex",
+        "header": header,
+        "sections": geometry["sections"],
+        "vertex_count": len(vertices),
+        "triangle_count": result["triangle_count"],
+        "skeleton": {
+            "transform_count": skeleton["transform_count"],
+            "joint_count": skeleton["joint_count"],
+            "joints": skeleton["joints"],
+        },
+        "materials": materials,
+        "glb_export": result,
+        "external_motion": external_motion,
+        "animation_source": None,
+        "animation_note": (
+            "No animation stream is embedded in this DDM. External motionPackage/"
+            "motionSequence formats require a separate decoder."
+        ),
+    }
+    if not args.final:
+        with (out_dir / "analysis.json").open("w", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+    print(f"\n[{path.name}]")
+    print("  geometry variant : skinned character")
+    print(f"  sections         : {len(geometry['sections'])}")
+    print(f"  vertices         : {len(vertices)}")
+    print(f"  triangles        : {result['triangle_count']}")
+    if result["source_triangle_count"] != result["triangle_count"]:
+        print(
+            "  material variants: "
+            f"{result['material_variant_count']} "
+            f"({result['source_triangle_count'] - result['triangle_count']} "
+            "overlapping variant faces consolidated)"
+        )
+    print(f"  joints           : {result['joint_count']}")
+    print(f"  materials        : {len(materials)}")
+    if external_motion and external_motion["clip_count"]:
+        print(
+            "  animations       : 0 embedded; "
+            f"{external_motion['clip_count']} external clips detected "
+            "(motion decoder pending)"
+        )
+    else:
+        print("  animations       : 0 embedded")
+    print(f"  output           : {mesh_path}")
+    return report
 
 
 def decode_u16_buffer(data: bytes, off: int, count: int):
@@ -1296,7 +1736,6 @@ def analyze_file(
         else relative_path.parent / path.stem
     )
     out_dir = out_root / output_key
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     periodic = find_periodic_marker_run(data)
 
@@ -1304,6 +1743,9 @@ def analyze_file(
         args.vertex_count, args.position_offset, args.index_offset, args.index_count,
     ))
     sections = [] if overrides else find_map_geometry_sections(data)
+    skinned_header = None if overrides or sections else find_skinned_geometry_header(data)
+    if skinned_header:
+        return analyze_skinned_file(path, data, out_dir, args, skinned_header)
     if sections:
         vertices, attributes, indices, submeshes = [], [], [], []
         for section_index, section in enumerate(sections):
@@ -1453,6 +1895,7 @@ def analyze_file(
                             image_data[output] = (texture_output / output).read_bytes()
                             texture["embedded_in_glb"] = texture["role"] in ("diffuse", "normal")
         else:
+            out_dir.mkdir(parents=True, exist_ok=True)
             materials = resolve_material_textures(
                 materials, path, out_dir, args.texture_root,
             )
@@ -1564,6 +2007,7 @@ def analyze_file(
 
     # Remove files generated by an earlier diagnostic export when producing a
     # final asset, as well as the former generic mesh filename.
+    out_dir.mkdir(parents=True, exist_ok=True)
     stale_outputs = optional_outputs if args.final else ()
     if legacy_mesh_path != mesh_path:
         stale_outputs = (*stale_outputs, legacy_mesh_path)
@@ -1736,6 +2180,27 @@ def iter_input_files(path: Path, recursive: bool = False):
         raise FileNotFoundError(path)
 
 
+def output_directory_for(path: Path, out_root: Path, relative_path=None):
+    output_key = (
+        Path(path.stem)
+        if relative_path is None
+        else relative_path.parent / path.stem
+    )
+    return out_root / output_key
+
+
+def prune_empty_output_directories(path: Path, out_root: Path):
+    """Remove only empty directories below the configured output root."""
+    boundary = out_root.resolve(strict=False)
+    current = path
+    while current.resolve(strict=False) != boundary:
+        try:
+            current.rmdir()
+        except (FileNotFoundError, OSError):
+            break
+        current = current.parent
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Experimental PS3 DDM to GLB or OBJ/MTL converter"
@@ -1830,6 +2295,7 @@ def main():
 
     processed = 0
     skipped = 0
+    unsupported = 0
     failed = 0
     input_is_directory = args.input.is_dir()
     input_files = list(iter_input_files(args.input, args.recursive))
@@ -1848,27 +2314,48 @@ def main():
                 if input_is_directory
                 else None
             )
-            analyze_file(
-                path,
-                args.output,
-                args,
-                relative_path=relative_path,
-            )
+            try:
+                analyze_file(
+                    path,
+                    args.output,
+                    args,
+                    relative_path=relative_path,
+                )
+            except UnsupportedDDMVariant as exc:
+                print(f"[UNSUPPORTED] {path}: {exc}")
+                unsupported += 1
+                prune_empty_output_directories(
+                    output_directory_for(path, args.output, relative_path),
+                    args.output,
+                )
+                continue
             processed += 1
 
         except Exception as exc:
             print(f"[ERROR] {path}: {exc}")
             failed += 1
+            relative_path = (
+                path.relative_to(args.input)
+                if input_is_directory
+                else None
+            )
+            prune_empty_output_directories(
+                output_directory_for(path, args.output, relative_path),
+                args.output,
+            )
             if args.debug:
                 raise
 
     print(
-        f"\nSummary: {processed} decoded, {failed} failed, "
+        f"\nSummary: {processed} decoded, {unsupported} unsupported, {failed} failed, "
         f"{skipped} non-DDM files skipped."
     )
     if processed == 0:
-        print("No DDM file decoded.")
-        raise SystemExit(1)
+        if unsupported:
+            print("No supported geometry decoded; unsupported DDM files were skipped.")
+        else:
+            print("No DDM file decoded.")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

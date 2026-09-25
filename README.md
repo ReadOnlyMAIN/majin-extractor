@@ -45,8 +45,8 @@ python tools/conversion/xet_to_png.py game_files/DECOMPRESSED_ALL --out output/t
 # 3. Convert DDS textures
 python tools/conversion/dds_to_png.py game_files/DECOMPRESSED_ALL --out output/textures --recursive
 
-# 4. Convert one DDM model
-python tools/conversion/ddm_to_obj.py game_files/DECOMPRESSED_ALL/KB/chara/chr300/chr300_c01 output
+# 4. Convert one DDM model (the undecorated file is the skinned character)
+python tools/conversion/ddm_to_obj.py game_files/DECOMPRESSED_ALL/KB/chara/chr300/chr300 output
 
 # Or scan a resource tree while preserving its relative directory layout
 python tools/conversion/ddm_to_obj.py game_files/DECOMPRESSED_ALL output/models --recursive --final
@@ -61,8 +61,14 @@ resources with identical names do not overwrite each other.
 
 DDM conversion remains experimental. It exports GLB scenes with geometry,
 UVs, normals, vertex colors, material estimates and embedded XET textures for
-supported DDM v3 layouts. Recursive scans skip non-DDM files and report
-unsupported variants. Findings are recorded in [`REVERSE_DDM.md`](REVERSE_DDM.md).
+supported DDM v3 layouts. Character DDMs also export their skeleton, skinning
+weights and bone hierarchy. Their animations live in separate proprietary
+`motionSequence`/`motionPackage` resources; the converter detects and reports
+those clips but does not decode their tracks yet. Recursive scans skip non-DDM
+files and report unsupported variants without creating per-file output
+directories. Empty directories created before a later conversion error are
+pruned, while nonempty output is retained. Findings are recorded in
+[`REVERSE_DDM.md`](REVERSE_DDM.md).
 
 Each source produces `<name>/<name>.glb`. With `--final`, a fresh output folder
 contains only the self-contained GLB. Omit it for JSON/CSV and position-cloud
