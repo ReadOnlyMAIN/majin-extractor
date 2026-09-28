@@ -150,8 +150,23 @@ def tangent_frame(vertex, normal):
     return (*tangent, sign)
 
 
+def add_legacy_specular_extension(doc, item, phong):
+    """Preserve legacy Ks as dielectric specular response, not metalness."""
+    specular = phong.get('specular')
+    if not specular or len(specular) != 3:
+        return
+    color = [min(1.0, max(0.0, float(value))) for value in specular]
+    item.setdefault('extensions', {})['KHR_materials_specular'] = {
+        'specularFactor': 1.0,
+        'specularColorFactor': color,
+    }
+    used = doc.setdefault('extensionsUsed', [])
+    if 'KHR_materials_specular' not in used:
+        used.append('KHR_materials_specular')
+
+
 def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
-              mode='connected', image_data=None, roughness=0.8):
+              mode='connected', image_data=None, roughness=None):
     """Write nodes with local origins, material primitives, and embedded PNGs.
 
     Exact identical local meshes share a mesh index, including materials and
@@ -208,19 +223,24 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
     for material in materials:
         phong = material.get('phong') or {}
         diffuse = [min(1.0, max(0.0, x)) for x in phong.get('diffuse', [1, 1, 1])]
-        derived_roughness = (material.get('pbr_estimate') or {}).get('roughness', 1.0)
+        estimate = material.get('pbr_estimate') or {}
+        derived_roughness = estimate.get('roughness', 1.0)
+        derived_metallic = estimate.get('metallic')
         exported_roughness = derived_roughness if roughness is None else roughness
-        pbr = {'baseColorFactor': diffuse + [1.0], 'metallicFactor': 0.0,
+        exported_metallic = 0.0 if derived_metallic is None else derived_metallic
+        pbr = {'baseColorFactor': diffuse + [1.0], 'metallicFactor': exported_metallic,
                'roughnessFactor': exported_roughness}
         item = {'name': material.get('name', f"material_{material['index']}"),
                 'pbrMetallicRoughness': pbr,
                 'extras': {'ddm_material_index': material['index'],
-                           'legacy_phong': phong, 'metallic_is_export_default': True}}
+                           'legacy_phong': phong, 'pbr_estimate': estimate}}
         item['extras']['roughness'] = {
             'exported': exported_roughness,
             'derived_from_phong_shininess': derived_roughness,
-            'source': 'phong_shininess' if roughness is None else 'export_override',
+            'source': (estimate.get('source') or estimate.get('roughness_source')
+                       or 'phong_shininess') if roughness is None else 'export_override',
         }
+        add_legacy_specular_extension(doc, item, phong)
         for texture in material.get('textures', []):
             output = texture.get('output')
             role = texture.get('role')
@@ -229,6 +249,10 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
             info = {'index': texture_index(output)}
             if role == 'diffuse':
                 pbr['baseColorTexture'] = info
+                content = (texture.get('conversion') or {}).get('content', {})
+                if content.get('alpha_min', 255) < 255:
+                    item['alphaMode'] = 'MASK'
+                    item['alphaCutoff'] = 0.5
             else:
                 item['normalTexture'] = info
         material_indices[material['index']] = len(doc['materials'])
@@ -361,7 +385,8 @@ def _inverse_rigid_matrix_column_major(matrix):
 
 
 def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
-                      object_name, scale, image_data=None, roughness=0.8):
+                      object_name, scale, image_data=None, roughness=None,
+                      animations=None):
     """Write one skinned glTF mesh with joints, weights and bind matrices."""
     if not vertices or not mesh_parts or not skeleton.get('joints'):
         raise ValueError('Skinned GLB requires vertices, triangles, and joints.')
@@ -417,9 +442,12 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
     for material in materials:
         phong = material.get('phong') or {}
         diffuse = [min(1.0, max(0.0, x)) for x in phong.get('diffuse', [1, 1, 1])]
-        derived = (material.get('pbr_estimate') or {}).get('roughness', 1.0)
+        estimate = material.get('pbr_estimate') or {}
+        derived = estimate.get('roughness', 1.0)
+        metallic = estimate.get('metallic')
         exported = derived if roughness is None else roughness
-        pbr = {'baseColorFactor': diffuse + [1.0], 'metallicFactor': 0.0,
+        pbr = {'baseColorFactor': diffuse + [1.0],
+               'metallicFactor': 0.0 if metallic is None else metallic,
                'roughnessFactor': exported}
         item = {
             'name': material.get('name', f"material_{material['index']}"),
@@ -427,11 +455,14 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
             'extras': {
                 'ddm_material_index': material['index'],
                 'legacy_phong': phong,
+                'pbr_estimate': estimate,
                 'roughness': {'exported': exported,
                               'derived_from_phong_shininess': derived,
-                              'source': 'phong_shininess' if roughness is None else 'export_override'},
+                              'source': (estimate.get('source') or estimate.get('roughness_source')
+                                         or 'phong_shininess') if roughness is None else 'export_override'},
             },
         }
+        add_legacy_specular_extension(doc, item, phong)
         for texture in material.get('textures', []):
             output, role = texture.get('output'), texture.get('role')
             if not output or role not in ('diffuse', 'normal'):
@@ -439,6 +470,10 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
             info = {'index': texture_index(output)}
             if role == 'diffuse':
                 pbr['baseColorTexture'] = info
+                content = (texture.get('conversion') or {}).get('content', {})
+                if content.get('alpha_min', 255) < 255:
+                    item['alphaMode'] = 'MASK'
+                    item['alphaCutoff'] = 0.5
             else:
                 item['normalTexture'] = info
         material_indices[material['index']] = len(doc['materials'])
@@ -570,6 +605,74 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
     mesh_node = len(doc['nodes'])
     doc['nodes'].append({'name': object_name, 'mesh': 0, 'skin': 0})
     doc['scenes'][0]['nodes'] = roots + [mesh_node]
+
+    for clip_index, clip in enumerate(animations or []):
+        gltf_animation = {
+            'name': clip.get('name', f'animation_{clip_index:03d}'),
+            'samplers': [],
+            'channels': [],
+        }
+        for channel in clip.get('channels', []):
+            joint = channel['joint']
+            path_name = channel['path']
+            times = channel['times']
+            channel_values = channel['values']
+            if not 0 <= joint < len(joints):
+                raise ValueError(f'Animation references invalid joint {joint}.')
+            if path_name not in ('translation', 'rotation', 'scale'):
+                raise ValueError(f'Unsupported animation path {path_name}.')
+            if not times or len(times) != len(channel_values):
+                raise ValueError('Animation times and values must have equal nonzero length.')
+            if any(b <= a for a, b in zip(times, times[1:])):
+                raise ValueError('Animation key times must be strictly increasing.')
+            width = 4 if path_name == 'rotation' else 3
+            if any(len(value) != width for value in channel_values):
+                raise ValueError(f'Animation {path_name} values require {width} components.')
+            if path_name == 'translation':
+                channel_values = [
+                    tuple(component * scale for component in value)
+                    for value in channel_values
+                ]
+            elif path_name == 'rotation':
+                normalized_values = []
+                previous = None
+                for value in channel_values:
+                    length = math.sqrt(sum(component * component for component in value))
+                    if not math.isfinite(length) or length <= 1e-20:
+                        raise ValueError('Animation rotation contains an invalid quaternion.')
+                    value = tuple(component / length for component in value)
+                    # q and -q are the same rotation. Keeping consecutive keys
+                    # in one hemisphere prevents an unnecessary long-path spin.
+                    if previous is not None and sum(a * b for a, b in zip(previous, value)) < 0:
+                        value = tuple(-component for component in value)
+                    normalized_values.append(value)
+                    previous = value
+                channel_values = normalized_values
+            if not all(
+                math.isfinite(component)
+                for value in channel_values for component in value
+            ):
+                raise ValueError('Animation channel contains a non-finite value.')
+            time_accessor = accessor(
+                struct.pack(f'<{len(times)}f', *times), len(times), 'SCALAR',
+                bounds=([min(times)], [max(times)]),
+            )
+            output_accessor = accessor(
+                b''.join(struct.pack(f'<{width}f', *value) for value in channel_values),
+                len(channel_values), f'VEC{width}',
+            )
+            sampler = len(gltf_animation['samplers'])
+            gltf_animation['samplers'].append({
+                'input': time_accessor,
+                'output': output_accessor,
+                'interpolation': channel.get('interpolation', 'LINEAR'),
+            })
+            gltf_animation['channels'].append({
+                'sampler': sampler,
+                'target': {'node': joint, 'path': path_name},
+            })
+        if gltf_animation['channels']:
+            doc.setdefault('animations', []).append(gltf_animation)
     doc['buffers'] = [{'byteLength': len(binary)}]
     json_bytes = json.dumps(doc, separators=(',', ':'), allow_nan=False).encode('utf-8')
     json_bytes += b' ' * (-len(json_bytes) % 4)
@@ -588,6 +691,6 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
         'source_triangle_count': sum(len(part['triangles']) for part in mesh_parts),
         'joint_count': len(joints),
         'embedded_image_count': len(doc.get('images', [])),
-        'animation_count': 0,
+        'animation_count': len(doc.get('animations', [])),
         'material_variant_count': len(variant_indices),
     }

@@ -79,11 +79,20 @@ class GlbExportTests(unittest.TestCase):
             path = Path(root) / 'skin.glb'
             result = write_skinned_glb(
                 path, vertices, parts, materials, skeleton, 'skin', 0.01,
+                animations=[{
+                    'name': 'idle',
+                    'channels': [{
+                        'joint': 0, 'path': 'translation',
+                        'times': [0.0, 1.0],
+                        'values': [(1, 2, 3), (2, 2, 3)],
+                    }],
+                }],
             )
             doc, blob = read_glb(path)
         self.assertEqual(result['source_triangle_count'], 2)
         self.assertEqual(result['triangle_count'], 1)
         self.assertEqual(result['material_variant_count'], 1)
+        self.assertEqual(result['animation_count'], 1)
         self.assertEqual(len(doc['skins']), 1)
         self.assertEqual(doc['nodes'][0]['children'], [1])
         self.assertEqual(doc['nodes'][2]['skin'], 0)
@@ -100,6 +109,19 @@ class GlbExportTests(unittest.TestCase):
             doc['extensions']['KHR_materials_variants']['variants'][0]['name'],
             'leader',
         )
+        animation = doc['animations'][0]
+        self.assertEqual(animation['name'], 'idle')
+        self.assertEqual(animation['channels'][0]['target'], {
+            'node': 0, 'path': 'translation',
+        })
+        sampler = animation['samplers'][0]
+        self.assertEqual(values(doc, blob, sampler['input']), [(0.0,), (1.0,)])
+        outputs = values(doc, blob, sampler['output'])
+        for actual, expected in zip(outputs, [
+            (0.01, 0.02, 0.03), (0.02, 0.02, 0.03),
+        ]):
+            for component, expected_component in zip(actual, expected):
+                self.assertAlmostEqual(component, expected_component)
 
     def test_removes_coincident_normal_only_pass_and_same_material_duplicates(self):
         vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
@@ -206,6 +228,61 @@ class GlbExportTests(unittest.TestCase):
             override_doc['materials'][0]['pbrMetallicRoughness']['roughnessFactor'], 0.8)
         self.assertEqual(
             derived_doc['materials'][0]['pbrMetallicRoughness']['roughnessFactor'], 0.25)
+
+    def test_matcap_estimate_exports_metallic_and_provenance(self):
+        vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        estimate = {'roughness': 0.4, 'metallic': 0.65,
+                    'source': 'matcap_reflection_estimate'}
+        materials = [{'index': 0, 'pbr_estimate': estimate}]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'estimated.glb'
+            write_glb(path, vertices, [part(0, [(0, 1, 2)])], materials,
+                      'scene', 1)
+            doc, _ = read_glb(path)
+        exported = doc['materials'][0]
+        self.assertEqual(exported['pbrMetallicRoughness']['metallicFactor'], 0.65)
+        self.assertEqual(exported['pbrMetallicRoughness']['roughnessFactor'], 0.4)
+        self.assertEqual(exported['extras']['pbr_estimate']['source'],
+                         'matcap_reflection_estimate')
+
+    def test_diffuse_alpha_enables_masked_material(self):
+        png = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg=='
+        )
+        vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        materials = [{
+            'index': 0,
+            'textures': [{
+                'role': 'diffuse',
+                'output': 'masked.png',
+                'conversion': {'content': {'alpha_min': 0, 'alpha_max': 255}},
+            }],
+        }]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'masked.glb'
+            write_glb(path, vertices, [part(0, [(0, 1, 2)])], materials,
+                      'scene', 1, image_data={'masked.png': png})
+            doc, _ = read_glb(path)
+        exported = doc['materials'][0]
+        self.assertEqual(exported['alphaMode'], 'MASK')
+        self.assertEqual(exported['alphaCutoff'], 0.5)
+
+    def test_legacy_specular_uses_khr_extension_not_metallic(self):
+        vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        materials = [{'index': 0, 'phong': {
+            'diffuse': [1.0, 1.0, 1.0],
+            'specular': [0.5, 0.3, 0.1],
+        }}]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'specular.glb'
+            write_glb(path, vertices, [part(0, [(0, 1, 2)])], materials,
+                      'scene', 1)
+            doc, _ = read_glb(path)
+        exported = doc['materials'][0]
+        self.assertEqual(exported['pbrMetallicRoughness']['metallicFactor'], 0.0)
+        self.assertEqual(exported['extensions']['KHR_materials_specular']
+                         ['specularColorFactor'], [0.5, 0.3, 0.1])
+        self.assertIn('KHR_materials_specular', doc['extensionsUsed'])
 
 
 if __name__ == '__main__':

@@ -428,15 +428,23 @@ and documented but are not yet assigned to a non-standard MTL channel.
 
 The material record also contains a sequence of eleven unaligned big-endian
 `float32` values. Its absolute offset varies with the texture-slot and shader
-records, but the validated sequence is:
+records. Rechecking map101/map102 against the compiled `KbBase` parameter
+tables corrected the earlier `Kd/Ka/Ks` interpretation; the validated sequence
+is:
 
 ```c
 float diffuse[3];
-float ambient[3];
+float diffuseAlpha;
+float unknownAfterDiffuse[2];
 float specular[3];
-float unknown;    // zero in chr300/chr310, nonzero in some variants
-float shininess;  // Phong exponent / MTL Ns
+float unknownAfterSpecular;
+float shininess;  // legacy specular exponent / MTL Ns
 ```
+
+There is no evidence for a separate ambient RGB triplet in this block. The old
+layout accidentally grouped `diffuseAlpha` and the following two scalars as
+ambient color. This did not change the position of `Ks` or `Ns`, but it made
+the structural search less reliable and produced invalid MTL ambient colors.
 
 The converter locates this sequence structurally between the final texture
 reference and the next material or geometry header. It does not use offsets
@@ -444,29 +452,76 @@ specific to `chr300` or `chr310`.
 
 Observed reference values:
 
-| Material  | Diffuse   | Ambient   | Specular                     | Ns |
-| --------- | --------- | --------- | ---------------------------- | -: |
-| `sword`   | `1, 1, 1` | `0, 0, 0` | `0.4, 0.4, 0.4`              | 34 |
-| `mat_ax`  | `1, 1, 1` | `0, 0, 0` | `0.05, 0.05, 0.05`           | 34 |
-| `mat_tar` | `1, 1, 1` | `0, 0, 0` | `0.00018, 0.00017, 0.000175` | 40 |
+| Material  | Diffuse RGBA | Unknown pair | Specular                     | Ns |
+| --------- | ------------ | ------------ | ---------------------------- | -: |
+| `sword`   | `1, 1, 1, 1` | `0, 0`       | `0.4, 0.4, 0.4`              | 34 |
+| `mat_ax`  | `1, 1, 1, 1` | `0, 0`       | `0.05, 0.05, 0.05`           | 34 |
+| `mat_tar` | `1, 1, 1, 1` | `0, 0`       | `0.00018, 0.00017, 0.000175` | 40 |
 
 These are legacy Phong parameters, not metallic/roughness PBR parameters. No
 metallic scalar has been identified in the DDM material records. Roughness is
 also not stored directly; for diagnostics the converter reports the common
-approximation `sqrt(2 / (Ns + 2))`, clearly marked as derived. The original
-`Kd`, `Ka`, `Ks`, and `Ns` values are written to MTL without this conversion.
+microfacet-width approximation `alpha = sqrt(2 / (Ns + 2))`. Because glTF
+defines `alpha = roughness²`, the exported perceptual roughness is
+`pow(2 / (Ns + 2), 0.25)`, clearly marked as derived. The original
+`Kd`, `Ks`, and `Ns` values are written to MTL without this conversion. Since
+no source `Ka` has been identified, MTL output reuses `Kd` for `Ka`.
+
+### Compiled-shader verification
+
+The `fxbf` container has a shared fragment-program pool at header word 3. Each
+program descriptor stores its fragment offset and byte size at words 9 and 10;
+words 7 and 8 describe the separate vertex program. Fragment constants are
+inline RSX constant slots patched through relocation lists. For
+`KbBaseS_P11_L1`, those lists locate `matParam2`, `matParam1`, `matParam0`, and
+`specularColor` in the actual fragment program. The decoded program contains
+the expected `LG2`/multiply/`EX2` exponent sequence and applies
+`specularColor`, confirming a legacy exponent-based specular lobe rather than a
+stored PBR roughness value.
+
+This validates deriving glTF roughness from `Ns`; it does not make that
+conversion lossless. On map101/map102, many unrelated surfaces share the same
+`Ns=32` authoring template while their `Ks` values differ. glTF preserves that
+strength separately through `KHR_materials_specular`. No shader evidence was
+found for deriving metalness from these fields, so it remains zero.
+
+The reflection tables use four-byte relocation entries containing a 16-bit
+fragment-program byte offset followed by a zero 16-bit reserved field. The
+maintained inspector now reports these offsets as
+`fragment_constant_offsets`. Representative skinned variants give:
+
+| Program | `matParam2` | `matParam1` | `matParam0` | `specularColor` | `emissionColor` |
+| --- | --- | --- | --- | --- | --- |
+| `KbBaseS_P11_L1` | `0x10, 0x80` | `0x100` | `0x540` | `0x560` | absent |
+| `KbBaseS_P31_L1` | `0x10, 0x80` | `0x110` | `0x640` | `0x7B0` | `0x710, 0x780` |
+| `KbBaseS_P33_L1` | `0x40, 0xC0` | `0x150` | `0x250` | `0x4E0` | `0x520` |
+
+In `P31`, unit 4 (`textureSamplerEnvSphere`) is sampled at microcode offset
+`0x20`; its RGB is immediately remapped with `value * 2 - 1` and later used in
+normalized vector/dot-product calculations. Unit 1 (`textureSamplerUtil`) is
+sampled at `0x1D0`. At `0x7A0`, a computed scalar multiplies
+`specularColor.rgb` before being added to the lighting result. `P33` likewise
+samples units 4, 3 and 1 near the start of the program and treats the unit-4
+sample as vector data. Consequently, the current Godot operation
+`reflection.rgb * utility` is only a visual approximation; the original shader
+does not perform a simple additive matcap-color blend.
+
+The separate `KbShaderParam` resource lists `matParam0`, `matParam1`, and
+`matParam2`, but provides no component-level names. Their exact `.x/.y/.z/.w`
+authoring meanings therefore remain unresolved; assigning labels such as
+“roughness” or “metallic” to those components would currently be speculative.
 
 ## 12.2 XET data offset
 
-The largest mip always starts at `0x90`. The old converter heuristic incorrectly
+The largest mip starts at `0x88`. The old converter heuristic incorrectly
 added a "pre-mip" area whenever the total size did not match a conventional mip
 chain:
 
 ```text
-chr910_*    : old offset 0x310, incorrect shift 0x280
-chr930_f02  : old offset 0x310, incorrect shift 0x280
-chr930_n01  : old offset 0xB10, incorrect shift 0xA80
-actual offset: 0x90 in every case
+chr910_*    : old offset 0x310, incorrect shift 0x288
+chr930_f02  : old offset 0x310, incorrect shift 0x288
+chr930_n01  : old offset 0xB10, incorrect shift 0xA88
+actual offset: 0x88
 ```
 
 The payload consists of 8-byte DXT1 blocks, so `0x280` represents 80 blocks. The
@@ -475,8 +530,12 @@ horizontal shift and a small vertical shift after wrapping to the next row. This
 incorrectly resembled a material UV offset.
 
 The unconventional size concerns the end of the mip chain, not the beginning of
-the largest mip. `tools/conversion/xet_to_png.py` now always keeps `0x90` as the
-offset and uses size only to distinguish DXT1 from DXT5.
+the largest mip. `tools/conversion/xet_to_png.py` now keeps `0x88` as the offset
+and uses size only to distinguish DXT1 from DXT5. The former `0x90` offset
+skipped one 8-byte DXT1 block and produced the approximately four-pixel left
+shift visible in `chr300_u01`, `chr300_f`, and `chr300_f02`. File sizes measured
+from `0x88` match complete stored mip levels for these textures and for the
+`chr910`/`chr930` controls.
 
 ---
 
@@ -753,7 +812,7 @@ chr310_c01 bounding-sphere radius = 234.970749 source units
 
 Interpreting those values as centimeters gives radii of approximately `0.777 m`
 and `2.350 m`, which are plausible for the sword and large axe. OBJ has no unit
-metadata, so `ddm_to_obj.py` multiplies exported positions by `0.01` by default.
+metadata, so `ddm_to_3d.py` multiplies exported positions by `0.01` by default.
 The raw coordinates remain unchanged in the decoder and diagnostic CSV; the
 scale can be overridden with `--scale` while this hypothesis is tested on more
 characters and environment objects.
@@ -764,7 +823,7 @@ characters and environment objects.
 
 Submesh validation, triangle-strip reconstruction, the
 `submesh → material → textures` relationship, XET conversion, and textured
-OBJ/MTL export are now implemented by `tools/conversion/ddm_to_obj.py`.
+OBJ/MTL export are now implemented by `tools/conversion/ddm_to_3d.py`.
 
 The next priority is to generalize the parser across:
 
@@ -932,7 +991,7 @@ NEXT PRIORITY:
 
 ## Experimental decoder status
 
-`tools/conversion/ddm_to_obj.py` now produces:
+`tools/conversion/ddm_to_3d.py` now produces:
 
 ```text
 DDM
@@ -974,11 +1033,20 @@ instance hierarchy, rotations, authoring pivots or semantic object names have
 been recovered. Disconnected prop pieces can split; connected props can merge.
 
 GLB embeds resolved diffuse/normal PNGs and uses the source UV orientation
-(top-left, unlike the OBJ V flip). Metallic defaults to zero. The mathematical
-Phong conversion gives roughness 0.174 for Ns=64 and 0.243 for Ns=32, but this
-looks excessively glossy without the original game shader. GLB therefore uses
-0.8 by default and records both the exported and derived values in material
-extras; a negative `--roughness` restores the derived value.
+(top-left, unlike the OBJ V flip). Metallic defaults to zero. The former
+conversion exported microfacet alpha directly as roughness (0.174
+for Ns=64 and 0.243 for Ns=32), which glTF squared again and therefore rendered
+excessively glossy. GLB now exports perceptual roughness (0.417 and 0.493) and
+records both the exported and derived values in material extras; `--roughness`
+can still provide an explicit diagnostic override.
+
+The source tangent-space normal maps use the DirectX-style Y− convention. glTF
+and Godot 4 consume Y+ tangent-space normals, so the role-aware DDM exporter
+inverts the green channel (`G' = 255 - G`) for textures classified as
+`normal`. This conversion is recorded as
+`directx_y_negative_to_gltf_y_positive` in the texture analysis metadata.
+`xet_to_png.py` itself continues to decode the source pixels without semantic
+channel conversion.
 
 14,267 map101_R0 triangles are exact overlaps where `gake102__multi` provides
 only a normal-map pass over a diffuse surface (including 26 overlaps shared
@@ -989,6 +1057,48 @@ retains standalone normal-only geometry and faces whose attributes differ.
 The final GLB contains 62,128 triangles. Auxiliary shader maps are otherwise
 not represented.
 Specification: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
+
+### Matcap and red-mask caveat
+
+The content-based texture classifier is not sufficient to establish shader
+semantics. On `chr300`, `chr300_f` and `chr300_f02` visually behave like
+matcap/reflection lookup textures. Older converter versions promoted the former
+to diffuse only because it was larger than `chr300_c01`.
+`*_f*` references are now classified as matcaps and excluded from albedo;
+`chr300_c01` is the `tar` base color. Core glTF 2.0 has no native matcap
+material model, so the matcap remains unrepresented in the GLB.
+
+`chr300_u01` is strongly red-channel dominated. Reflection metadata in the
+compiled `KbBase` shaders establishes that the matching four-texture variants
+bind `Base=0`, `Util=1`, `Normal=3`, and `EnvSphere=4`. This exactly follows the
+`armor_leader` DDM order `c02`, `u01`, `n02`, `f02`, identifying `_u01` as
+`textureSamplerUtil` and `_f02` as `textureSamplerEnvSphere`. The matching
+programs are `KbBaseS_P31`/`KbBaseNS_P31` and
+`KbBaseS_P33`/`KbBaseNS_P33`; the material-selection field has not yet been
+decoded far enough to distinguish those two equivalent sampler layouts.
+Its red channel closely follows the layout and details of `chr300_c02`, so it is
+a surface-response mask using the armor UVs rather than an independent effect.
+In game, leader enemies are observed with white armor while ordinary enemies
+use the base armor appearance. The `armor_leader` variant adds both
+`chr300_u01` and the spherical reflection lookup `chr300_f02` to the shared
+`chr300_c02`/`chr300_n02` pair; either the mask, the lookup, or their combination
+is therefore a likely source of that white appearance. The sampler bindings are
+proven, while the fragment blend operation and mask polarity remain unknown.
+It must not yet be wired directly to metallic-roughness channels. The proposed
+evidence-based estimation pipeline and output contract live in
+`MATERIAL_PBR.md` and `tools/conversion/material_pbr_estimator.py`; no estimator
+is active in the converter.
+
+`--material-mode original-godot` preserves the portable PBR material in the GLB
+as a fallback and also writes a Godot 4 spatial shader, every referenced PNG,
+one configured `ShaderMaterial` `.tres` per DDM material, and a JSON
+sampler-binding manifest. Relative resource paths keep the generated Godot
+folder movable inside a project. The reconstructed shader applies the
+utility mask to the spherical lookup and exposes strength and polarity controls;
+this is an explicit working reconstruction, not yet a byte-exact translation of
+the P31/P33 RSX fragment program. Fragment disassembly additionally shows that
+the lookup RGB is remapped to signed vector data before the reflection-lighting
+calculation, so direct color addition cannot be considered equivalent.
 
 ## Skinned character DDM variant
 
@@ -1020,8 +1130,18 @@ materials; the GLB stores them once and exposes `armor_leader` through
 remains the separate 367-vertex sword mesh.
 
 No animation stream is embedded in the character DDM. The matching
-`motionSequence/chr300/chr300` resource contains a validated boundary table
-for 152 clips, while `motionPackage/chr300/BigEndian/chr300` contains nine
-package records. These external motion resources are detected and included in
-the analysis report, but their compressed animation tracks are not decoded
-into glTF animation channels yet.
+`motionSequence/chr300/chr300` resource contains 152 bounded segments: one
+skeleton segment, 150 animation clips, and one metadata segment. The matching
+`motionPackage/chr300/BigEndian/chr300` contains nine package records. These
+external motion resources are detected and included in
+the analysis report. Their descriptor tables, key times, constants, linear
+samples and value/tangent pairs are decoded with exact byte accounting. The
+mapping from those scalar curves to joint transforms is not established, so
+they are deliberately not emitted as glTF animation channels yet.
+
+The initial 1,924-byte segment is now decoded independently. For `chr300` it
+contains a version-3 header, the 62 ordered bone IDs, hierarchy metadata and
+62 local reference transforms stored as `translation vec3 + quaternion vec4`.
+That reference pose matches the DDM bind translations within `3.1e-5` source
+units. This proves the skeleton order used by the animation resource, but not
+yet how its variable 247–253 scalar descriptors map onto transform channels.

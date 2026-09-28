@@ -60,19 +60,105 @@
             "name": "DDM: convert to GLB",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tools/conversion/ddm_to_obj.py",
+            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
             "args": [
                 "${input:ddmSource}",
                 "${input:modelOutput}",
                 "--format",
                 "glb",
+                "--material-mode",
+                "${input:ddmMaterialMode}",
+                "--object-mode",
+                "${input:ddmObjectMode}",
+                "--recursive",
+                "--final",
+                "${input:ddmFinalOutput}",
+                "--scale",
+                "0.01",
+                "--texture-root",
+                "${input:ddmTextureRoot}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "DDM: convert to OBJ",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
+            "args": [
+                "${input:ddmSource}",
+                "${input:modelOutput}",
+                "--format",
+                "obj",
                 "--recursive",
                 "--final",
                 "${input:ddmFinalOutput}",
                 "--scale",
                 "${input:ddmExportScale}",
-                "--roughness",
-                "${input:ddmRoughness}"
+                "--texture-root",
+                "${input:ddmTextureRoot}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "DDM: experimental animation",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
+            "args": [
+                "${input:ddmCharacterSource}",
+                "${input:modelOutput}",
+                "--format",
+                "glb",
+                "--material-mode",
+                "${input:ddmMaterialMode}",
+                "--animation-clips",
+                "${input:ddmAnimationClips}",
+                "--experimental-root-motion",
+                "--experimental-rotation-joints",
+                "${input:ddmRotationJoints}",
+                "--experimental-rotation-units",
+                "${input:ddmRotationUnits}",
+                "--scale",
+                "${input:ddmExportScale}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "DDM: debug manual layout (no textures)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
+            "args": [
+                "${input:ddmManualSource}",
+                "${input:modelOutput}",
+                "--vertex-count",
+                "${input:ddmVertexCount}",
+                "--position-offset",
+                "${input:ddmPositionOffset}",
+                "--index-offset",
+                "${input:ddmIndexOffset}",
+                "--index-count",
+                "${input:ddmIndexCount}",
+                "--scale",
+                "${input:ddmExportScale}",
+                "--no-textures",
+                "--debug"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -120,10 +206,22 @@
             "default": "game_files/decompressed/KB/chara"
         },
         {
+            "id": "ddmCharacterSource",
+            "type": "promptString",
+            "description": "Skinned character DDM used for animation experiments",
+            "default": "game_files/decompressed/KB/chara/chr300/chr300"
+        },
+        {
+            "id": "ddmManualSource",
+            "type": "promptString",
+            "description": "Single DDM file for manual layout debugging",
+            "default": "game_files/decompressed/KB/chara/chr300/chr300_c01"
+        },
+        {
             "id": "modelOutput",
             "type": "promptString",
             "description": "Model output directory",
-            "default": "output/models"
+            "default": "output/decoded/chara"
         },
         {
             "id": "ddmFinalOutput",
@@ -136,16 +234,85 @@
             "default": "true"
         },
         {
+            "id": "ddmMaterialMode",
+            "type": "pickString",
+            "description": "GLB material output",
+            "options": [
+                "pbr",
+                "original-godot"
+            ],
+            "default": "pbr"
+        },
+        {
+            "id": "ddmObjectMode",
+            "type": "pickString",
+            "description": "GLB object separation",
+            "options": [
+                "auto",
+                "connected",
+                "submeshes",
+                "single"
+            ],
+            "default": "auto"
+        },
+        {
             "id": "ddmExportScale",
             "type": "promptString",
             "description": "DDM position scale applied to GLB export",
             "default": "0.01"
         },
         {
-            "id": "ddmRoughness",
+            "id": "ddmTextureRoot",
             "type": "promptString",
-            "description": "GLB material roughness (negative uses Phong-derived values)",
-            "default": "0.8"
+            "description": "Root used to resolve referenced XET textures",
+            "default": "game_files/decompressed"
+        },
+        {
+            "id": "ddmAnimationClips",
+            "type": "promptString",
+            "description": "Comma-separated motion clip indices",
+            "default": "71,72,73"
+        },
+        {
+            "id": "ddmRotationJoints",
+            "type": "promptString",
+            "description": "Comma-separated experimental rotation joint indices",
+            "default": "0"
+        },
+        {
+            "id": "ddmRotationUnits",
+            "type": "pickString",
+            "description": "Experimental rotation angle units",
+            "options": [
+                "degrees",
+                "radians",
+                "auto"
+            ],
+            "default": "degrees"
+        },
+        {
+            "id": "ddmVertexCount",
+            "type": "promptString",
+            "description": "Manual vertex count",
+            "default": "367"
+        },
+        {
+            "id": "ddmPositionOffset",
+            "type": "promptString",
+            "description": "Manual position stream offset",
+            "default": "0x2191"
+        },
+        {
+            "id": "ddmIndexOffset",
+            "type": "promptString",
+            "description": "Manual index stream offset",
+            "default": "0x33d"
+        },
+        {
+            "id": "ddmIndexCount",
+            "type": "promptString",
+            "description": "Manual uint16 index count",
+            "default": "948"
         }
     ]
 }

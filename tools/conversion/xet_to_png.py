@@ -8,8 +8,9 @@ What this version does
 - Uses the working xet layout you identified:
   * magic: b'\x00xet'
   * width/height at 0x80 (big-endian u16)
-  * the largest mip always starts at 0x90
-  * DXT5 blocks are stored color-first, alpha-second
+  * the largest mip starts at 0x88
+  * DXT5 block order is selected by the XET storage flag: either
+    color-first/alpha-second or standard alpha-first/color-second
   * mip chain stops at 2x2 (no 1x1 mip in this format)
 - Supports single files, folders, and recursive scanning
 - Accepts files with or without an extension
@@ -38,7 +39,7 @@ from typing import Iterable, List, Tuple
 from PIL import Image
 
 MAGIC = b"\x00xet"
-HEADER_SECONDARY_OFFSET = 0x90
+TEXTURE_DATA_OFFSET = 0x88
 
 
 # -----------------------------------------------------------------------------
@@ -107,15 +108,19 @@ def decode_alpha_table(a0: int, a1: int) -> List[int]:
 # -----------------------------------------------------------------------------
 
 def find_offset_and_format(data: bytes, w: int, h: int) -> Tuple[int, str]:
-    """Detect DXT1/DXT5 while keeping the largest mip at offset 0x90.
+    """Detect DXT1/DXT5 while keeping the largest mip at offset 0x88.
 
     Older revisions interpreted the size difference from a conventional mip
     chain as small mips stored *before* the main image. That shifted the main
     DXT block stream by 0x280/0xA80 bytes and produced a block-aligned UV
     offset. Reference textures show that these files instead start their
-    largest mip at 0x90; their mip tail simply has a non-standard size.
+    largest mip at 0x88; their mip tail simply has a non-standard size.
+
+    Starting at 0x90 skips one DXT1 block. On a 256-pixel-wide texture this
+    shifts the decoded image four pixels left, which is visible when comparing
+    chr300_u01 with chr300_c02.
     """
-    payload = max(0, len(data) - HEADER_SECONDARY_OFFSET)
+    payload = max(0, len(data) - TEXTURE_DATA_OFFSET)
     d1 = min(
         abs(payload - dxt1_size(w, h)),
         abs(payload - mip_total(w, h, 8)),
@@ -125,7 +130,7 @@ def find_offset_and_format(data: bytes, w: int, h: int) -> Tuple[int, str]:
         abs(payload - mip_total(w, h, 16)),
     )
     texture_format = "DXT5" if d5 < d1 else "DXT1"
-    return HEADER_SECONDARY_OFFSET, texture_format
+    return TEXTURE_DATA_OFFSET, texture_format
 
 
 # -----------------------------------------------------------------------------
@@ -161,15 +166,25 @@ def decode_dxt1(raw: bytes, w: int, h: int) -> bytes:
                     if x < w and y < h:
                         o = (y * w + x) * 4
                         r, g, b = p[idx]
-                        out[o:o + 4] = bytes((r, g, b, 255))
+                        # DXT1 switches to its three-color + transparent mode
+                        # when c0 <= c1; selector 3 is then fully transparent.
+                        alpha = 0 if c0 <= c1 and idx == 3 else 255
+                        out[o:o + 4] = bytes((r, g, b, alpha))
 
     return bytes(out)
 
 
-def decode_dxt5_xet(raw: bytes, w: int, h: int) -> bytes:
-    """Decode xet DXT5 blocks in the working layout:
+def dxt5_color_first(data: bytes) -> bool:
+    """Return the DXT5 block order selected by the XET storage flag."""
+    return len(data) <= 0x2F or not (data[0x2F] & 0x80)
 
-    [color block 8 bytes][alpha block 8 bytes]
+
+def decode_dxt5_xet(raw: bytes, w: int, h: int,
+                    color_first: bool = True) -> bytes:
+    """Decode either observed XET DXT5 block layout.
+
+    Some archives store ``[color][alpha]`` while flag 0x2F bit 7 selects the
+    standard ``[alpha][color]`` order.
 
     Color block layout:
     - bytes 0..1: c0
@@ -192,14 +207,12 @@ def decode_dxt5_xet(raw: bytes, w: int, h: int) -> bytes:
             if len(block) < 16:
                 continue
 
-            # Color-first
-            c0 = struct.unpack_from("<H", block, 0)[0]
-            c1 = struct.unpack_from("<H", block, 2)[0]
-            bits = struct.unpack_from("<I", block, 4)[0]
-
-            # Alpha-second
-            a0, a1 = block[8], block[9]
-            abits = int.from_bytes(block[10:16], "little")
+            color_offset, alpha_offset = (0, 8) if color_first else (8, 0)
+            c0 = struct.unpack_from("<H", block, color_offset)[0]
+            c1 = struct.unpack_from("<H", block, color_offset + 2)[0]
+            bits = struct.unpack_from("<I", block, color_offset + 4)[0]
+            a0, a1 = block[alpha_offset], block[alpha_offset + 1]
+            abits = int.from_bytes(block[alpha_offset + 2:alpha_offset + 8], "little")
             alpha = decode_alpha_table(a0, a1)
 
             p = [rgb565(c0), rgb565(c1)]
@@ -275,13 +288,15 @@ def convert_one(path: Path, out_dir: Path) -> bool:
     payload = data[offset:]
 
     if fmt == "DXT5":
-        rgba = decode_dxt5_xet(payload[:dxt5_size(w, h)], w, h)
+        rgba = decode_dxt5_xet(
+            payload[:dxt5_size(w, h)], w, h,
+            color_first=dxt5_color_first(data),
+        )
     else:
         rgba = decode_dxt1(payload[:dxt1_size(w, h)], w, h)
 
     img = Image.frombytes("RGBA", (w, h), rgba)
-    bg = Image.new("RGBA", (w, h), (204, 204, 204, 255))
-    Image.alpha_composite(bg, img).save(out_dir / (path.stem + ".png"))
+    img.save(out_dir / (path.stem + ".png"))
     print(f"[OK] {path.name} ({w}x{h} {fmt} off=0x{offset:X})")
     return True
 

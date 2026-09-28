@@ -17,6 +17,7 @@ import os
 import re
 import struct
 import zlib
+from collections import Counter
 from concurrent.futures import Executor, ThreadPoolExecutor
 from itertools import repeat
 from pathlib import Path
@@ -31,6 +32,8 @@ NULL_RUN = re.compile(rb"\x00{16,}")
 INDEX_ENTRY_SIZE = 0x180
 MIN_COMPRESSED_SIZE = 8
 MIN_OUTPUT_SIZE = 16
+DDM_RESOURCE_TYPE = 0x89D30498
+CRG_RESOURCE_TYPE = 0x6FB6CD42
 
 
 def safe_relpath(name: str) -> Path:
@@ -177,49 +180,90 @@ def extract_pak(
     if data[:4] != PAK_MAGIC:
         raise ValueError(f"invalid PAK magic: {data[:4].hex()}")
 
-    count = struct.unpack_from(">I", data, 8)[0]
-    declared_index_end = 0x10 + count * INDEX_ENTRY_SIZE
-    names, index_end = parse_index(data, count)
-    separators = find_separators(data, index_end)
-
-    if not quiet:
-        print(f"Pak: {pak_path.name} ({len(data)} bytes)")
-        print(
-            f"Count header: {count}  "
-            f"Index principal: 0x{declared_index_end:X}"
-        )
-        print(f"Valid names: {len(names)}  Actual index end: 0x{index_end:X}")
-        print(f"Separators: {len(separators)}")
-
-    if not separators:
-        print(f"[WARN] {pak_path.name}: no separator found")
-        return 0
-
-    starts, ends = chunk_boundaries(len(data), index_end, separators)
-    results = executor.map(decompress_span, repeat(data), starts, ends)
-
-    extracted = 0
-    for result in results:
-        if result is None:
-            continue
-
-        name, _ = write_result(out_dir, names, extracted, result)
+    # Resource records start at 0x88, with their own count and byte size.
+    # The value at 0x08 is a resource type, not a record count. Scanning for
+    # names and pairing them with successful inflations shifts every name
+    # when the first record is skipped or a stream fails.
+    entries = indexed_resources(data)
+    name_counts = Counter(name for name, _, _ in entries)
+    for name, resource_type, result in entries:
+        relative = safe_relpath(name)
+        destination = out_dir / relative
+        # Several resource types deliberately share a logical name (DDM and
+        # CRG for characters). Preserve both instead of overwriting the mesh.
+        if resource_type == CRG_RESOURCE_TYPE:
+            destination = destination.with_name(destination.name + ".crg")
+        elif name_counts[name] > 1:
+            if resource_type != DDM_RESOURCE_TYPE:
+                destination = destination.with_name(
+                    destination.name + f".resource_{resource_type:08x}"
+                )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(result)
         if not quiet:
-            print(
-                f"[OK] [{extracted}] {name}  "
-                f"({len(result)} bytes) magic={result[:4].hex()}"
-            )
-        extracted += 1
+            print(f"[OK] {destination.relative_to(out_dir)} ({len(result)} bytes)")
+    print(f"{pak_path.name}: {len(entries)} extracted from indexed records")
+    return len(entries)
 
-    missing = names[extracted:]
-    if not quiet:
-        for name in missing:
-            print(f"[FAIL] {name}: no matching chunk")
-        print(f"{extracted} OK  {len(missing)} unmapped")
-    else:
-        print(f"{pak_path.name}: {extracted} extracted, {len(missing)} unmapped")
 
-    return extracted
+def indexed_resources(data: bytes):
+    """Read named resources using record sizes; validate before writing any."""
+    if len(data) < 0x88 or data[:4] != PAK_MAGIC:
+        raise ValueError("Invalid PAK header")
+    table_size, count = struct.unpack_from(">II", data, 0x80)
+    if not count or table_size != count * 0x120:
+        raise ValueError("Unsupported PAK resource table")
+    cursor = 0x88 + table_size
+    if cursor > len(data):
+        raise ValueError("Truncated PAK resource table")
+    entries = []
+    for index in range(count):
+        record = 0x88 + index * 0x120
+        size, resource_type = struct.unpack_from(">II", data, record)
+        name = data[record + 16:record + 272].split(b"\0", 1)[0].decode("ascii")
+        stored, _auxiliary_size, blocks, reserved = struct.unpack_from(
+            ">4I", data, record + 272,
+        )
+        # The second size is not a duplicate uncompressed length. Most
+        # resources happen to repeat `size`, but some valid XET entries (for
+        # example chr100_c01/c02) store a different auxiliary value there.
+        # The decoded byte count is validated against the leading `size`.
+        if not safe_relpath(name).parts or reserved or not blocks:
+            raise ValueError(f"Invalid PAK record {index}")
+        if stored < blocks * 128:
+            raise ValueError(f"Invalid stored size for PAK record {index}")
+        end = cursor + stored
+        if end > len(data):
+            raise ValueError(f"Truncated PAK resource {name}")
+        output = bytearray()
+        for _ in range(blocks):
+            if cursor + 128 > end:
+                raise ValueError(f"Truncated block header for {name}")
+            encoding, length = struct.unpack_from(">II", data, cursor)
+            cursor += 128
+            if cursor + length > end:
+                raise ValueError(f"Truncated PAK compression block for {name}")
+            payload = data[cursor:cursor + length]
+            if encoding == 0:
+                # Stored block. This is used by the nested language archives
+                # fspe_jpn and fspe_rus; `length` is already the output size.
+                output.extend(payload)
+            elif encoding == 1:
+                decoder = zlib.decompressobj(-15)
+                output.extend(decoder.decompress(payload))
+                if not decoder.eof or decoder.unused_data:
+                    raise ValueError(f"Invalid deflate stream for {name}")
+            else:
+                raise ValueError(
+                    f"Unsupported PAK block encoding {encoding} for {name}"
+                )
+            cursor += length
+        if cursor != end or len(output) != size:
+            raise ValueError(f"PAK resource size mismatch for {name}")
+        entries.append((name, resource_type, bytes(output)))
+    if cursor != len(data):
+        raise ValueError("Unaccounted data after PAK resources")
+    return entries
 
 
 def default_worker_count() -> int:

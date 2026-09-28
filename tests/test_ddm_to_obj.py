@@ -7,8 +7,10 @@ import struct
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
-from tools.conversion import ddm_to_obj as ddm
+from tools.conversion import ddm_to_3d as ddm
+from tools.conversion import motion_decode
 
 
 def map_section(primitive, positions, indices, material=0):
@@ -101,6 +103,120 @@ class MapGeometryTests(unittest.TestCase):
         ddm.classify_material_textures([texture])
         self.assertEqual(texture['role'], 'unresolved')
 
+    def test_character_color_wins_over_larger_matcap(self):
+        def texture(reference, width, height):
+            return {
+                'reference': reference,
+                'conversion': {
+                    'width': width,
+                    'height': height,
+                    'content': {
+                        'blue_normal_ratio': 0.0,
+                        'red_mask_ratio': 0.0,
+                        'grayscale_ratio': 0.0,
+                    },
+                },
+            }
+
+        color = texture('chr300_c01', 16, 16)
+        matcap = texture('chr300_f', 128, 128)
+
+        ddm.classify_material_textures([color, matcap])
+
+        self.assertEqual(color['role'], 'diffuse')
+        self.assertEqual(matcap['role'], 'matcap')
+
+    def test_matcap_updates_pbr_estimate_with_provenance(self):
+        material = {
+            'index': 0,
+            'pbr_estimate': {'roughness': 0.5, 'metallic': None},
+            'textures': [{
+                'reference': 'chr300_f02', 'role': 'matcap',
+                'conversion': {'width': 16, 'height': 16, 'content': {
+                    'highlight_ratio': 0.16, 'mean_luminance': 0.3,
+                    'peak_luminance': 0.9, 'mean_saturation': 0.5,
+                }},
+            }],
+        }
+        ddm.apply_matcap_pbr_estimates([material])
+        estimate = material['pbr_estimate']
+        self.assertAlmostEqual(estimate['roughness'], 0.16 ** 0.25)
+        self.assertIsNone(estimate['metallic'])
+        self.assertEqual(estimate['source'], 'matcap_reflection_estimate')
+        self.assertEqual(estimate['texture_reference'], 'chr300_f02')
+
+    def test_texture_resolution_finds_canonical_common_area(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            model = root / 'KB/map/map101/map101'
+            copied = root / 'KB/map/map699/shared_c'
+            canonical = root / 'KB/texture/common/area1/shared_c'
+            model.parent.mkdir(parents=True)
+            copied.parent.mkdir(parents=True)
+            canonical.parent.mkdir(parents=True)
+            model.write_bytes(ddm.MAGIC)
+            copied.write_bytes(b'\x00xetcopy')
+            canonical.write_bytes(b'\x00xetcanonical')
+            found = ddm.resolve_texture_path('shared_c', model, root)
+            self.assertEqual(found, canonical)
+
+    def test_phong_shininess_becomes_gltf_perceptual_roughness(self):
+        estimate = ddm.phong_to_pbr_estimate({'shininess': 30.0})
+        self.assertAlmostEqual(estimate['roughness'], 0.5)
+        self.assertEqual(estimate['roughness_formula'],
+                         'pow(2 / (Ns + 2), 0.25)')
+
+    def test_legacy_material_block_separates_diffuse_alpha_from_unknowns(self):
+        values = (1.0, 0.8, 0.6, 1.0, 0.0, 0.0,
+                  0.2, 0.3, 0.4, 0.0, 32.0)
+        data = b'prefix' + struct.pack('>11f', *values) + b'suffix'
+        phong = ddm.find_phong_parameters(data, 0, len(data))
+        self.assertEqual(phong['offset'], len(b'prefix'))
+        for actual, expected in zip(phong['diffuse'], (1.0, 0.8, 0.6)):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(phong['diffuse_alpha'], 1.0)
+        self.assertEqual(phong['unknown_after_diffuse'], [0.0, 0.0])
+        self.assertAlmostEqual(phong['specular'][0], 0.2)
+        self.assertEqual(phong['shininess'], 32.0)
+
+    def test_normal_texture_green_channel_is_converted_from_directx(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow is unavailable')
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            texture_path = root / 'normal.png'
+            Image.new('RGBA', (1, 1), (10, 20, 30, 40)).save(texture_path)
+            texture = {
+                'output': 'normal.png',
+                'role': 'normal',
+                'conversion': {},
+            }
+
+            payload = ddm.export_texture_payload(root, texture)
+
+            with Image.open(io.BytesIO(payload)) as converted:
+                self.assertEqual(converted.convert('RGBA').getpixel((0, 0)),
+                                 (10, 235, 30, 40))
+            self.assertEqual(
+                texture['conversion']['normal_y_conversion'],
+                'directx_y_negative_to_gltf_y_positive',
+            )
+
+    def test_missing_map_phong_uses_same_map_median(self):
+        materials = [
+            {'index': 0, 'pbr_estimate': {'roughness': 0.4}},
+            {'index': 1, 'pbr_estimate': None},
+            {'index': 2, 'pbr_estimate': {'roughness': 0.6}},
+        ]
+        ddm.stabilize_map_pbr_estimates(materials)
+        fallback = materials[1]['pbr_estimate']
+        self.assertAlmostEqual(fallback['roughness'], 0.5)
+        self.assertEqual(fallback['roughness_source'],
+                         'same_map_material_median_fallback')
+        self.assertEqual(fallback['confidence'], 0.25)
+
     def test_skinned_layout_is_identified_before_static_stream_heuristics(self):
         data = bytearray(ddm.MAGIC + struct.pack('>I', 3))
         data.extend(b'\0' * 24)
@@ -143,6 +259,23 @@ class MapGeometryTests(unittest.TestCase):
             self.assertFalse(failed.exists())
             self.assertEqual(marker.read_bytes(), b'glTF')
 
+    def test_main_succeeds_when_directory_contains_no_ddm(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / 'input'
+            source.mkdir()
+            (source / 'not_a_model').write_bytes(b'\x00hcs' + b'\0' * 8)
+            output = root / 'output'
+            argv = ['ddm_to_3d.py', str(source), str(output), '--recursive']
+            stdout = io.StringIO()
+
+            with mock.patch('sys.argv', argv), contextlib.redirect_stdout(stdout):
+                ddm.main()
+
+            self.assertIn('0 decoded', stdout.getvalue())
+            self.assertIn('1 non-DDM files skipped', stdout.getvalue())
+            self.assertIn('No DDM file decoded.', stdout.getvalue())
+
     def test_external_motion_boundary_table_is_detected(self):
         with tempfile.TemporaryDirectory() as root:
             kb = Path(root) / 'KB'
@@ -162,8 +295,9 @@ class MapGeometryTests(unittest.TestCase):
             motion[0xA6:0xA9] = bytes((7, 3, 9))
             sequence.write_bytes(motion)
             package.write_bytes(b'\0crg' + struct.pack('>2I', 2, 9))
-            result = ddm.find_external_character_motion(model)
+            result = motion_decode.discover_character_motion(model)
             self.assertEqual(result['clip_count'], 2)
+            self.assertEqual(result['segment_count'], 2)
             self.assertEqual(result['first_clip_offset'], 0xA0)
             self.assertEqual(result['sequence_end_offset'], 0xC0)
             self.assertEqual(result['skeleton_bone_ids'], [7, 3, 9])
