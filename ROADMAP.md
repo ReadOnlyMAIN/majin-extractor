@@ -81,6 +81,44 @@ The steps below are ordered. Each step must leave the test suite green.
   verified channels out of the experimental flags.
 - Add a golden test on a short clip.
 
+### 6. Reorganize the tools and research tree (after steps 4 and 5)
+
+Deferred until after steps 4 and 5 so the DDM code is functionally stable
+first. The current tree works and is already layered (no import cycles), but
+`tools/conversion/` is a flat bag that mixes four concepts: format decoders,
+output writers, shader research and the DDM decoder. The target groups modules
+by responsibility:
+
+```text
+tools/
+  extraction/            PAK extraction (unchanged)
+  formats/               input format decoders
+    xet.py               (ex xet_to_png.py)
+    dds.py               (ex dds_to_png.py)
+    motion.py            (ex motion_decode.py)
+    ddm/                 current DDM package
+  writers/               output writers
+    glb.py               (ex glb_export.py)
+    godot.py             (ex godot_export.py)
+    blend_mask.py
+  shaders/               RSX shader research
+    inspect.py           (ex shader_inspect.py)
+    disasm.py            (ex rsx_fp_disasm.py)
+  entry/                 CLI entry points
+    convert_ddm.py       (ex ddm_to_3d.py shim)
+research/
+  material_pbr.py        (ex material_pbr_estimator.py)
+```
+
+- Fix the fragile absolute import in `rsx_fp_disasm.py`
+  (`from tools.research.shader_inspect import ...`) so all internal imports use
+  one consistent style.
+- Remove the duplicated `try/except ImportError` fallbacks by separating the
+  library from its CLI entry points.
+- Update tests, `.vscode/launch.json`, `.vscode/tasks.json` and the docs to the
+  new paths. Keep `ddm_to_3d.py` available as a compatibility wrapper until
+  callers migrate.
+
 ## Documentation maintenance
 
 - `README.md`: goals, pipeline, and usage.
