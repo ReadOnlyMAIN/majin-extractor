@@ -13,8 +13,8 @@ from .binary import (
 )
 from .geometry import triangle_list, triangle_strip
 from .materials import (
-    apply_matcap_pbr_estimates, export_texture_payload, parse_materials,
-    resolve_material_textures,
+    apply_matcap_pbr_estimates, export_texture_payload, material_mode_of,
+    parse_materials, resolve_material_textures, uses_godot_materials,
 )
 
 try:
@@ -334,7 +334,7 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             materials = resolve_material_textures(
                 materials, path, texture_output, args.texture_root,
             )
-            if getattr(args, "material_mode", "pbr") == "pbr":
+            if material_mode_of(args) == "pbr":
                 apply_matcap_pbr_estimates(materials)
             for material in materials:
                 for texture in material.get("textures", []):
@@ -371,7 +371,7 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         animations=animations,
     )
     godot_materials = None
-    if getattr(args, "material_mode", "pbr") == "original-godot":
+    if uses_godot_materials(args):
         godot_materials = write_godot_material_assets(
             out_dir, materials, image_data,
             vertices=vertices,

@@ -10,7 +10,7 @@ instead preserved with `KHR_materials_specular`. The method, confidence, source
 texture, and measurements are preserved in material extras.
 
 This remains an approximation: core glTF 2.0 has no native matcap model and a
-matcap bakes lighting together with material response. `original-godot` keeps
+matcap bakes lighting together with material response. `godot` keeps
 the matcap shader path and takes roughness from the decoded DDM Phong material.
 
 The standalone research API remains reserved for future calibrated estimators;
@@ -19,7 +19,7 @@ the converter's current method is intentionally identified as
 
 ## Relationship to the DDM blend map
 
-`original-godot` additionally reconstructs the smooth transitions the original
+`godot` additionally reconstructs the smooth transitions the original
 RSX shader applies between submesh materials. Because the DDM stores one
 material per submesh, a direct port shows hard color seams where two submeshes
 meet. The exporter measures per-vertex distance to foreign-material faces

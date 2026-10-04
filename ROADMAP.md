@@ -27,7 +27,7 @@ reverse-engineering notes.
 | DDM → GLB (geometry, UV, normals, materials) | Working (experimental) | DDM v3 layouts only |
 | DDM skinned characters (skeleton, skin) | Working (experimental) | GLB `JOINTS_0`/`WEIGHTS_0` |
 | DDM → glTF animations | Partial | Root translation + Y heading verified; full joint binding unresolved |
-| RSX shader → Godot PBR material | Approximation | `original-godot` shader + `.tres` + blend maps |
+| RSX shader → Godot PBR material | Approximation | `godot` shader + `.tres` + blend maps |
 | Matcap/mask → PBR estimator | Placeholder | Research API only; not active |
 | Engine-specific sky | Out of scope | Reproduce with a native Godot `Sky` |
 
@@ -61,15 +61,23 @@ The steps below are ordered. Each step must leave the test suite green.
 - Dead code and unused imports were removed across the package.
 - Unused imports, undefined names and blank-line runs were cleaned up.
 
-### 4. Stabilize and generalize DDM → GLB + RSX → PBR
+### 4. Stabilize and generalize DDM → GLB + RSX → PBR — in progress
 
+Two material output modes are exposed through `--material-mode`: `pbr` (a
+portable, approximated glTF 2.0 material) and `godot` (a faithful Godot 4
+reconstruction with a shader, `.tres` materials and blend/environment maps).
+`original-godot` remains accepted as a deprecated alias of `godot`.
+
+- Done: golden-output test (`tests/test_glb_golden.py`) freezing the byte-exact
+  GLB of a reference DDM, plus structural and repeatability checks.
+- Done: explicit `godot` mode with a back-compatible alias, normalised through
+  `material_mode_of`/`uses_godot_materials`, and documented PBR-vs-Godot.
 - Broaden DDM variant coverage and report unsupported layouts clearly.
 - Make the texture-role → glTF channel classification robust and validated
   across multiple assets.
 - Decode the P31/P33 RSX blend formula and utility-mask polarity instead of
-  exposing them as manual parameters.
-- Add a golden-output test (a reference DDM with a frozen GLB) to guarantee no
-  regression.
+  exposing them as manual parameters; where an effect is not reproducible as
+  PBR, keep it in the `godot` shader path.
 
 ### 5. Export animations in the GLB
 

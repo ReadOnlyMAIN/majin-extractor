@@ -71,11 +71,14 @@ def main():
     ap.add_argument("output", type=Path, help="Output directory")
     ap.add_argument(
         "--material-mode",
-        choices=("pbr", "original-godot"),
+        choices=("pbr", "godot", "original-godot"),
         default="pbr",
         help=(
-            "Material output: portable glTF PBR only, or PBR fallback plus "
-            "external textures, a Godot 4 shader, and binding manifest."
+            "Material output: 'pbr' writes a portable glTF material only. "
+            "'godot' keeps the PBR fallback and additionally writes external "
+            "textures, a Godot 4 shader, and a binding manifest for faithful "
+            "reconstruction (blend maps, matcap/environment lookup). "
+            "'original-godot' is a deprecated alias of 'godot'."
         ),
     )
     ap.add_argument("--object-mode", choices=("auto", "connected", "submeshes", "single"),
@@ -98,7 +101,7 @@ def main():
         default=DEFAULT_BLEND_RADIUS,
         help=(
             "Radius in metres over which a neighbouring material influences "
-            "submesh seams in --material-mode original-godot. Larger values "
+            "submesh seams in --material-mode godot. Larger values "
             "produce wider smooth transitions; the default matches roughly "
             f"five source units ({DEFAULT_BLEND_RADIUS})."
         ),
@@ -195,8 +198,11 @@ def main():
     ap.add_argument("--debug", action="store_true")
 
     args = ap.parse_args()
-    if args.material_mode == "original-godot" and args.no_textures:
-        ap.error("--material-mode original-godot cannot be used with --no-textures")
+    if args.material_mode == "original-godot":
+        # Deprecated alias kept for existing launch configs and scripts.
+        args.material_mode = "godot"
+    if args.material_mode == "godot" and args.no_textures:
+        ap.error("--material-mode godot cannot be used with --no-textures")
     if args.experimental_rotation_joints and not args.experimental_root_motion:
         ap.error("--experimental-rotation-joints requires --experimental-root-motion")
     if not math.isfinite(args.scale) or args.scale <= 0.0:

@@ -1088,7 +1088,8 @@ evidence-based estimation pipeline and output contract live in
 `MATERIAL_PBR.md` and `tools/conversion/material_pbr_estimator.py`; no estimator
 is active in the converter.
 
-`--material-mode original-godot` preserves the portable PBR material in the GLB
+`--material-mode godot` (deprecated alias `original-godot`) preserves the
+portable PBR material in the GLB
 as a fallback and also writes a Godot 4 spatial shader, every referenced PNG,
 one configured `ShaderMaterial` `.tres` per DDM material, and a JSON
 sampler-binding manifest. Relative resource paths keep the generated Godot

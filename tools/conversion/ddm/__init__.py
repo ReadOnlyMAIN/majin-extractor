@@ -49,6 +49,7 @@ from .materials import (
     extract_length_prefixed_strings,
     find_phong_parameters,
     image_content_stats,
+    material_mode_of,
     parse_materials,
     phong_to_pbr_estimate,
     resolve_material_textures,
@@ -57,6 +58,7 @@ from .materials import (
     texture_candidate_rank,
     texture_file_index,
     texture_storage_names,
+    uses_godot_materials,
 )
 from .geometry import (
     SUBMESH_SIGNATURE,
@@ -103,12 +105,14 @@ __all__ = [
     "find_phong_parameters", "find_skinned_geometry_header",
     "find_submesh_descriptors", "finite3", "image_content_stats",
     "iter_input_files", "main", "normal_alignment_stats",
-    "output_directory_for", "parse_bool", "parse_int", "parse_materials",
+    "material_mode_of", "output_directory_for", "parse_bool", "parse_int",
+    "parse_materials",
     "phong_to_pbr_estimate", "prune_empty_output_directories",
     "quaternion_rotate", "resolve_material_textures", "resolve_texture_path",
     "score_position_stream", "stabilize_map_pbr_estimates",
     "texture_candidate_rank", "texture_file_index", "texture_storage_names",
-    "topology_stats", "triangle_list", "triangle_strip", "validate_obb",
+    "topology_stats", "triangle_list", "triangle_strip", "uses_godot_materials",
+    "validate_obb",
     "vec_cross", "vec_dot", "vec_len", "vec_normalize", "vec_sub",
     "write_indices", "write_vertices_csv",
 ]

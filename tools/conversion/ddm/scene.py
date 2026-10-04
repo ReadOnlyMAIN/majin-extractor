@@ -17,8 +17,9 @@ from .geometry import (
     validate_obb, write_indices, write_vertices_csv,
 )
 from .materials import (
-    apply_matcap_pbr_estimates, export_texture_payload, parse_materials,
-    resolve_material_textures, stabilize_map_pbr_estimates,
+    apply_matcap_pbr_estimates, export_texture_payload, material_mode_of,
+    parse_materials, resolve_material_textures, stabilize_map_pbr_estimates,
+    uses_godot_materials,
 )
 from .skinned import analyze_skinned_file, find_skinned_geometry_header
 
@@ -205,7 +206,7 @@ def analyze_file(
             materials = resolve_material_textures(
                 materials, path, texture_output, args.texture_root,
             )
-            if getattr(args, "material_mode", "pbr") == "pbr":
+            if material_mode_of(args) == "pbr":
                 apply_matcap_pbr_estimates(materials)
             for material in materials:
                 for texture in material.get("textures", []):
@@ -344,7 +345,7 @@ def analyze_file(
         mode=object_mode, image_data=image_data,
         roughness=getattr(args, "roughness", None),
     )
-    if getattr(args, "material_mode", "pbr") == "original-godot":
+    if uses_godot_materials(args):
         report["godot_materials"] = write_godot_material_assets(
             out_dir, materials, image_data,
             vertices=vertices,

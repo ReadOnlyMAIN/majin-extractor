@@ -2,12 +2,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from tools.conversion.blend_mask import (
     DEFAULT_BLEND_RADIUS,
     MAX_BLEND_MATERIALS,
     build_blend_map,
     select_material_slots,
+)
+from tools.conversion.ddm.materials import (
+    material_mode_of,
+    uses_godot_materials,
 )
 from tools.conversion.godot_export import (
     write_godot_material_assets,
@@ -144,6 +149,22 @@ class GodotExportTests(unittest.TestCase):
             images = {"textures/a.png": b"\x89PNG\r\n\x1a\n", "textures/b.png": b"\x89PNG\r\n\x1a\n"}
             result = write_godot_material_assets(out, materials, images)
             self.assertEqual(result["blend_map_count"], 0)
+
+
+class MaterialModeTests(unittest.TestCase):
+    def test_pbr_is_the_default_mode(self):
+        self.assertEqual(material_mode_of(SimpleNamespace()), "pbr")
+        self.assertFalse(uses_godot_materials(SimpleNamespace()))
+
+    def test_godot_mode_emits_godot_assets(self):
+        args = SimpleNamespace(material_mode="godot")
+        self.assertEqual(material_mode_of(args), "godot")
+        self.assertTrue(uses_godot_materials(args))
+
+    def test_original_godot_is_a_deprecated_alias_of_godot(self):
+        args = SimpleNamespace(material_mode="original-godot")
+        self.assertEqual(material_mode_of(args), "godot")
+        self.assertTrue(uses_godot_materials(args))
 
 
 if __name__ == "__main__":

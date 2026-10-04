@@ -466,6 +466,23 @@ def convert_xet_texture(source: Path, destination: Path):
     }
 
 
+def material_mode_of(args) -> str:
+    """Return the normalised material output mode ('pbr' or 'godot').
+
+    ``original-godot`` is accepted as a deprecated alias of ``godot`` so that
+    existing launch configurations and scripts keep working.
+    """
+    mode = getattr(args, "material_mode", "pbr") or "pbr"
+    if mode == "original-godot":
+        return "godot"
+    return mode
+
+
+def uses_godot_materials(args) -> bool:
+    """Whether Godot 4 shader/material assets should be emitted."""
+    return material_mode_of(args) == "godot"
+
+
 def classify_material_textures(textures):
     for texture in textures:
         if not texture.get("conversion"):

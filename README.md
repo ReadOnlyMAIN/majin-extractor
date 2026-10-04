@@ -237,15 +237,30 @@ used during reverse engineering. Positions are
 scaled by `0.01` to convert the observed centimeter-like units to meters;
 use `--scale` to override this.
 
-Godot 4 reconstruction assets can be emitted alongside the PBR fallback:
+### Material output modes
+
+`--material-mode` selects between two material strategies:
+
+- **`pbr`** (default) — a portable glTF 2.0 material only. Legacy Phong is
+  converted to PBR metallic-roughness, a reflection matcap may refine the
+  roughness, and legacy specular color is carried by `KHR_materials_specular`.
+  The GLB is self-contained and imports into any glTF 2.0 viewer or engine.
+- **`godot`** — faithfully reconstructs the original look for **Godot 4**.
+  It keeps the same portable PBR material in the GLB *and* additionally writes
+  external PNG textures, a `majin_original.gdshader`, one ready-to-use
+  `ShaderMaterial` `.tres` per DDM material, and a
+  `materials/material_bindings.json` manifest. Use this mode whenever a PBR
+  approximation is not enough (smooth submesh transitions, matcap/environment
+  lookups, the utility mask) and you want a guaranteed-faithful Godot 4 result.
+  `original-godot` is accepted as a deprecated alias of `godot`.
 
 ```bash
 python tools/conversion/ddm_to_3d.py \
   game_files/decompressed/KB/chara/chr300/chr300 output \
-  --material-mode original-godot --final
+  --material-mode godot --final
 ```
 
-This mode adds `materials/majin_original.gdshader`, one ready-to-use
+The `godot` mode adds `materials/majin_original.gdshader`, one ready-to-use
 `ShaderMaterial` `.tres` per DDM material, external PNG textures, and
 `materials/material_bindings.json`. After importing the GLB in Godot, assign
 the matching `.tres` listed for each DDM material in the manifest.
@@ -260,10 +275,10 @@ where two submeshes meet. The real renderer hides those seams with a shader
 blend that cannot be recovered from the exported geometry alone: the RSX
 fragment program may use a mask texture, a derivative-based stencil, or
 per-fragment arithmetic that no longer exists in the DDM data. The
-`original-godot` mode therefore reconstructs an *approximation* of the smooth
+`godot` mode therefore reconstructs an *approximation* of the smooth
 transition and bakes it into a UV-space texture.
 
-When `--material-mode original-godot` is used and the DDM contains more than
+When `--material-mode godot` is used and the DDM contains more than
 one material, the exporter measures, for every vertex, how close it is to
 faces belonging to other materials. Vertices within `--blend-radius` metres of
 a foreign face receive a weight proportional to the linear falloff to that
@@ -301,7 +316,7 @@ apply:
   uses the unchanged single-texture path.
 
 Geometry that triggers blending is required: passing `--material-mode
-original-godot` on a DDM where every material is spatially isolated produces
+godot` on a DDM where every material is spatially isolated produces
 zero blend maps (`blend_map_count = 0` in the analysis report) and all
 materials keep `use_blend = false`.
 
