@@ -483,31 +483,78 @@ def uses_godot_materials(args) -> bool:
     return material_mode_of(args) == "godot"
 
 
+_NORMAL_SUFFIX_RE = re.compile(r"_n\d*$", re.IGNORECASE)
+_COLOR_SUFFIX_RE = re.compile(r"_c\d*$", re.IGNORECASE)
+_MATCAP_SUFFIX_RE = re.compile(r"_f\d*$", re.IGNORECASE)
+_UTILITY_SUFFIX_RE = re.compile(r"_u\d*$", re.IGNORECASE)
+
+
+def texture_suffix_role(reference: str) -> str | None:
+    """Return the material-role hint encoded in a texture filename suffix.
+
+    The suffix is a *correlation*, not a decoded contract (see
+    ``MATERIAL_PBR.md``): ``_c*`` is a base-color candidate, ``_n*`` a normal
+    map, ``_f*`` a view-dependent reflection/matcap lookup, and ``_u*`` a
+    utility mask. Content statistics still confirm or veto the hint.
+    """
+    name = reference.replace("\\", "/").rsplit("/", 1)[-1]
+    if _MATCAP_SUFFIX_RE.search(name):
+        return "matcap"
+    if _NORMAL_SUFFIX_RE.search(name):
+        return "normal"
+    if _UTILITY_SUFFIX_RE.search(name):
+        return "utility_mask"
+    if _COLOR_SUFFIX_RE.search(name):
+        return "diffuse"
+    return None
+
+
+def _content_role(stats: dict) -> str | None:
+    """Return the role implied by image content statistics, if any."""
+    if stats.get("blue_normal_ratio", 0.0) >= 0.80:
+        return "normal"
+    if stats.get("red_mask_ratio", 0.0) >= 0.60:
+        return "mask"
+    return None
+
+
 def classify_material_textures(textures):
     for texture in textures:
         if not texture.get("conversion"):
             texture["role"] = "unresolved"
+            texture["role_source"] = "unresolved"
             continue
-        reference = texture.get("reference", "").replace("\\", "/").rsplit("/", 1)[-1]
-        # Character materials use *_c* for color textures and *_f* for small
-        # view-dependent reflection/matcap lookups. Content statistics alone
-        # used to promote chr300_f to diffuse because it was larger than the
-        # valid 16x16 chr300_c01 color swatch.
-        if re.fullmatch(r"chr\d+_f\d*", reference, re.IGNORECASE):
-            texture["role"] = "matcap"
-            continue
-        if re.search(r"_c\d*$", reference, re.IGNORECASE):
-            texture["role"] = "diffuse_candidate"
-            continue
+        reference = texture.get("reference", "")
         stats = texture["conversion"].get("content", {})
-        if stats.get("blue_normal_ratio", 0.0) >= 0.80:
+        hint = texture_suffix_role(reference)
+        content = _content_role(stats)
+
+        if hint == "matcap":
+            # A matcap lookup must never become albedo, even if its content
+            # looks flat; the suffix is the only available discriminator.
+            texture["role"] = "matcap"
+            texture["role_source"] = "suffix"
+        elif hint == "normal" or content == "normal":
             texture["role"] = "normal"
-        elif stats.get("red_mask_ratio", 0.0) >= 0.60:
-            texture["role"] = (
-                "utility_mask" if "_u" in reference.lower() else "specular_mask"
+            texture["role_source"] = (
+                "suffix+content" if (hint == "normal" and content == "normal")
+                else ("content" if content == "normal" else "suffix")
             )
+        elif content == "mask":
+            is_utility = hint == "utility_mask"
+            texture["role"] = "utility_mask" if is_utility else "specular_mask"
+            texture["role_source"] = "content+suffix" if is_utility else "content"
+        elif hint == "utility_mask":
+            # Suffix says utility mask but content does not look strongly red:
+            # keep the naming hint but record the weaker evidence.
+            texture["role"] = "utility_mask"
+            texture["role_source"] = "suffix"
+        elif hint == "diffuse":
+            texture["role"] = "diffuse_candidate"
+            texture["role_source"] = "suffix"
         else:
             texture["role"] = "auxiliary"
+            texture["role_source"] = "fallback"
 
     named_diffuse_candidates = [
         texture
@@ -527,10 +574,13 @@ def classify_material_textures(textures):
                 -texture["conversion"]["content"].get("grayscale_ratio", 0.0),
             ),
         )
+        named = diffuse.get("role") == "diffuse_candidate"
         diffuse["role"] = "diffuse"
+        diffuse["role_source"] = "suffix+size" if named else "size_fallback"
     for texture in named_diffuse_candidates:
         if texture.get("role") == "diffuse_candidate":
             texture["role"] = "auxiliary"
+            texture["role_source"] = "demoted"
 
 
 def resolve_material_textures(materials, model_path, out_dir, texture_root=None):

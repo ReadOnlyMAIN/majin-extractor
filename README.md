@@ -346,16 +346,24 @@ passes are omitted when a diffuse surface occupies the same triangle, avoiding
 the z-fighting produced by legacy multipass terrain. Auxiliary shader textures
 are not mapped.
 
-Texture-role inference is still provisional for character materials. Shader
-reflection identifies `chr300_u01` as `textureSamplerUtil`, but its scalar
-operation is not yet decoded and it must not be treated directly as glTF
-roughness or metallic data. Small `*_f*` images can be
-view-dependent matcap/reflection lookups; core glTF 2.0 has no matcap material
-model, and treating such a lookup as albedo is incorrect. The current generic
-classifier therefore excludes `*_f*` references from albedo and gives `*_c*`
-references priority as base color, including small color swatches such as
-`chr300_c01`. The PBR approximation and its limits are documented in
-[`MATERIAL_PBR.md`](MATERIAL_PBR.md).
+Texture-role inference is provisional and combines a filename-suffix hint with
+image content statistics; suffixes are correlations, not a decoded contract.
+The classifier reads `*_c*` (base-color candidate), `*_n*` (normal),
+`*_f*` (view-dependent matcap/reflection) and `*_u*` (utility mask), then
+confirms or vetoes each hint against the decoded pixels: a strongly blue image
+is a normal map even without a suffix, and a matcap suffix always excludes the
+image from albedo. Every texture records a `role_source` field
+(`suffix`, `content`, `suffix+content`, `content+suffix`, `size_fallback`,
+`demoted`, or `unresolved`) in `analysis.json` so the decision is auditable.
+
+Shader reflection identifies `chr300_u01` as `textureSamplerUtil`, but its
+scalar operation is not yet decoded and it must not be treated directly as glTF
+roughness or metallic data. Small `*_f*` images can be view-dependent
+matcap/reflection lookups; core glTF 2.0 has no matcap material model, and
+treating such a lookup as albedo is incorrect, so `*_f*` references are always
+excluded from albedo and `*_c*` references take priority as base color,
+including small swatches such as `chr300_c01`. The PBR approximation and its
+limits are documented in [`MATERIAL_PBR.md`](MATERIAL_PBR.md).
 
 DDM normal textures use the DirectX-style tangent-space Y− convention observed
 in the original assets. When a texture is classified as a normal map, the DDM

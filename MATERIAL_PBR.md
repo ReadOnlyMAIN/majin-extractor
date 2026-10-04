@@ -91,6 +91,26 @@ roughness-like value. It must not be connected directly to glTF roughness or
 metallic channels until cross-model and shader evidence establishes the
 mapping and polarity.
 
+## Classifier provenance
+
+Texture roles are assigned by combining a filename-suffix hint (`_c`, `_n`,
+`_f`, `_u`) with image content statistics, and each result carries a
+`role_source` field recording which evidence decided it:
+
+| `role_source` | Meaning |
+| --- | --- |
+| `suffix` | Only the filename suffix decided (for example a `_f` matcap, or an `_n`/`_u` hint the content did not confirm). |
+| `content` | Only the pixels decided (strongly blue normal, or a red mask with no matching suffix). |
+| `suffix+content` | Suffix and content agree (for example `_n` with a blue image). |
+| `content+suffix` | A red mask whose `_u` suffix makes it a utility mask rather than a specular mask. |
+| `suffix+size` / `size_fallback` | Base-color pick among named candidates / largest remaining auxiliary. |
+| `demoted` | A `_c` candidate that lost base-color selection and became auxiliary. |
+| `unresolved` | The texture file could not be resolved or converted. |
+
+This keeps the naming heuristics auditable and lets a future calibrated
+estimator replace individual rules without hiding why the current role was
+chosen.
+
 Leader enemies are observed in game with white armor. Their material variant
 adds `chr300_u01` and `chr300_f02` to the ordinary armor's shared base-color and
 normal textures. Shader reflection metadata establishes the matching bindings

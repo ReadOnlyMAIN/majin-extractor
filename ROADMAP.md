@@ -72,9 +72,10 @@ reconstruction with a shader, `.tres` materials and blend/environment maps).
   GLB of a reference DDM, plus structural and repeatability checks.
 - Done: explicit `godot` mode with a back-compatible alias, normalised through
   `material_mode_of`/`uses_godot_materials`, and documented PBR-vs-Godot.
+- Done: suffix-aware, content-validated texture classification
+  (`texture_suffix_role` + `role_source` provenance in `materials.py`,
+  covered by `tests/test_material_classify.py`).
 - Broaden DDM variant coverage and report unsupported layouts clearly.
-- Make the texture-role → glTF channel classification robust and validated
-  across multiple assets.
 - Decode the P31/P33 RSX blend formula and utility-mask polarity instead of
   exposing them as manual parameters; where an effect is not reproducible as
   PBR, keep it in the `godot` shader path.

@@ -58,6 +58,7 @@ from .materials import (
     texture_candidate_rank,
     texture_file_index,
     texture_storage_names,
+    texture_suffix_role,
     uses_godot_materials,
 )
 from .geometry import (
@@ -111,6 +112,7 @@ __all__ = [
     "quaternion_rotate", "resolve_material_textures", "resolve_texture_path",
     "score_position_stream", "stabilize_map_pbr_estimates",
     "texture_candidate_rank", "texture_file_index", "texture_storage_names",
+    "texture_suffix_role",
     "topology_stats", "triangle_list", "triangle_strip", "uses_godot_materials",
     "validate_obb",
     "vec_cross", "vec_dot", "vec_len", "vec_normalize", "vec_sub",
