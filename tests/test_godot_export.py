@@ -15,8 +15,11 @@ from tools.conversion.ddm.materials import (
     uses_godot_materials,
 )
 from tools.conversion.godot_export import (
+    GODOT_ASSIGN_SCRIPT,
+    GODOT_SHADER,
     _fold_multipass_details,
     write_godot_material_assets,
+    write_godot_utility,
 )
 
 
@@ -40,9 +43,12 @@ class GodotExportTests(unittest.TestCase):
             }
             result = write_godot_material_assets(out, materials, images)
             manifest = json.loads((out / result["manifest"]).read_text())
-            shader = (out / result["shader"]).read_text()
+            shader = GODOT_SHADER
             self.assertIn("shader_type spatial;", shader)
             self.assertIn("uniform bool use_blend", shader)
+            self.assertEqual(
+                result["shader"], "res://majin_utility/majin_original.gdshader"
+            )
             self.assertEqual(manifest["materials"][0]["switches"]["use_blend"], False)
             self.assertIsNone(manifest["materials"][0]["blend_map"])
             # Single-material path does not generate a blend map.
@@ -82,7 +88,7 @@ class GodotExportTests(unittest.TestCase):
                 binding["uniforms"]["detail_normal_texture"], "textures/multi_n.png"
             )
             self.assertEqual(binding["scalars"]["detail_strength"], 0.75)
-            shader = (out / result["shader"]).read_text()
+            shader = GODOT_SHADER
             self.assertIn("uniform sampler2D detail_texture", shader)
             tres = (out / binding["shader_material"]).read_text()
             self.assertIn("shader_parameter/detail_texture", tres)
@@ -272,6 +278,44 @@ class MultipassDetailFoldTests(unittest.TestCase):
         self.assertEqual(folds, [])
         self.assertNotIn("detail", base)
         self.assertNotIn("detail", other)
+
+
+class GodotUtilityTests(unittest.TestCase):
+    def test_repository_utility_folder_matches_the_constants(self):
+        # godot/utility/ is the versioned source of truth; the Python constants
+        # must stay identical so an installed copy never drifts from the export.
+        repo_utility = (
+            Path(__file__).resolve().parent.parent / "godot" / "utility"
+        )
+        self.assertEqual(
+            (repo_utility / "majin_original.gdshader").read_text(),
+            GODOT_SHADER,
+        )
+        self.assertEqual(
+            (repo_utility / "assign_materials.gd").read_text(),
+            GODOT_ASSIGN_SCRIPT,
+        )
+
+    def test_write_godot_utility_copies_shader_and_script(self):
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "majin_utility"
+            written = write_godot_utility(destination)
+            names = sorted(path.name for path in written)
+            self.assertEqual(names, ["assign_materials.gd", "majin_original.gdshader"])
+            shader = (destination / "majin_original.gdshader").read_text()
+            script = (destination / "assign_materials.gd").read_text()
+            self.assertIn("shader_type spatial;", shader)
+            self.assertIn("extends EditorScript", script)
+            self.assertIn("material_bindings.json", script)
+
+    def test_write_godot_utility_does_not_overwrite_by_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "majin_utility"
+            write_godot_utility(destination)
+            shader_path = destination / "majin_original.gdshader"
+            shader_path.write_text("custom")
+            write_godot_utility(destination, overwrite=False)
+            self.assertEqual(shader_path.read_text(), "custom")
 
 
 if __name__ == "__main__":

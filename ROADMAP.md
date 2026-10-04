@@ -83,6 +83,9 @@ reconstruction with a shader, `.tres` materials and blend/environment maps).
   `gake102__multi` over `gake102__base`) are collapsed as exact duplicates in
   `pbr`, and folded into the host as a shader-mixed **detail layer** in `godot`
   (`_fold_multipass_details` + `detail_texture`/`detail_normal_texture`).
+- Done: reusable Godot assets live once in `godot/utility/` (shader +
+  `assign_materials.gd`) instead of being regenerated per export; `.tres`
+  reference the stable `res://majin_utility/majin_original.gdshader` path.
 - Port `map101` in `godot` mode as the reference map workflow, then iterate on
   the remaining fidelity gaps (P31/P33 environment vector, utility-mask
   polarity, partial decals) — `godot` may diverge freely from `pbr`.

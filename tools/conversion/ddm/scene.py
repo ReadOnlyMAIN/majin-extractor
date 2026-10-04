@@ -480,7 +480,7 @@ def analyze_file(
         )
     if report.get("godot_materials"):
         godot = report["godot_materials"]
-        print(f"  Godot shader     : {out_dir / godot['shader']}")
+        print(f"  Godot shader     : {godot['shader']}")
         print(f"  Godot bindings   : {out_dir / godot['manifest']}")
         if godot.get("detail_fold_count"):
             print(f"  Godot detail maps: {godot['detail_fold_count']} multipass overlay(s) folded")

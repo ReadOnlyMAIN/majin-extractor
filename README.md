@@ -264,10 +264,25 @@ python tools/conversion/ddm_to_3d.py \
   --material-mode godot --final
 ```
 
-The `godot` mode adds `materials/majin_original.gdshader`, one ready-to-use
-`ShaderMaterial` `.tres` per DDM material, external PNG textures, and
-`materials/material_bindings.json`. After importing the GLB in Godot, assign
-the matching `.tres` listed for each DDM material in the manifest.
+The `godot` mode adds one ready-to-use `ShaderMaterial` `.tres` per DDM
+material, external PNG textures, and `materials/material_bindings.json`. After
+importing the GLB in Godot, assign the matching `.tres` listed for each DDM
+material in the manifest.
+
+### Godot utility assets
+
+The shader and the material-assignment helper are reusable and versioned in
+[`godot/utility/`](godot/utility) (see [`godot/README.md`](godot/README.md)).
+They are **not** regenerated on every export; the `.tres` files reference the
+stable project path `res://majin_utility/majin_original.gdshader`. Install the
+folder once into your Godot project at `res://majin_utility/`.
+
+A GLB cannot reference external Godot resources, so the imported model starts
+with `StandardMaterial3D` on every surface. `godot/utility/assign_materials.gd`
+is an `EditorScript` that assigns the generated `.tres` files by material name
+from `material_bindings.json`: open it in the Godot editor and run it
+(**File > Run**) once after importing the model.
+
 `reflection_strength` and `invert_utility` are
 exposed because the P31/P33 sampler bindings are proven but their exact RSX
 blend formula and mask polarity are not yet decoded.

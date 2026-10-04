@@ -159,6 +159,137 @@ ROLE_TO_UNIFORM = {
     "detail_mask": "detail_mask",
 }
 
+# Stable Godot project location for the reusable utility assets. The exporter
+# references the shader through this path so materials never embed a copy, and
+# ``godot/utility/`` only has to be installed once.
+GODOT_UTILITY_DIR = "res://majin_utility"
+SHADER_FILE_NAME = "majin_original.gdshader"
+ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
+
+
+def write_godot_utility(destination, overwrite=True):
+    """Write the reusable Godot utility assets into ``destination``.
+
+    Copies the shader and the material-assignment script so they can be dropped
+    into a Godot project at ``res://majin_utility/``. Returns the list of
+    written paths. The in-repository ``godot/utility/`` folder is the source of
+    truth; this function keeps the emitted copy identical to it.
+    """
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, content in (
+        (SHADER_FILE_NAME, GODOT_SHADER),
+        (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
+    ):
+        path = destination / name
+        if overwrite or not path.exists():
+            path.write_text(content, encoding="ascii")
+        written.append(path)
+    return written
+
+
+# Godot 4 helper that assigns the generated ShaderMaterial `.tres` files to the
+# imported GLB. A GLB cannot reference external resources, so the portable glTF
+# import always yields StandardMaterial3D; this script replaces them using the
+# names recorded in ``material_bindings.json``.
+GODOT_ASSIGN_SCRIPT = '''@tool
+extends EditorScript
+
+## Assign the generated ShaderMaterial .tres files to an imported DDM GLB.
+##
+## A glTF/GLB import cannot reference external Godot resources, so Godot creates
+## a StandardMaterial3D for every surface. This script walks the currently open
+## scene (or a chosen model directory) and, for each mesh surface, looks up the
+## material name in the sibling ``material_bindings.json`` and assigns the
+## matching ShaderMaterial.
+##
+## Usage in the Godot 4 editor:
+##   1. Open this file and run it (File > Run), or attach it to a @tool script.
+##   2. It defaults to the directory of the imported model. Adjust MODEL_DIR if
+##      you run it from a different location.
+
+const MODEL_DIR := "res://"
+
+func _run() -> void:
+	var assignments := _load_bindings()
+	if assignments.is_empty():
+		push_warning("assign_materials: no material_bindings.json found under %s" % MODEL_DIR)
+		return
+	var roots := []
+	if Engine.is_editor_hint():
+		roots = EditorInterface.get_selection().get_selected_nodes()
+	if roots.is_empty():
+		roots = _find_mesh_roots()
+	var applied := 0
+	var missing := {}
+	for root in roots:
+		applied += _assign_recursive(root, assignments, missing)
+	print("assign_materials: assigned %d surface(s)." % applied)
+	if not missing.is_empty():
+		push_warning("assign_materials: unmatched material names: %s" % str(missing.keys()))
+
+func _load_bindings() -> Dictionary:
+	# ~{material_name: ShaderMaterial}: built from every manifest found under
+	# MODEL_DIR so a whole export tree can be fixed in one run.
+	var result := {}
+	for path in _find_files(MODEL_DIR, "material_bindings.json"):
+		var text := FileAccess.get_file_as_string(path)
+		var data = JSON.parse_string(text)
+		if typeof(data) != TYPE_DICTIONARY:
+			continue
+		var base := path.get_base_dir()
+		for entry in data.get("materials", []):
+			var name: String = entry.get("material_name", "")
+			var tres: String = entry.get("shader_material", "")
+			if name == "" or tres == "":
+				continue
+			var resource := load(base.path_join(tres))
+			if resource is ShaderMaterial:
+				result[name] = resource
+	return result
+
+func _assign_recursive(node: Node, assignments: Dictionary, missing: Dictionary) -> int:
+	var count := 0
+	if node is MeshInstance3D:
+		var mesh: Mesh = node.mesh
+		if mesh != null:
+			for surface in mesh.get_surface_count():
+				var current := mesh.surface_get_material(surface)
+				var name := ""
+				if current != null:
+					name = current.resource_name
+				if assignments.has(name):
+					node.set_surface_override_material(surface, assignments[name])
+					count += 1
+				elif name != "":
+					missing[name] = true
+	for child in node.get_children():
+		count += _assign_recursive(child, assignments, missing)
+	return count
+
+func _find_mesh_roots() -> Array:
+	var scene := EditorInterface.get_edited_scene_root()
+	return [scene] if scene != null else []
+
+func _find_files(dir_path: String, file_name: String) -> PackedStringArray:
+	var found := PackedStringArray()
+	var dir := DirAccess.open(dir_path)
+	if dir == null:
+		return found
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if dir.current_is_dir() and not entry.begins_with("."):
+			found.append_array(_find_files(dir_path.path_join(entry), file_name))
+		elif entry == file_name:
+			found.append(dir_path.path_join(entry))
+		entry = dir.get_next()
+	dir.list_dir_end()
+	return found
+'''
+
+
 # Slot 0 is always the material the vertex originally belonged to. Slots 1..3
 # are foreign materials reachable within the blend radius.
 MAX_BLEND_SLOTS = 4
@@ -424,11 +555,12 @@ def write_godot_material_assets(
     """
     material_dir = out_dir / "materials"
     material_dir.mkdir(parents=True, exist_ok=True)
-    # All sibling model directories use the exact same shader. Keep one copy
-    # beside those directories instead of duplicating it inside every model.
-    shader_path = out_dir.parent / "majin_original.gdshader"
-    shader_path.write_text(GODOT_SHADER, encoding="ascii")
-    shader_reference = Path("..", "..", shader_path.name).as_posix()
+    # The shader and assignment script are reusable Godot project assets. They
+    # live in ``godot/utility/`` and are installed once under
+    # ``res://majin_utility/``; the generated materials reference that stable
+    # path instead of regenerating the shader on every export. Use
+    # :func:`write_godot_utility` to copy the folder into a Godot project.
+    shader_reference = f"{GODOT_UTILITY_DIR}/{SHADER_FILE_NAME}"
 
     for relative, payload in image_data.items():
         destination = out_dir / relative
@@ -494,7 +626,7 @@ def write_godot_material_assets(
         bindings.append({
             "material_index": material["index"],
             "material_name": material.get("name", f'material_{material["index"]}'),
-            "shader": (Path("..") / shader_path.name).as_posix(),
+            "shader": shader_reference,
             "shader_material": resource_path.relative_to(out_dir).as_posix(),
             "uniforms": uniforms,
             "switches": switches,
@@ -510,7 +642,7 @@ def write_godot_material_assets(
         encoding="ascii",
     )
     return {
-        "shader": (Path("..") / shader_path.name).as_posix(),
+        "shader": shader_reference,
         "manifest": manifest_path.relative_to(out_dir).as_posix(),
         "shader_materials": material_resources,
         "texture_count": len(image_data),

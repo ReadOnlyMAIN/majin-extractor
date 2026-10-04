@@ -449,6 +449,6 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         print("  animations       : 0 embedded")
     print(f"  output           : {mesh_path}")
     if godot_materials:
-        print(f"  Godot shader     : {out_dir / godot_materials['shader']}")
+        print(f"  Godot shader     : {godot_materials['shader']}")
         print(f"  Godot bindings   : {out_dir / godot_materials['manifest']}")
     return report
