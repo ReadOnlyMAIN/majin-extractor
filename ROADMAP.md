@@ -51,13 +51,15 @@ The steps below are ordered. Each step must leave the test suite green.
 - Lightweight CSV/JSON diagnostics used during reverse engineering are kept
   behind the default (non-`--final`) path.
 
-### 3. Clean up the code and architecture
+### 3. Clean up the code and architecture — done
 
-- Split the monolithic `ddm_to_3d.py` into focused modules (binary reads,
-  materials, geometry, skinned export, scene, CLI).
-- Remove dead code, stale caches, and archived prototypes that are no longer
-  referenced.
-- Optimize texture indexing and linear format scans.
+- The monolithic `ddm_to_3d.py` (≈2450 lines) is split into a focused
+  `tools/conversion/ddm/` package: `binary` (primitive reads), `materials`
+  (materials/textures/PBR), `geometry` (topology/submeshes/map sections),
+  `skinned` (skeleton + skin), `scene` (export orchestration) and `cli`.
+  `ddm_to_3d.py` is now a thin, backward-compatible re-export shim.
+- Dead code and unused imports were removed across the package.
+- Unused imports, undefined names and blank-line runs were cleaned up.
 
 ### 4. Stabilize and generalize DDM → GLB + RSX → PBR
 

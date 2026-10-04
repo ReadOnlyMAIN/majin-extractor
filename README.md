@@ -32,7 +32,14 @@ tools/
   conversion/
     xet_to_png.py          XET textures to PNG
     dds_to_png.py          DDS textures (DXT1/DXT5) to PNG
-    ddm_to_3d.py           DDM models to GLB (glTF 2.0)
+    ddm_to_3d.py           DDM → GLB entry point (re-export shim)
+    ddm/                   DDM decoder package
+      binary.py            big-endian reads and packed-attribute decoders
+      materials.py         material parsing, textures, PBR estimates
+      geometry.py          topology, submesh descriptors, map sections
+      skinned.py           skinned character skeleton/skin decoding
+      scene.py             model/scene decoding and GLB export
+      cli.py               command-line interface
     glb_export.py          low-level static and skinned GLB writer
     godot_export.py        Godot 4 shader + ShaderMaterial assets
     blend_mask.py          submesh seam blend-map generation
