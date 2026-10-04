@@ -75,7 +75,10 @@ reconstruction with a shader, `.tres` materials and blend/environment maps).
 - Done: suffix-aware, content-validated texture classification
   (`texture_suffix_role` + `role_source` provenance in `materials.py`,
   covered by `tests/test_material_classify.py`).
-- Broaden DDM variant coverage and report unsupported layouts clearly.
+- Done: unsupported DDM layouts raise a structured `UnsupportedDDMVariant`
+  carrying `version`/`variant`/`reason`, reported by the CLI as
+  `[UNSUPPORTED]` (distinct from `[ERROR]` for corrupt files), covered by
+  `tests/test_ddm_variant.py`.
 - Decode the P31/P33 RSX blend formula and utility-mask polarity instead of
   exposing them as manual parameters; where an effect is not reproducible as
   PBR, keep it in the `godot` shader path.

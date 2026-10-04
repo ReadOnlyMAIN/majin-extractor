@@ -9,9 +9,35 @@ MAGIC = b"\x00ddm"
 POSITION_STRIDE = 24
 ATTRIBUTE_STRIDE = 16
 
+# Version word at offset 4 -> human-readable layout family. Only version 3 is
+# decoded today; the table exists so unsupported variants report their family
+# instead of a bare integer.
+KNOWN_DDM_VERSIONS = {
+    3: "v3 (map/static + skinned character)",
+}
+
 
 class UnsupportedDDMVariant(RuntimeError):
-    """A valid DDM whose geometry layout is not implemented yet."""
+    """A valid DDM whose geometry layout is not implemented yet.
+
+    Carries structured attributes so callers can report the detected variant
+    without parsing the message: ``version`` (the raw version word or ``None``),
+    ``variant`` (a human-readable layout family) and ``reason`` (why it was
+    rejected).
+    """
+
+    def __init__(self, reason, version=None, variant=None):
+        self.version = version
+        self.variant = variant or ddm_variant_name(version)
+        self.reason = reason
+        super().__init__(f"{self.variant}: {reason}")
+
+
+def ddm_variant_name(version):
+    """Return a human-readable layout family for a DDM version word."""
+    if version is None:
+        return "unknown DDM variant"
+    return KNOWN_DDM_VERSIONS.get(version, f"unrecognized version {version}")
 
 
 def be_u32(data: bytes, off: int) -> int:

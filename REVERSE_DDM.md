@@ -1011,6 +1011,14 @@ The skinned character layout is decoded for the undecorated character DDMs,
 including the observed `chr300`, `chr302`, `chr310`, `chr314`, and `chr330`
 variants.
 
+The converter only auto-detects the `v3` layout (version word `3` at offset 4).
+A DDM whose magic is valid but whose geometry layout cannot be auto-detected is
+rejected with a structured `UnsupportedDDMVariant` (`version`, `variant`,
+`reason`) rather than a generic error, so new variants are reported clearly
+instead of being mistaken for corrupt files. Callers can override detection with
+`--vertex-count`, `--position-offset`, `--index-offset` and `--index-count` to
+force a variant the heuristics miss.
+
 
 ## Map GLB export
 

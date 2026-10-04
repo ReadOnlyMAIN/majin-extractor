@@ -138,10 +138,14 @@ The root translation and Y-axis heading bindings are established. Joint rotation
 research is available behind explicit experimental options; it is not enabled by
 default. Those options are diagnostic and do not yet produce a correctly posed
 full character animation. Recursive scans skip non-DDM files and report
-unsupported variants without creating per-file output directories. Empty
-directories created before a later conversion error are pruned, while nonempty
-output is retained. Findings are recorded in
-[`REVERSE_DDM.md`](REVERSE_DDM.md).
+unsupported variants without creating per-file output directories. A DDM that
+is valid but uses a layout the converter does not implement is reported as
+`[UNSUPPORTED]` with the detected variant family, its raw version word, and the
+reason (for example `v3 (map/static + skinned character), version=3: no submesh
+descriptor found for this layout`). These differ from `[ERROR]` lines, which
+flag genuinely corrupt, truncated or unreadable files. Empty directories
+created before a later conversion error are pruned, while nonempty output is
+retained. Findings are recorded in [`REVERSE_DDM.md`](REVERSE_DDM.md).
 
 Motion parsing is isolated in `motion_decode.py`. It can inspect a character
 independently, while `ddm_to_3d.py` calls its API for skinned characters and

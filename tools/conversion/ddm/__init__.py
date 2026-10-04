@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from .binary import (
     ATTRIBUTE_STRIDE,
+    KNOWN_DDM_VERSIONS,
     MAGIC,
     POSITION_STRIDE,
     UnsupportedDDMVariant,
@@ -30,6 +31,7 @@ from .binary import (
     decode_u16_buffer,
     decode_vertices16,
     decode_vertices24,
+    ddm_variant_name,
     finite3,
     find_periodic_marker_run,
     score_position_stream,
@@ -93,14 +95,16 @@ from .cli import (
 )
 
 __all__ = [
-    "ATTRIBUTE_STRIDE", "MAGIC", "POSITION_STRIDE", "UnsupportedDDMVariant",
+    "ATTRIBUTE_STRIDE", "KNOWN_DDM_VERSIONS", "MAGIC", "POSITION_STRIDE",
+    "UnsupportedDDMVariant",
     "DEFAULT_EXPORT_SCALE", "SAFE_NAME_RE", "SUBMESH_SIGNATURE",
     "analyze_file", "analyze_skinned_file", "apply_matcap_pbr_estimates",
     "be_f32", "be_u16", "be_u32", "build_mesh_parts",
     "classify_material_textures", "convert_xet_texture",
     "decode_half2_be", "decode_packed_11_11_10", "decode_skinned_geometry",
     "decode_skinned_skeleton", "decode_snorm", "decode_u16_buffer",
-    "decode_vertices16", "decode_vertices24", "export_texture_payload",
+    "decode_vertices16", "decode_vertices24", "ddm_variant_name",
+    "export_texture_payload",
     "extract_length_prefixed_strings", "find_geometry_header",
     "find_map_geometry_sections", "find_periodic_marker_run",
     "find_phong_parameters", "find_skinned_geometry_header",

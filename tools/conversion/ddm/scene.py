@@ -7,8 +7,8 @@ import tempfile
 from pathlib import Path
 
 from .binary import (
-    ATTRIBUTE_STRIDE, MAGIC, POSITION_STRIDE, be_f32, be_u32,
-    decode_u16_buffer, decode_vertices16, decode_vertices24,
+    ATTRIBUTE_STRIDE, MAGIC, POSITION_STRIDE, UnsupportedDDMVariant, be_f32,
+    be_u32, decode_u16_buffer, decode_vertices16, decode_vertices24,
     find_periodic_marker_run, score_position_stream, vec_len,
 )
 from .geometry import (
@@ -107,22 +107,31 @@ def analyze_file(
         elif periodic:
             vertex_count = periodic["vertex_count"]
         else:
-            raise RuntimeError("Could not auto-detect vertex count; use --vertex-count.")
+            raise UnsupportedDDMVariant(
+                "could not auto-detect the vertex count; pass --vertex-count "
+                "(or --position-offset/--index-offset) for this layout",
+                version=version,
+            )
 
         if args.position_offset is not None:
             position_offset = args.position_offset
         elif periodic:
             position_offset = periodic["position_offset"]
         else:
-            raise RuntimeError("Could not auto-detect position stream; use --position-offset.")
+            raise UnsupportedDDMVariant(
+                "could not auto-detect the position stream; pass "
+                "--position-offset for this layout",
+                version=version,
+            )
 
         score, position_diag = score_position_stream(
             data, position_offset, vertex_count
         )
 
         if score < 0:
-            raise RuntimeError(
-                f"Position stream candidate 0x{position_offset:X} is invalid."
+            raise UnsupportedDDMVariant(
+                f"position stream candidate 0x{position_offset:X} is invalid",
+                version=version,
             )
 
         vertices = decode_vertices24(data, position_offset, vertex_count)
@@ -149,7 +158,11 @@ def analyze_file(
             index_count = header["index_count"]
 
         if index_offset is None or index_count is None:
-            raise RuntimeError("Could not locate the index buffer.")
+            raise UnsupportedDDMVariant(
+                "could not locate the index buffer; pass --index-offset and "
+                "--index-count for this layout",
+                version=version,
+            )
 
         indices = decode_u16_buffer(data, index_offset, index_count)
         if len(indices) != index_count:
@@ -175,7 +188,10 @@ def analyze_file(
             max(0, position_end - 0x20),
         )
         if not submeshes:
-            raise RuntimeError("No submesh descriptor found.")
+            raise UnsupportedDDMVariant(
+                "no submesh descriptor found for this layout",
+                version=version,
+            )
 
     material_count = max(
         submesh["material_index"] for submesh in submeshes

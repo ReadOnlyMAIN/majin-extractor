@@ -8,8 +8,8 @@ import tempfile
 from pathlib import Path
 
 from .binary import (
-    ATTRIBUTE_STRIDE, be_u32, decode_half2_be, decode_u16_buffer,
-    decode_vertices16, finite3,
+    ATTRIBUTE_STRIDE, UnsupportedDDMVariant, be_u32, decode_half2_be,
+    decode_u16_buffer, decode_vertices16, finite3,
 )
 from .geometry import triangle_list, triangle_strip
 from .materials import (
@@ -166,7 +166,10 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
     group_offset = header["offset"]
     section_count = be_u32(data, group_offset)
     if not 1 <= section_count <= 64:
-        raise RuntimeError(f"Invalid skinned section count {section_count}.")
+        raise UnsupportedDDMVariant(
+            f"invalid skinned section count {section_count}",
+            variant="skinned character DDM",
+        )
     cursor = group_offset + 4
     vertices = []
     mesh_parts = []
@@ -250,7 +253,10 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
             primitive, primitive_count, base, count, material = words[:5]
             first_index, descriptor_index_count, bone_count = words[12:15]
             if primitive not in (3, 4):
-                raise RuntimeError(f"Unsupported skinned primitive {primitive}.")
+                raise UnsupportedDDMVariant(
+                    f"unsupported skinned primitive {primitive}",
+                    variant="skinned character DDM",
+                )
             expected = primitive_count * 3 if primitive == 3 else primitive_count + 2
             if descriptor_index_count != expected:
                 raise RuntimeError("Skinned descriptor index count is inconsistent.")

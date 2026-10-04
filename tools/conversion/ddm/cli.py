@@ -242,7 +242,10 @@ def main():
                     relative_path=relative_path,
                 )
             except UnsupportedDDMVariant as exc:
-                print(f"[UNSUPPORTED] {path}: {exc}")
+                detail = exc.variant
+                if exc.version is not None:
+                    detail += f", version={exc.version}"
+                print(f"[UNSUPPORTED] {path} ({detail}): {exc.reason}")
                 unsupported += 1
                 prune_empty_output_directories(
                     output_directory_for(path, args.output, relative_path),
