@@ -34,8 +34,11 @@ def map_section(primitive, positions, indices, material=0):
 class MapGeometryTests(unittest.TestCase):
     def setUp(self):
         self.positions = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]
+        # A disjoint second section keeps its own faces; overlapping coordinates
+        # would be collapsed as an exact multipass duplicate during export.
+        self.second_positions = [(10, 0, 0), (11, 0, 0), (10, 1, 0), (11, 1, 0)]
         self.first = map_section(3, self.positions[:3], [0, 1, 2])
-        self.second = map_section(4, self.positions, [0, 1, 2, 3], material=1)
+        self.second = map_section(4, self.second_positions, [0, 1, 2, 3], material=1)
         self.data = ddm.MAGIC + struct.pack('>I', 3) + self.first + self.second
 
     def test_exports_all_sections_to_glb(self):

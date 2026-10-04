@@ -139,7 +139,44 @@ class GlbExportTests(unittest.TestCase):
         self.assertEqual(stats, {
             'removed_normal_only_surface_passes': 1,
             'removed_exact_duplicate_faces': 1,
+            'removed_multipass_layer_faces': 0,
         })
+
+    def test_removes_exact_face_drawn_by_two_diffuse_materials(self):
+        vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        triangle = (0, 1, 2)
+        parts = [
+            part(0, [triangle], 11),
+            part(1, [triangle], 12),
+        ]
+        materials = [
+            {'index': 11, 'name': 'gake102__base', 'textures': [{'role': 'diffuse'}]},
+            {'index': 12, 'name': 'gake102__multi', 'textures': [{'role': 'diffuse'}]},
+        ]
+        filtered, stats = remove_redundant_surface_passes(vertices, parts, materials)
+        # The exact same face is kept once and the later duplicate is dropped,
+        # so the surface cannot z-fight.
+        self.assertEqual([p['triangles'] for p in filtered], [[triangle]])
+        self.assertEqual(stats['removed_multipass_layer_faces'], 1)
+        self.assertEqual(stats['dropped_multipass_materials'], {'gake102__multi': 1})
+
+    def test_keeps_coincident_faces_with_different_attributes(self):
+        # Same positions but different UVs: a genuine texture blend that must be
+        # preserved, never collapsed.
+        vertices_a = [vertex(p, uv=(0.1, 0.1)) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        vertices_b = [vertex(p, uv=(0.9, 0.9)) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        vertices = vertices_a + vertices_b
+        parts = [
+            part(0, [(0, 1, 2)], 11),
+            part(1, [(3, 4, 5)], 12),
+        ]
+        materials = [
+            {'index': 11, 'textures': [{'role': 'diffuse'}]},
+            {'index': 12, 'textures': [{'role': 'diffuse'}]},
+        ]
+        filtered, stats = remove_redundant_surface_passes(vertices, parts, materials)
+        self.assertEqual([p['triangles'] for p in filtered], [[(0, 1, 2)], [(3, 4, 5)]])
+        self.assertEqual(stats['removed_multipass_layer_faces'], 0)
 
     def test_keeps_normal_only_face_without_a_coincident_diffuse_surface(self):
         vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]

@@ -27,8 +27,8 @@ from tools.conversion import ddm_to_3d as ddm
 
 
 # Frozen hash of the reference export. Update only for intentional changes.
-GOLDEN_SHA256 = "351632efeb71188050dd86375e7218b218c0e4cdb9b71c7b12c9a685ab37f253"
-GOLDEN_SIZE = 3280
+GOLDEN_SHA256 = "8831daa9bb6fb76d2bf68c41034ac3e5a563855e69ace20ca9a2986aa7f8279c"
+GOLDEN_SIZE = 3480
 
 
 def map_section(primitive, positions, indices, material=0):
@@ -52,10 +52,19 @@ def map_section(primitive, positions, indices, material=0):
 
 
 def build_fixture():
-    """Return the deterministic multi-section DDM used for the golden output."""
-    positions = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]
-    first = map_section(3, positions[:3], [0, 1, 2])
-    second = map_section(4, positions, [0, 1, 2, 3], material=1)
+    """Return the deterministic multi-section DDM used for the golden output.
+
+    The two sections use disjoint positions so each reconstructs its own object
+    and the fixture exercises multi-section decoding rather than the multipass
+    duplicate collapsing (which is covered separately).
+    """
+    first = map_section(3, [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])
+    second = map_section(
+        4,
+        [(10, 0, 0), (11, 0, 0), (10, 1, 0), (11, 1, 0)],
+        [0, 1, 2, 3],
+        material=1,
+    )
     return ddm.MAGIC + struct.pack('>I', 3) + first + second
 
 
@@ -91,12 +100,12 @@ class GlbGoldenTests(unittest.TestCase):
 
         length = struct.unpack_from('<I', payload, 12)[0]
         document = json.loads(payload[20:20 + length])
-        # The two map sections share edges, so object-mode auto reconstructs a
-        # single connected component with one primitive per DDM material.
-        self.assertEqual(len(document['scenes'][0]['nodes']), 1)
-        self.assertEqual(len(document['meshes']), 1)
+        # The two disjoint sections reconstruct two separate objects, one mesh
+        # each, carrying one DDM material per primitive.
+        self.assertEqual(len(document['scenes'][0]['nodes']), 2)
+        self.assertEqual(len(document['meshes']), 2)
         self.assertEqual(
-            [len(mesh['primitives']) for mesh in document['meshes']], [2]
+            sorted(len(mesh['primitives']) for mesh in document['meshes']), [1, 1]
         )
         total_triangles = sum(
             document['accessors'][primitive['indices']]['count'] // 3

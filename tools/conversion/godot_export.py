@@ -49,6 +49,19 @@ uniform sampler2D blend_base_texture_1 : source_color, hint_default_white;
 uniform sampler2D blend_base_texture_2 : source_color, hint_default_white;
 uniform sampler2D blend_base_texture_3 : source_color, hint_default_white;
 
+// Detail layer: several map materials are drawn once as a base surface and
+// again as a detail overlay on exactly coincident geometry (for example the
+// observed gake102__base / gake102__multi terrain). The exporter folds the
+// overlay's textures into this second layer so the base and detail texture
+// sets can be combined in one draw instead of z-fighting.
+uniform sampler2D detail_texture : source_color, hint_default_white;
+uniform sampler2D detail_normal_texture : hint_normal;
+uniform sampler2D detail_mask : hint_default_white, repeat_disable;
+uniform bool use_detail = false;
+uniform bool use_detail_mask = false;
+uniform bool use_detail_normal_texture = false;
+uniform float detail_strength : hint_range(0.0, 1.0, 0.01) = 0.5;
+
 uniform bool use_utility_texture = false;
 uniform bool use_normal_texture = false;
 uniform bool use_env_sphere_texture = false;
@@ -77,10 +90,33 @@ void fragment() {
             : vec4(1.0, 0.0, 0.0, 0.0);
     }
     vec4 base = use_blend ? blend_base(UV, weights) : texture(base_texture, UV);
+
+    // Fold the detail overlay into the base color where present. When a detail
+    // mask is available it modulates the mix per texel; otherwise a constant
+    // detail_strength is used.
+    if (use_detail) {
+        float mix_amount = detail_strength;
+        if (use_detail_mask) {
+            mix_amount *= texture(detail_mask, UV).r;
+        }
+        vec4 detail = texture(detail_texture, UV);
+        base = mix(base, detail, clamp(mix_amount, 0.0, 1.0));
+    }
+
     vec3 view_normal = normalize(NORMAL);
 
-    if (use_normal_texture) {
-        vec3 sampled_normal = texture(normal_texture, UV).rgb;
+    if (use_normal_texture || use_detail_normal_texture) {
+        vec3 sampled_normal = use_normal_texture
+            ? texture(normal_texture, UV).rgb
+            : vec3(0.5, 0.5, 1.0);
+        if (use_detail_normal_texture) {
+            float mix_amount = detail_strength;
+            if (use_detail_mask) {
+                mix_amount *= texture(detail_mask, UV).r;
+            }
+            sampled_normal = mix(sampled_normal, texture(detail_normal_texture, UV).rgb,
+                                 clamp(mix_amount, 0.0, 1.0));
+        }
         NORMAL_MAP = sampled_normal;
         vec3 tangent_normal = sampled_normal * 2.0 - 1.0;
         view_normal = normalize(
@@ -116,6 +152,11 @@ ROLE_TO_UNIFORM = {
     "normal": "normal_texture",
     "utility_mask": "utility_texture",
     "matcap": "env_sphere_texture",
+    # Detail-layer roles, used when a coincident multipass overlay is folded
+    # into a base material instead of being exported as a z-fighting duplicate.
+    "detail_diffuse": "detail_texture",
+    "detail_normal": "detail_normal_texture",
+    "detail_mask": "detail_mask",
 }
 
 # Slot 0 is always the material the vertex originally belonged to. Slots 1..3
@@ -169,12 +210,27 @@ def _write_shader_material(
 
 
 def _material_texture_map(material: dict) -> dict:
-    """Return ``{uniform_name: output_path}`` for a material's own textures."""
+    """Return ``{uniform_name: output_path}`` for a material's own textures.
+
+    A material may carry an additional ``detail`` mapping (``{"diffuse": path,
+    "normal": path, "mask": path}``) produced when a coincident multipass
+    overlay is folded into the base material. Those become the detail-layer
+    uniforms so the shader can combine both texture sets in a single draw.
+    """
     uniforms = {}
     for texture in material.get("textures", []):
         uniform = ROLE_TO_UNIFORM.get(texture.get("role"))
         output = texture.get("output")
         if uniform and output:
+            uniforms[uniform] = output
+    detail = material.get("detail") or {}
+    for key, uniform in (
+        ("diffuse", "detail_texture"),
+        ("normal", "detail_normal_texture"),
+        ("mask", "detail_mask"),
+    ):
+        output = detail.get(key)
+        if output:
             uniforms[uniform] = output
     return uniforms
 
@@ -246,6 +302,109 @@ def _has_foreign_weight(rows) -> bool:
     return False
 
 
+def _position_signature(vertices, triangle):
+    """Orientation-independent position-only signature of a face.
+
+    Multipass overlays paint a *different texture* onto the *same* geometry, so
+    they share positions but not UVs. Overlay detection therefore keys on
+    position alone, unlike the exact-attribute dedup used for the portable GLB.
+    """
+    points = sorted(tuple(vertices[index]['position']) for index in triangle)
+    return tuple(points)
+
+
+def _fold_multipass_details(materials, mesh_parts, vertices):
+    """Fold exact multipass overlays into their host material as a detail layer.
+
+    The map renderer can draw a surface once as a base material and again as a
+    detail overlay on the *same* geometry with a different texture (for example
+    the observed ``gake102__multi`` over ``gake102__base``). Core glTF cannot
+    express that, but a Godot shader can combine both texture sets in a single
+    draw.
+
+    A material B is treated as an overlay of A when *every* B face shares its
+    positions with an A face (100% coverage). The overlay's diffuse and normal
+    texture outputs are attached to A as ``material["detail"]``. Nothing is
+    removed: B keeps its own ``.tres`` so the GLB primitive stays valid.
+
+    Returns a list of ``{host, detail, coverage}`` records for reporting.
+    """
+    material_by_index = {int(m['index']): m for m in materials}
+    roles = {
+        int(m['index']): {t.get('role') for t in m.get('textures', [])}
+        for m in materials
+    }
+
+    faces_by_material = defaultdict(list)
+    for part in mesh_parts:
+        for triangle in part['triangles']:
+            faces_by_material[int(part['material_index'])].append(triangle)
+
+    # ~{position_signature: set(material_index)} sharing the same geometry.
+    owners = defaultdict(set)
+    for material_index, triangles in faces_by_material.items():
+        for triangle in triangles:
+            owners[_position_signature(vertices, triangle)].add(material_index)
+
+    def overlay_of(material_index, host_index):
+        """Fraction of material_index faces whose geometry also hosts host_index."""
+        triangles = faces_by_material[material_index]
+        if not triangles:
+            return 0.0
+        covered = sum(
+            1 for triangle in triangles
+            if host_index in owners[_position_signature(vertices, triangle)]
+        )
+        return covered / len(triangles)
+
+    def detail_texture(material, role):
+        for texture in material.get('textures', []):
+            if texture.get('role') == role and texture.get('output'):
+                return texture['output']
+        return None
+
+    folds = []
+    for index, material in material_by_index.items():
+        if 'diffuse' not in roles.get(index, set()) or material.get('detail'):
+            continue
+        # Find the host the largest fraction of this material sits on.
+        best_host, best_ratio = None, 0.0
+        for host_index in material_by_index:
+            if host_index == index:
+                continue
+            ratio = overlay_of(index, host_index)
+            if ratio > best_ratio:
+                best_host, best_ratio = host_index, ratio
+        # Only fold when the material is entirely an overlay (no unique faces)
+        # and the host is the larger surface. Requiring a strictly larger host
+        # keeps the fold direction unambiguous when two materials cover each
+        # other exactly (symmetric fixtures) instead of folding both ways.
+        if best_host is None or best_ratio < 1.0:
+            continue
+        if len(faces_by_material[best_host]) <= len(faces_by_material[index]):
+            continue
+        host = material_by_index[best_host]
+        # Never overwrite an existing detail layer.
+        if host.get('detail'):
+            continue
+        detail = {'source_material': material.get('name', f"material_{index}")}
+        diffuse = detail_texture(material, 'diffuse')
+        normal = detail_texture(material, 'normal')
+        if diffuse:
+            detail['diffuse'] = diffuse
+        if normal:
+            detail['normal'] = normal
+        if not detail.get('diffuse'):
+            continue
+        host['detail'] = detail
+        folds.append({
+            'host': host.get('name', f"material_{best_host}"),
+            'detail': detail['source_material'],
+            'coverage': round(best_ratio, 4),
+        })
+    return folds
+
+
 def write_godot_material_assets(
     out_dir: Path,
     materials: list[dict],
@@ -282,6 +441,10 @@ def write_godot_material_assets(
             out_dir, material_dir, materials, mesh_parts, vertices, scale, radius,
         )
 
+    detail_folds: list[dict] = []
+    if vertices and mesh_parts:
+        detail_folds = _fold_multipass_details(materials, mesh_parts, vertices)
+
     material_by_index = {int(m["index"]): m for m in materials}
     bindings = []
     material_resources = []
@@ -310,9 +473,15 @@ def write_godot_material_assets(
             "use_normal_texture": "normal_texture" in uniforms,
             "use_env_sphere_texture": "env_sphere_texture" in uniforms,
             "use_blend": use_blend,
+            "use_detail": "detail_texture" in uniforms,
+            "use_detail_normal_texture": "detail_normal_texture" in uniforms,
+            "use_detail_mask": "detail_mask" in uniforms,
         }
         estimate = material.get("pbr_estimate") or {}
         scalars = {"roughness": float(estimate.get("roughness", 1.0))}
+        if switches["use_detail"]:
+            detail = material.get("detail") or {}
+            scalars["detail_strength"] = float(detail.get("strength", 0.5))
         resource_name = (
             f'{material["index"]:02d}_'
             f'{_safe_resource_name(material.get("name", "material"))}.tres'
@@ -331,11 +500,13 @@ def write_godot_material_assets(
             "switches": switches,
             "scalars": scalars,
             "blend_map": asset["path"] if asset else None,
+            "detail": material.get("detail"),
         })
 
     manifest_path = material_dir / "material_bindings.json"
     manifest_path.write_text(
-        json.dumps({"materials": bindings}, indent=2) + "\n",
+        json.dumps({"materials": bindings, "detail_folds": detail_folds}, indent=2)
+        + "\n",
         encoding="ascii",
     )
     return {
@@ -344,5 +515,6 @@ def write_godot_material_assets(
         "shader_materials": material_resources,
         "texture_count": len(image_data),
         "blend_map_count": len(blend_assets),
+        "detail_fold_count": len(detail_folds),
     }
 

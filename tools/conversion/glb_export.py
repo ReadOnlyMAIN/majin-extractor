@@ -4,7 +4,7 @@ Map objects are reconstructed connected components, not recovered authoring
 instances. Positions are already in world space. Node translations recenter
 editable objects without applying the DDM bounding-box rotations as transforms.
 """
-from collections import defaultdict
+from collections import Counter, defaultdict
 import hashlib
 import json
 import math
@@ -65,16 +65,30 @@ def split_objects(vertices, mesh_parts, mode):
 
 
 def remove_redundant_surface_passes(vertices, mesh_parts, materials):
-    """Remove exact duplicate faces used only as an extra normal-map pass.
+    """Remove exact duplicate faces used only as an extra multipass layer.
 
     The map renderer can draw the same surface more than once to combine
     textures. Core glTF materials cannot represent that legacy multipass
-    operation, and exporting both surfaces causes z-fighting. A normal-only
-    face is discarded only when an exactly coincident diffuse face exists.
-    Exact duplicates within one material are also collapsed.
+    operation, and exporting both surfaces causes z-fighting. Three cases are
+    collapsed:
+
+    - a normal-only face coincident with a diffuse face (the diffuse pass
+      already covers it);
+    - the exact same face drawn twice within one material;
+    - the exact same face drawn by two *different* materials, when one of them
+      is a multipass layer over the other (for example the observed
+      ``gake102__multi`` overlaying ``gake102__base``).
+
+    A face is only considered an exact duplicate when its geometry *and* its
+    per-vertex attributes match, so genuinely different surfaces that merely
+    share positions are never merged.
     """
     roles = {
         material['index']: {texture.get('role') for texture in material.get('textures', [])}
+        for material in materials
+    }
+    names = {
+        material['index']: material.get('name', f"material_{material['index']}")
         for material in materials
     }
     faces_by_geometry = defaultdict(list)
@@ -98,12 +112,16 @@ def remove_redundant_surface_passes(vertices, mesh_parts, materials):
     kept_by_part = defaultdict(list)
     removed_normal_passes = 0
     removed_exact_duplicates = 0
+    removed_multipass_layers = 0
+    dropped_layer_materials = Counter()
     for faces in faces_by_geometry.values():
         diffuse_materials = {
             part['material_index'] for part, _ in faces
             if 'diffuse' in roles.get(part['material_index'], set())
         }
-        seen_faces = set()
+        # Exact attribute signatures already seen in this geometry group, mapped
+        # to the material that owns the retained copy.
+        retained_signature = {}
         for part, triangle in faces:
             material = part['material_index']
             material_roles = roles.get(material, set())
@@ -111,11 +129,19 @@ def remove_redundant_surface_passes(vertices, mesh_parts, materials):
             if diffuse_materials and normal_only:
                 removed_normal_passes += 1
                 continue
-            signature = (material, oriented_face_signature(triangle))
-            if signature in seen_faces:
-                removed_exact_duplicates += 1
+            signature = oriented_face_signature(triangle)
+            owner = retained_signature.get(signature)
+            if owner is not None:
+                if owner == material:
+                    removed_exact_duplicates += 1
+                else:
+                    # Two different materials offered the identical face: one is
+                    # a multipass layer over the other. Keep the first retained
+                    # copy so the surface never z-fights.
+                    removed_multipass_layers += 1
+                    dropped_layer_materials[names.get(material, material)] += 1
                 continue
-            seen_faces.add(signature)
+            retained_signature[signature] = material
             kept_by_part[id(part)].append(triangle)
 
     filtered = []
@@ -123,10 +149,16 @@ def remove_redundant_surface_passes(vertices, mesh_parts, materials):
         triangles = kept_by_part.get(id(part), [])
         if triangles:
             filtered.append(part | {'triangles': triangles})
-    return filtered, {
+    report = {
         'removed_normal_only_surface_passes': removed_normal_passes,
         'removed_exact_duplicate_faces': removed_exact_duplicates,
+        'removed_multipass_layer_faces': removed_multipass_layers,
     }
+    if dropped_layer_materials:
+        report['dropped_multipass_materials'] = dict(
+            sorted(dropped_layer_materials.items(), key=lambda item: -item[1])
+        )
+    return filtered, report
 
 
 def normalized(vector):

@@ -15,6 +15,7 @@ from tools.conversion.ddm.materials import (
     uses_godot_materials,
 )
 from tools.conversion.godot_export import (
+    _fold_multipass_details,
     write_godot_material_assets,
 )
 
@@ -46,6 +47,46 @@ class GodotExportTests(unittest.TestCase):
             self.assertIsNone(manifest["materials"][0]["blend_map"])
             # Single-material path does not generate a blend map.
             self.assertEqual(result["blend_map_count"], 0)
+
+    def test_detail_layer_exposes_second_texture_set(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root)
+            materials = [
+                {
+                    "index": 0,
+                    "name": "gake102__base",
+                    "textures": [
+                        {"role": "diffuse", "output": "textures/base_c.png"},
+                        {"role": "normal", "output": "textures/base_n.png"},
+                    ],
+                    "detail": {
+                        "diffuse": "textures/multi_c.png",
+                        "normal": "textures/multi_n.png",
+                        "strength": 0.75,
+                    },
+                },
+            ]
+            images = {
+                "textures/base_c.png": b"\x89PNG\r\n\x1a\n",
+                "textures/base_n.png": b"\x89PNG\r\n\x1a\n",
+                "textures/multi_c.png": b"\x89PNG\r\n\x1a\n",
+                "textures/multi_n.png": b"\x89PNG\r\n\x1a\n",
+            }
+            result = write_godot_material_assets(out, materials, images)
+            manifest = json.loads((out / result["manifest"]).read_text())
+            binding = manifest["materials"][0]
+            self.assertTrue(binding["switches"]["use_detail"])
+            self.assertTrue(binding["switches"]["use_detail_normal_texture"])
+            self.assertEqual(binding["uniforms"]["detail_texture"], "textures/multi_c.png")
+            self.assertEqual(
+                binding["uniforms"]["detail_normal_texture"], "textures/multi_n.png"
+            )
+            self.assertEqual(binding["scalars"]["detail_strength"], 0.75)
+            shader = (out / result["shader"]).read_text()
+            self.assertIn("uniform sampler2D detail_texture", shader)
+            tres = (out / binding["shader_material"]).read_text()
+            self.assertIn("shader_parameter/detail_texture", tres)
+            self.assertIn("shader_parameter/use_detail = true", tres)
 
     def _triangle(self, vertices, material_index, positions):
         base = len(vertices)
@@ -165,6 +206,72 @@ class MaterialModeTests(unittest.TestCase):
         args = SimpleNamespace(material_mode="original-godot")
         self.assertEqual(material_mode_of(args), "godot")
         self.assertTrue(uses_godot_materials(args))
+
+
+class MultipassDetailFoldTests(unittest.TestCase):
+    def _material(self, index, name, diffuse, normal=None):
+        textures = [{"role": "diffuse", "output": diffuse}]
+        if normal:
+            textures.append({"role": "normal", "output": normal})
+        return {"index": index, "name": name, "textures": textures}
+
+    def test_overlay_material_is_folded_as_a_detail_layer(self):
+        # base and multi share the same positions (painted on the same surface)
+        # but use different UVs/textures. 'base' additionally has a face of its
+        # own, so the overlay direction is unambiguous (like map101's terrain).
+        base = self._material(11, "gake102__base", "textures/base_c.png", "textures/base_n.png")
+        multi = self._material(12, "gake102__multi", "textures/multi_c.png", "textures/multi_n.png")
+        vertices = [
+            {"position": (0, 0, 0), "uv": (0.0, 0.0)},
+            {"position": (1, 0, 0), "uv": (0.1, 0.0)},
+            {"position": (0, 1, 0), "uv": (0.0, 0.1)},
+            {"position": (0, 0, 0), "uv": (0.5, 0.5)},
+            {"position": (1, 0, 0), "uv": (0.6, 0.5)},
+            {"position": (0, 1, 0), "uv": (0.5, 0.6)},
+            # A face belonging to base alone (not covered by multi).
+            {"position": (3, 3, 3), "uv": (0.2, 0.2)},
+            {"position": (4, 3, 3), "uv": (0.3, 0.2)},
+            {"position": (3, 4, 3), "uv": (0.2, 0.3)},
+        ]
+        parts = [
+            {"material_index": 11, "triangles": [(0, 1, 2), (6, 7, 8)]},
+            {"material_index": 12, "triangles": [(3, 4, 5)]},
+        ]
+        folds = _fold_multipass_details([base, multi], parts, vertices)
+        self.assertEqual(folds, [
+            {"host": "gake102__base", "detail": "gake102__multi", "coverage": 1.0},
+        ])
+        self.assertEqual(base["detail"]["diffuse"], "textures/multi_c.png")
+        self.assertEqual(base["detail"]["normal"], "textures/multi_n.png")
+        # The overlay keeps its own material so the GLB primitive stays valid.
+        self.assertNotIn("detail", multi)
+
+    def test_material_with_unique_faces_is_not_folded(self):
+        # Neither material is a pure overlay: each has a face the other does not
+        # cover, so nothing is folded.
+        base = self._material(11, "base", "textures/base_c.png")
+        other = self._material(12, "other", "textures/other_c.png")
+        vertices = [
+            {"position": (0, 0, 0), "uv": (0.0, 0.0)},
+            {"position": (1, 0, 0), "uv": (0.1, 0.0)},
+            {"position": (0, 1, 0), "uv": (0.0, 0.1)},
+            # A face belonging to base alone.
+            {"position": (3, 3, 3), "uv": (0.2, 0.2)},
+            {"position": (4, 3, 3), "uv": (0.3, 0.2)},
+            {"position": (3, 4, 3), "uv": (0.2, 0.3)},
+            # A face belonging to other alone.
+            {"position": (5, 5, 5), "uv": (0.9, 0.9)},
+            {"position": (6, 5, 5), "uv": (0.95, 0.9)},
+            {"position": (5, 6, 5), "uv": (0.9, 0.95)},
+        ]
+        parts = [
+            {"material_index": 11, "triangles": [(0, 1, 2), (3, 4, 5)]},
+            {"material_index": 12, "triangles": [(0, 1, 2), (6, 7, 8)]},
+        ]
+        folds = _fold_multipass_details([base, other], parts, vertices)
+        self.assertEqual(folds, [])
+        self.assertNotIn("detail", base)
+        self.assertNotIn("detail", other)
 
 
 if __name__ == "__main__":

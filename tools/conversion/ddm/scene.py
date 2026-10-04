@@ -475,10 +475,13 @@ def analyze_file(
         print(
             "  removed overlays : "
             f"{glb['removed_normal_only_surface_passes']} normal-only, "
-            f"{glb['removed_exact_duplicate_faces']} exact duplicates"
+            f"{glb['removed_exact_duplicate_faces']} exact duplicates, "
+            f"{glb.get('removed_multipass_layer_faces', 0)} multipass layers"
         )
     if report.get("godot_materials"):
         godot = report["godot_materials"]
         print(f"  Godot shader     : {out_dir / godot['shader']}")
         print(f"  Godot bindings   : {out_dir / godot['manifest']}")
+        if godot.get("detail_fold_count"):
+            print(f"  Godot detail maps: {godot['detail_fold_count']} multipass overlay(s) folded")
     print(f"  output           : {mesh_path}")

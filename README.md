@@ -272,6 +272,24 @@ the matching `.tres` listed for each DDM material in the manifest.
 exposed because the P31/P33 sampler bindings are proven but their exact RSX
 blend formula and mask polarity are not yet decoded.
 
+### Multipass detail layers (Godot)
+
+Map materials often paint a second texture onto the same surface the base
+material already covers — for example `gake102__multi` sits on exactly the same
+geometry as `gake102__base`, using a different texture (rock over ground). This
+is the "textures painted on the 3D" effect: one surface, two texture sets.
+
+The portable `pbr` mode cannot express this, so it collapses exact duplicates to
+avoid z-fighting. The `godot` mode instead **folds the overlay into its host as
+a second detail layer**: the host `.tres` gains `detail_texture`,
+`detail_normal_texture` and a `detail_strength`, and the generated shader mixes
+both texture sets in one draw. When a material's faces are *entirely* covered by
+a larger host material, the overlay is detected automatically (100% coverage)
+and recorded in `material_bindings.json` under `detail_folds`; nothing is
+deleted, so the overlay keeps its own `.tres` and the GLB primitives stay valid.
+This is where the two modes diverge: `godot` reproduces the layered look, `pbr`
+stays a portable single-texture approximation.
+
 ### Smooth submesh transitions (blend maps)
 
 The original game assigns one material per submesh, which produces hard seams

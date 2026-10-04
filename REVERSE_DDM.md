@@ -1063,6 +1063,26 @@ omits only a coincident normal-only face that has a diffuse counterpart. It
 retains standalone normal-only geometry and faces whose attributes differ.
 The final GLB contains 62,128 triangles. Auxiliary shader maps are otherwise
 not represented.
+
+### Multipass overlays as Godot detail layers
+
+Map geometry is frequently painted with more than one texture on the *same*
+surface. On map101, every `gake102__multi` face (14,175) shares its positions
+with a `gake102__base` face, while only 57% of the `base` faces are covered;
+`multi` uses a different texture pair (`si_map104_iwa3_c/_n`) than `base`
+(`si_map104_yuka3_c/_n`). This is the game's "painted on the 3D" layering: one
+surface, two texture sets combined by the shader. Other partial overlaps
+(`mon_` over `zimenA_`, `tikeikule_`, `hasiraA_`, `kowarewall_`) are decals with
+only 10-37% coverage.
+
+The portable `pbr` GLB cannot express layered materials, so it collapses exact
+attribute duplicates to remove z-fighting. The `godot` mode instead detects a
+material whose faces are **100% covered** by a *strictly larger* host and folds
+its diffuse/normal textures into the host as a detail layer
+(`material["detail"]`), which the generated shader mixes in one draw. Nothing is
+removed: the overlay keeps its own `.tres`. Detection keys on **position only**
+(the overlay shares geometry but not UVs), so attribute-based dedup and the
+overlay fold are deliberately separate operations.
 Specification: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
 
 ### Matcap and red-mask caveat

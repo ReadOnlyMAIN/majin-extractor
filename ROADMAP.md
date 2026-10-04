@@ -79,6 +79,13 @@ reconstruction with a shader, `.tres` materials and blend/environment maps).
   carrying `version`/`variant`/`reason`, reported by the CLI as
   `[UNSUPPORTED]` (distinct from `[ERROR]` for corrupt files), covered by
   `tests/test_ddm_variant.py`.
+- Done: multipass overlays (map materials painted on the same geometry, e.g.
+  `gake102__multi` over `gake102__base`) are collapsed as exact duplicates in
+  `pbr`, and folded into the host as a shader-mixed **detail layer** in `godot`
+  (`_fold_multipass_details` + `detail_texture`/`detail_normal_texture`).
+- Port `map101` in `godot` mode as the reference map workflow, then iterate on
+  the remaining fidelity gaps (P31/P33 environment vector, utility-mask
+  polarity, partial decals) — `godot` may diverge freely from `pbr`.
 - Decode the P31/P33 RSX blend formula and utility-mask polarity instead of
   exposing them as manual parameters; where an effect is not reproducible as
   PBR, keep it in the `godot` shader path.
