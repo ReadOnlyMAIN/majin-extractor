@@ -17,5 +17,12 @@ programs from the shared RSX microcode pool. Its `--dump-programs` output is in
 the original upload byte order expected by RSX fragment disassemblers. JSON
 reports also expose each uniform's inline fragment-constant relocation offsets.
 
-`KB_CLOUD_SHADER.md` records the complete `KbCloudModel_1` RSX fragment
-disassembly, texture-channel semantics, and equivalent vector computation.
+`tools/research/rsx_fp_disasm.py` decodes a dumped RSX fragment program into
+instructions and inline constants. It is a generic helper used to study the
+material shaders (for example the `KbBase` `fxbf` containers) whose sampler
+bindings feed the PBR reconstruction.
+
+Assets whose meaning only exists inside HexaEngine (the procedural day/night
+sky, some bespoke engine shaders) are deliberately **not** reverse engineered;
+they are reproduced with host-engine primitives (for example a native Godot
+`Sky`). See `ROADMAP.md`.

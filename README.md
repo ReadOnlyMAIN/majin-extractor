@@ -1,7 +1,27 @@
 # Majin and the Forsaken Kingdom resource extraction
 
-This project extracts binary resources from the `.pak` archives found on a
-mounted game ISO and converts proprietary formats into usable files.
+This project extracts the assets of **Majin and the Forsaken Kingdom** (PS3,
+HexaEngine) from the game's `.pak` archives and converts the proprietary
+formats into **the most generic, engine-agnostic formats possible**, so the
+recovered assets can be reused for any purpose. The primary target is **Godot
+4**, which drives the concrete choices (glTF/GLB for geometry and animation,
+PNG for textures), but nothing in the extraction or conversion pipeline depends
+on a single engine.
+
+## Goals
+
+1. **Generic assets first.** Prefer open, well-documented formats (GLB, PNG,
+   glTF 2.0 materials) over engine-specific artifacts.
+2. **Godot 4 as the reference consumer.** When a format decision is ambiguous,
+   favour what imports cleanly into Godot 4 (glTF 2.0, PBR metallic-roughness).
+3. **No engine-specific reconstruction.** Assets whose meaning only exists
+   inside HexaEngine (the procedural day/night sky, some bespoke shaders) are
+   *not* reverse engineered. They are meant to be reproduced with the host
+   engine's own primitives (for example a native Godot `Sky`), so the pipeline
+   stays generic.
+4. **Evidence over guessing.** Every reverse-engineering result is documented
+   with its confidence. Unproven values are exposed as editable parameters or
+   omitted rather than silently guessed.
 
 ## Project layout
 
@@ -12,24 +32,28 @@ tools/
   conversion/
     xet_to_png.py          XET textures to PNG
     dds_to_png.py          DDS textures (DXT1/DXT5) to PNG
-    ddm_to_3d.py           DDM models to GLB (or OBJ/MTL/PNG)
-    godot/sky_to_godot.py  HexaEngine sky to Godot 4 assets
-    ddm_to_obj.py          Deprecated compatibility entry point
+    ddm_to_3d.py           DDM models to GLB (glTF 2.0)
+    glb_export.py          low-level static and skinned GLB writer
+    godot_export.py        Godot 4 shader + ShaderMaterial assets
+    blend_mask.py          submesh seam blend-map generation
     material_pbr_estimator.py  Reserved matcap/mask-to-PBR research API
     motion_decode.py       Character motion discovery and track decoding
   research/
     shader_inspect.py      PS3 shader sampler-binding inspection
+    rsx_fp_disasm.py       RSX fragment program disassembler
 research/
   legacy/                  archived prototypes and historical documents
 REVERSE_DDM.md             current DDM reverse-engineering notes
 MATERIAL_PBR.md            matcap/mask-to-PBR research plan
+ROADMAP.md                 project action plan and current status
 game_files/                ISO, PAK, and extracted resources (ignored by Git)
 output/                    local generated results (ignored by Git)
 ```
 
 Maintained entry points live exclusively under `tools/`. Files under
 `research/legacy/` are retained for research purposes and are not part of the
-supported pipeline.
+supported pipeline. The action plan and current status are tracked in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Installation
 
@@ -58,33 +82,6 @@ python tools/conversion/ddm_to_3d.py game_files/DECOMPRESSED_ALL/KB/chara/chr300
 # Or scan a resource tree while preserving its relative directory layout
 python tools/conversion/ddm_to_3d.py game_files/DECOMPRESSED_ALL output/models --recursive --final
 ```
-
-### Godot 4 day/night sky
-
-The game's general-purpose sky is procedural rather than a daytime panorama.
-It combines the `pro_cloud0` and `pro_cloud1` packed noise textures through
-`KbProcedualCloud`, then displays `sky_star` on a dome at night. Reconstruct a
-portable approximation directly from the original `static.pak`:
-
-```powershell
-python tools/conversion/godot/sky_to_godot.py `
-  game_files/ExtractedISO/PS3_GAME/USRDIR/finalizedPS3/KB/package/static.pak `
-  path/to/godot_project/majin_sky
-```
-
-If the generated directory lives below another project directory, declare its
-path below `res://`. For example, output `project/assets/majin_sky` with:
-
-```powershell
-python tools/conversion/godot/sky_to_godot.py static.pak `
-  project/assets/majin_sky --resource-prefix assets
-```
-
-Open `majin_day_night_sky_demo.tscn` in Godot or assign the generated
-`majin_day_night_environment.tres` to an existing `WorldEnvironment`. The
-scene controller exposes time of day and cycle duration. Cloud coverage,
-density, speed, star intensity, haze and reconstructed colors remain editable
-on the generated `ShaderMaterial`.
 
 The extractor reuses a decompression thread pool across archives. Set the number
 of threads with `--workers N`. For a full extraction, `--quiet` avoids printing
@@ -130,14 +127,13 @@ supported DDM v3 layouts. Character DDMs also export their skeleton, skinning
 weights and bone hierarchy. Their animations live in separate proprietary
 `motionSequence`/`motionPackage` resources; the converter detects and reports
 those clips and validates their constant, linear and tangent scalar curves.
-The root translation and Y-axis heading bindings are established. Joint rotation research is
-available behind explicit experimental options; it is not enabled by default.
-Those options are diagnostic and do not yet produce a correctly posed full
-character animation.
-Recursive scans skip non-DDM
-files and report unsupported variants without creating per-file output
-directories. Empty directories created before a later conversion error are
-pruned, while nonempty output is retained. Findings are recorded in
+The root translation and Y-axis heading bindings are established. Joint rotation
+research is available behind explicit experimental options; it is not enabled by
+default. Those options are diagnostic and do not yet produce a correctly posed
+full character animation. Recursive scans skip non-DDM files and report
+unsupported variants without creating per-file output directories. Empty
+directories created before a later conversion error are pruned, while nonempty
+output is retained. Findings are recorded in
 [`REVERSE_DDM.md`](REVERSE_DDM.md).
 
 Motion parsing is isolated in `motion_decode.py`. It can inspect a character
@@ -169,9 +165,6 @@ Use `--all-clips` with `--dump-layout` to compare all 150 clips. Nonzero bytes
 retained in key-table alignment gaps are reported but are not rejected; after
 accounting for this writer behavior, every `chr300` scalar segment decodes to
 its exact boundary.
-
-`ddm_to_obj.py` remains available as a deprecated compatibility wrapper, but
-new commands and imports should use `ddm_to_3d.py`.
 
 An opt-in first animation milestone exports the validated root translation and
 rotation of selected `chr300` clips. Scalar 0 contains an extracted Y heading
@@ -232,8 +225,8 @@ Its leading flags and event bytes correlate with motion classes and events,
 not with a global scalar-to-joint binding.
 
 Each source produces `<name>/<name>.glb`. With `--final`, a fresh PBR output
-folder contains only the self-contained GLB. Omit it for JSON/CSV and
-position-cloud diagnostics. `--format obj` retains the former OBJ/MTL/PNG export. Positions are
+folder contains only the self-contained GLB. Omit it for the JSON diagnostics
+used during reverse engineering. Positions are
 scaled by `0.01` to convert the observed centimeter-like units to meters;
 use `--scale` to override this.
 
@@ -252,6 +245,58 @@ the matching `.tres` listed for each DDM material in the manifest.
 `reflection_strength` and `invert_utility` are
 exposed because the P31/P33 sampler bindings are proven but their exact RSX
 blend formula and mask polarity are not yet decoded.
+
+### Smooth submesh transitions (blend maps)
+
+The original game assigns one material per submesh, which produces hard seams
+where two submeshes meet. The real renderer hides those seams with a shader
+blend that cannot be recovered from the exported geometry alone: the RSX
+fragment program may use a mask texture, a derivative-based stencil, or
+per-fragment arithmetic that no longer exists in the DDM data. The
+`original-godot` mode therefore reconstructs an *approximation* of the smooth
+transition and bakes it into a UV-space texture.
+
+When `--material-mode original-godot` is used and the DDM contains more than
+one material, the exporter measures, for every vertex, how close it is to
+faces belonging to other materials. Vertices within `--blend-radius` metres of
+a foreign face receive a weight proportional to the linear falloff to that
+face's centroid. The owner material always keeps at least half the total
+weight so a vertex does not drift toward an unrelated neighbour. These weights
+are packed into an RGBA texture (`materials/blend_NN.png`, 256×256) indexed by
+the vertex UV, and the generated `.gdshader` samples it to interpolate between
+up to four base-color textures:
+
+- channel `R` weights the owner's `base_texture`;
+- channels `G`, `B`, `A` weight `blend_base_texture_1/2/3`, which the manifest
+  binds to the *neighbouring* materials actually present in range (not to the
+  owner's own textures);
+- texels that no vertex maps to fall back to the owner-only weight, so the
+  single-material fast path is unchanged.
+
+The blend map is heuristic. It reproduces the visible effect (no hard color
+seam at a submesh boundary) without claiming to replicate the original RSX
+arithmetic. Treat the generated textures and the `use_blend` switch as an
+editable starting point, not as recovered source data. The following limits
+apply:
+
+- Vertex weights are baked per-texel in UV space. If two vertices share the
+  same UV but belong to different owners, their weights are averaged; this is
+  common in the DDM's non-atlased UV layout.
+- The blend is purely color-based. It does not affect normals, roughness, or
+  the utility/matcap paths, so a seam that is visible in specular response but
+  not in albedo will not be hidden.
+- Larger `--blend-radius` values (the default is `0.05`, roughly five source
+  units at the default `0.01` scale) produce wider transitions but can pull
+  small isolated submeshes toward their surroundings. Smaller values keep the
+  blend tighter but may miss narrow suture bands.
+- Blending is skipped entirely for a material whose submesh has no foreign
+  face within range. In that case `use_blend` stays `false` and the material
+  uses the unchanged single-texture path.
+
+Geometry that triggers blending is required: passing `--material-mode
+original-godot` on a DDM where every material is spatially isolated produces
+zero blend maps (`blend_map_count = 0` in the analysis report) and all
+materials keep `use_blend = false`.
 
 For maps, `--object-mode auto` (the default) creates one selectable GLB node per
 connected geometry component, joining exact shared edges across material/UV

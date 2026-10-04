@@ -12,7 +12,7 @@ Purpose:
 - combine validated map sections and decode their triangle lists/strips;
 - decode packed 11/11/10 normals, tangents and bitangents;
 - recover the observed legacy Phong material parameters;
-- export maps as separate connected objects in GLB (default), or OBJ/MTL;
+- export maps as separate connected objects in GLB (glTF 2.0);
 - optionally dump JSON diagnostics and CSV-like vertex/index text files.
 
 Tested/reference files:
@@ -50,10 +50,12 @@ import struct
 import tempfile
 
 try:
+    from .blend_mask import DEFAULT_BLEND_RADIUS
     from .glb_export import write_glb, write_skinned_glb
     from .godot_export import write_godot_material_assets
     from .motion_decode import discover_character_motion, decode_character_animations
 except ImportError:
+    from blend_mask import DEFAULT_BLEND_RADIUS
     from glb_export import write_glb, write_skinned_glb
     from godot_export import write_godot_material_assets
     from motion_decode import discover_character_motion, decode_character_animations
@@ -1154,10 +1156,6 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
 
 def analyze_skinned_file(path, data, out_dir, args, header):
     """Decode and export the observed character skin/skeleton DDM variant."""
-    if getattr(args, "format", "glb") != "glb":
-        raise UnsupportedDDMVariant(
-            "skinned characters require GLB export; OBJ cannot store skins"
-        )
     external_motion = discover_character_motion(path)
     transform_bone_ids = (
         external_motion.get("skeleton_bone_ids")
@@ -1233,6 +1231,10 @@ def analyze_skinned_file(path, data, out_dir, args, header):
     if getattr(args, "material_mode", "pbr") == "original-godot":
         godot_materials = write_godot_material_assets(
             out_dir, materials, image_data,
+            vertices=vertices,
+            mesh_parts=mesh_parts,
+            scale=args.scale,
+            radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
         )
     report = {
         "file": str(path),
@@ -1394,182 +1396,6 @@ def topology_stats(vertices, triangles):
         "nonzero_area_triangles": area_nonzero,
         "total_double_area": total_area2,
     }
-
-
-def material_export_name(material):
-    name = material.get("name") or f'material_{material["index"]}'
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
-
-
-def write_obj(
-    path: Path,
-    vertices,
-    mesh_parts,
-    materials,
-    object_name: str,
-    scale: float,
-):
-    materials_by_index = {material["index"]: material for material in materials}
-    with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write("# Experimental DDM geometry decoder\n")
-        f.write("# Primitive codes: 3 = triangle lists, 4 = triangle strips.\n")
-        f.write(f"# Source positions multiplied by {scale:.9g}.\n")
-        f.write("mtllib materials.mtl\n")
-        f.write(f"o {object_name}\n")
-
-        for v in vertices:
-            x, y, z = v["position"]
-            x, y, z = x * scale, y * scale, z * scale
-            f.write(f"v {x:.9g} {y:.9g} {z:.9g}\n")
-
-        for v in vertices:
-            u, vv = v["uv"]
-            # XET images use a top-left origin; OBJ UVs use bottom-left.
-            f.write(f"vt {u:.9g} {1.0 - vv:.9g}\n")
-
-        for v in vertices:
-            x, y, z = vec_normalize(v["normal"])
-            f.write(f"vn {x:.9g} {y:.9g} {z:.9g}\n")
-
-        f.write("s 1\n")
-        for part in mesh_parts:
-            part_index = part["submesh_index"]
-            material_index = part["material_index"]
-            material = materials_by_index.get(
-                material_index,
-                {"index": material_index, "name": f"material_{material_index}"},
-            )
-            f.write(f"g submesh_{part_index}\n")
-            f.write(f"usemtl {material_export_name(material)}\n")
-            for a, b, c in part["triangles"]:
-                a += 1
-                b += 1
-                c += 1
-                f.write(
-                    f"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n"
-                )
-
-
-def write_mtl(path: Path, materials):
-    palette = (
-        (0.75, 0.75, 0.75),
-        (0.80, 0.45, 0.25),
-        (0.30, 0.60, 0.85),
-        (0.45, 0.80, 0.40),
-    )
-    with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write("# DDM materials and decoded XET texture references\n")
-        for material in materials:
-            material_index = material["index"]
-            r, g, b = palette[material_index % len(palette)]
-            phong = material.get("phong")
-            if phong:
-                diffuse_color = phong["diffuse"]
-                # No independent ambient RGB triplet has been identified in
-                # the DDM record. Reusing Kd is the least surprising MTL Ka.
-                ambient_color = phong["diffuse"]
-                specular_color = phong["specular"]
-                shininess = phong["shininess"]
-            else:
-                diffuse_color = (r, g, b)
-                ambient_color = (0.05, 0.05, 0.05)
-                specular_color = (0.15, 0.15, 0.15)
-                shininess = 32.0
-
-            source_colors = (
-                diffuse_color,
-                ambient_color,
-                specular_color,
-            )
-            diffuse_color, ambient_color, specular_color = (
-                tuple(min(1.0, max(0.0, value)) for value in color)
-                for color in source_colors
-            )
-
-            f.write(f"newmtl {material_export_name(material)}\n")
-            f.write(f'# DDM material index: {material_index}\n')
-            if phong:
-                f.write(
-                    f'# Legacy Phong parameters decoded at '
-                    f'0x{phong["offset"]:X}\n'
-                )
-                pbr = material["pbr_estimate"]
-                f.write(
-                    "# PBR roughness is not stored directly; estimate from "
-                    f'Ns: {pbr["roughness"]:.6g}\n'
-                )
-            else:
-                f.write("# Phong parameters not decoded; using fallbacks\n")
-            f.write("# No metallic parameter has been identified in DDM\n")
-            if source_colors != (
-                diffuse_color,
-                ambient_color,
-                specular_color,
-            ):
-                f.write(
-                    "# Source colors outside the MTL range [0, 1] were "
-                    "clamped for MTL compatibility\n"
-                )
-            for texture in material.get("textures", []):
-                f.write(
-                    f'# slot {texture["slot"]}: {texture["reference"]} '
-                    f'[{texture["role"]}]\n'
-                )
-            diffuse = next(
-                (
-                    texture
-                    for texture in material.get("textures", [])
-                    if texture["role"] == "diffuse" and texture["output"]
-                ),
-                None,
-            )
-            normal = next(
-                (
-                    texture
-                    for texture in material.get("textures", [])
-                    if texture["role"] == "normal" and texture["output"]
-                ),
-                None,
-            )
-            specular = next(
-                (
-                    texture
-                    for texture in material.get("textures", [])
-                    if texture["role"] == "specular_mask" and texture["output"]
-                ),
-                None,
-            )
-            f.write("Kd " + " ".join(f"{v:.6g}" for v in diffuse_color) + "\n")
-            f.write("Ka " + " ".join(f"{v:.6g}" for v in ambient_color) + "\n")
-            f.write("Ks " + " ".join(f"{v:.6g}" for v in specular_color) + "\n")
-            f.write(f"Ns {shininess:.6g}\n")
-            if diffuse:
-                f.write(f'map_Kd {diffuse["output"]}\n')
-            if specular:
-                f.write(f'map_Ks {specular["output"]}\n')
-            if normal:
-                # `norm` is widely supported as a tangent-space extension;
-                # map_Bump keeps compatibility with simpler OBJ importers.
-                f.write(f'norm {normal["output"]}\n')
-                f.write(f'map_Bump -bm 1.0 {normal["output"]}\n')
-            f.write("illum 2\n\n")
-
-
-def write_point_obj(
-    path: Path,
-    vertices,
-    object_name: str,
-    scale: float,
-):
-    with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write("# DDM position stream only\n")
-        f.write(f"o {object_name}_points\n")
-        for v in vertices:
-            x, y, z = v["position"]
-            x, y, z = x * scale, y * scale, z * scale
-            f.write(f"v {x:.9g} {y:.9g} {z:.9g}\n")
-        for i in range(len(vertices)):
-            f.write(f"p {i+1}\n")
 
 
 def write_vertices_csv(path: Path, vertices):
@@ -1933,7 +1759,6 @@ def analyze_file(
     args,
     relative_path: Path | None = None,
 ):
-    export_format = getattr(args, "format", "glb")
     image_data = {}
     data = path.read_bytes()
 
@@ -2095,28 +1920,22 @@ def analyze_file(
     if sections:
         stabilize_map_pbr_estimates(materials)
     if not args.no_textures:
-        if export_format == "glb":
-            # GLB embeds PNGs; keep intermediate conversions outside the output.
-            with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:
-                texture_output = Path(temp)
-                materials = resolve_material_textures(
-                    materials, path, texture_output, args.texture_root,
-                )
-                if getattr(args, "material_mode", "pbr") == "pbr":
-                    apply_matcap_pbr_estimates(materials)
-                for material in materials:
-                    for texture in material.get("textures", []):
-                        output = texture.get("output")
-                        if output:
-                            image_data[output] = export_texture_payload(
-                                texture_output, texture,
-                            )
-                            texture["embedded_in_glb"] = texture["role"] in ("diffuse", "normal")
-        else:
-            out_dir.mkdir(parents=True, exist_ok=True)
+        # GLB embeds PNGs; keep intermediate conversions outside the output.
+        with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:
+            texture_output = Path(temp)
             materials = resolve_material_textures(
-                materials, path, out_dir, args.texture_root,
+                materials, path, texture_output, args.texture_root,
             )
+            if getattr(args, "material_mode", "pbr") == "pbr":
+                apply_matcap_pbr_estimates(materials)
+            for material in materials:
+                for texture in material.get("textures", []):
+                    output = texture.get("output")
+                    if output:
+                        image_data[output] = export_texture_payload(
+                            texture_output, texture,
+                        )
+                        texture["embedded_in_glb"] = texture["role"] in ("diffuse", "normal")
     else:
         for material in materials:
             material["textures"] = []
@@ -2214,55 +2033,45 @@ def analyze_file(
         except Exception:
             pass
 
-    mesh_path = out_dir / f"{path.stem}.{export_format}"
-    legacy_mesh_path = out_dir / "mesh.obj"
+    mesh_path = out_dir / f"{path.stem}.glb"
     optional_outputs = (
-        out_dir / "positions_only.obj",
         out_dir / "vertices.csv",
         out_dir / "indices.csv",
         out_dir / "analysis.json",
     )
 
     # Remove files generated by an earlier diagnostic export when producing a
-    # final asset, as well as the former generic mesh filename.
+    # final asset, as well as the former OBJ outputs.
     out_dir.mkdir(parents=True, exist_ok=True)
     stale_outputs = optional_outputs if args.final else ()
-    if legacy_mesh_path != mesh_path:
-        stale_outputs = (*stale_outputs, legacy_mesh_path)
+    stale_outputs = (*stale_outputs, out_dir / "mesh.obj",
+                     out_dir / "positions_only.obj", out_dir / "materials.mtl")
     for stale_path in stale_outputs:
         stale_path.unlink(missing_ok=True)
 
     if not args.final:
-        # The position cloud and CSV streams are reverse-engineering aids.
-        write_point_obj(
-            out_dir / "positions_only.obj",
-            vertices,
-            path.stem,
-            args.scale,
-        )
+        # The CSV streams are reverse-engineering aids.
         write_vertices_csv(
             out_dir / "vertices.csv",
             vertices,
         )
         write_indices(out_dir / "indices.csv", indices)
 
-    if export_format == "glb":
-        object_mode = getattr(args, "object_mode", "auto")
-        if object_mode == "auto":
-            object_mode = "connected" if sections else "single"
-        report["glb_export"] = write_glb(
-            mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
-            mode=object_mode, image_data=image_data,
-            roughness=getattr(args, "roughness", None),
-        )
-        if getattr(args, "material_mode", "pbr") == "original-godot":
-            report["godot_materials"] = write_godot_material_assets(
-                out_dir, materials, image_data,
-            )
-    else:
-        write_mtl(out_dir / "materials.mtl", materials)
-        write_obj(
-            mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
+    object_mode = getattr(args, "object_mode", "auto")
+    if object_mode == "auto":
+        object_mode = "connected" if sections else "single"
+    report["glb_export"] = write_glb(
+        mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
+        mode=object_mode, image_data=image_data,
+        roughness=getattr(args, "roughness", None),
+    )
+    if getattr(args, "material_mode", "pbr") == "original-godot":
+        report["godot_materials"] = write_godot_material_assets(
+            out_dir, materials, image_data,
+            vertices=vertices,
+            mesh_parts=mesh_parts,
+            scale=args.scale,
+            radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
         )
 
     for part in mesh_parts:
@@ -2429,12 +2238,10 @@ def prune_empty_output_directories(path: Path, out_root: Path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Experimental PS3 DDM to GLB or OBJ/MTL converter"
+        description="Experimental PS3 DDM to GLB (glTF 2.0) converter"
     )
     ap.add_argument("input", type=Path, help="DDM file or directory")
     ap.add_argument("output", type=Path, help="Output directory")
-    ap.add_argument("--format", choices=("glb", "obj"), default="glb",
-                    help="Export format (default: self-contained GLB).")
     ap.add_argument(
         "--material-mode",
         choices=("pbr", "original-godot"),
@@ -2459,6 +2266,17 @@ def main():
         ),
     )
     ap.add_argument(
+        "--blend-radius",
+        type=float,
+        default=DEFAULT_BLEND_RADIUS,
+        help=(
+            "Radius in metres over which a neighbouring material influences "
+            "submesh seams in --material-mode original-godot. Larger values "
+            "produce wider smooth transitions; the default matches roughly "
+            f"five source units ({DEFAULT_BLEND_RADIUS})."
+        ),
+    )
+    ap.add_argument(
         "-r",
         "--recursive",
         action="store_true",
@@ -2475,8 +2293,8 @@ def main():
         type=parse_bool,
         metavar="BOOL",
         help=(
-            "Generate only the GLB, or OBJ/MTL/textures with --format obj. "
-            "Diagnostic OBJ/CSV/JSON files are omitted. Accepts true/false; "
+            "Generate only the self-contained GLB. "
+            "Diagnostic CSV/JSON files are omitted. Accepts true/false; "
             "using --final without a value means true."
         ),
     )
@@ -2550,8 +2368,6 @@ def main():
     ap.add_argument("--debug", action="store_true")
 
     args = ap.parse_args()
-    if args.material_mode == "original-godot" and args.format != "glb":
-        ap.error("--material-mode original-godot requires --format glb")
     if args.material_mode == "original-godot" and args.no_textures:
         ap.error("--material-mode original-godot cannot be used with --no-textures")
     if args.experimental_rotation_joints and not args.experimental_root_motion:

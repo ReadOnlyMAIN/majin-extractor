@@ -64,8 +64,6 @@
             "args": [
                 "${input:ddmSource}",
                 "${input:modelOutput}",
-                "--format",
-                "glb",
                 "--material-mode",
                 "${input:ddmMaterialMode}",
                 "--object-mode",
@@ -86,31 +84,6 @@
             }
         },
         {
-            "name": "DDM: convert to OBJ",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
-            "args": [
-                "${input:ddmSource}",
-                "${input:modelOutput}",
-                "--format",
-                "obj",
-                "--recursive",
-                "--final",
-                "${input:ddmFinalOutput}",
-                "--scale",
-                "${input:ddmExportScale}",
-                "--texture-root",
-                "${input:ddmTextureRoot}"
-            ],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "justMyCode": true,
-            "env": {
-                "PYTHONUNBUFFERED": "1"
-            }
-        },
-        {
             "name": "DDM: experimental animation",
             "type": "debugpy",
             "request": "launch",
@@ -118,8 +91,6 @@
             "args": [
                 "${input:ddmCharacterSource}",
                 "${input:modelOutput}",
-                "--format",
-                "glb",
                 "--material-mode",
                 "${input:ddmMaterialMode}",
                 "--animation-clips",

@@ -17,6 +17,24 @@ The standalone research API remains reserved for future calibrated estimators;
 the converter's current method is intentionally identified as
 `matcap_highlight_perceptual_v2` rather than presented as recovered source data.
 
+## Relationship to the DDM blend map
+
+`original-godot` additionally reconstructs the smooth transitions the original
+RSX shader applies between submesh materials. Because the DDM stores one
+material per submesh, a direct port shows hard color seams where two submeshes
+meet. The exporter measures per-vertex distance to foreign-material faces
+(linear falloff over `--blend-radius`, default `0.05` m) and bakes the result
+into a UV-space RGBA texture that the generated `.gdshader` samples to
+interpolate up to four base-color textures.
+
+This is an approximation in the same sense as the matcap path: the source RSX
+arithmetic (mask texture, derivative stencil, or per-fragment code) is not
+recoverable from the exported geometry. The blend map reproduces the visible
+effect (no hard albedo seam) and is documented as editable output, not as
+recovered data. It affects only the base-color path; normals, roughness, the
+utility mask, and the matcap lookup are unchanged. See `README.md` for the
+generated file layout and the `--blend-radius` tradeoff.
+
 ## Verified legacy reflection path
 
 Disassembly of the fragment programs embedded in the `KbBase` `fxbf`

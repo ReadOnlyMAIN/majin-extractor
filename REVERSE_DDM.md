@@ -21,7 +21,7 @@ The final goal is to build a Python decoder that can:
 2. identify its internal structures;
 3. reconstruct every mesh and submesh;
 4. recover positions, normals, tangents, UVs, materials, and related data;
-5. export to OBJ, glTF, or FBX;
+5. export to glTF/GLB (the only supported geometry output);
 6. work on the other DDM files from the ISO.
 
 ---
@@ -811,11 +811,11 @@ chr310_c01 bounding-sphere radius = 234.970749 source units
 ```
 
 Interpreting those values as centimeters gives radii of approximately `0.777 m`
-and `2.350 m`, which are plausible for the sword and large axe. OBJ has no unit
-metadata, so `ddm_to_3d.py` multiplies exported positions by `0.01` by default.
-The raw coordinates remain unchanged in the decoder and diagnostic CSV; the
-scale can be overridden with `--scale` while this hypothesis is tested on more
-characters and environment objects.
+and `2.350 m`, which are plausible for the sword and large axe. GLB/glTF
+positions are in meters, so `ddm_to_3d.py` multiplies exported positions by
+`0.01` by default. The raw coordinates remain unchanged in the decoder and
+diagnostic CSV; the scale can be overridden with `--scale` while this hypothesis
+is tested on more characters and environment objects.
 
 ---
 
@@ -823,7 +823,7 @@ characters and environment objects.
 
 Submesh validation, triangle-strip reconstruction, the
 `submesh → material → textures` relationship, XET conversion, and textured
-OBJ/MTL export are now implemented by `tools/conversion/ddm_to_3d.py`.
+GLB export are now implemented by `tools/conversion/ddm_to_3d.py`.
 
 The next priority is to generalize the parser across:
 
@@ -837,8 +837,7 @@ models with more submeshes
 
 Unknown descriptor fields, especially those surrounding `first_index`, can then
 be correlated across a larger corpus. Once the generic structure is confirmed,
-export can progress from OBJ/MTL to glTF, particularly to represent auxiliary
-reflection textures correctly.
+the export can carry auxiliary reflection textures correctly in the GLB.
 
 ---
 
@@ -1004,7 +1003,7 @@ DDM
  ├─ legacy Phong Kd/Ka/Ks/Ns and derived roughness metadata
  ├─ resolved XET references converted to PNG
  ├─ JSON/CSV diagnostics
- └─ self-contained GLB (or textured OBJ/MTL for static geometry)
+ └─ self-contained GLB (glTF 2.0, embedded textures)
 ```
 
 Static geometry is decoded for weapons such as `chr300_c01` and `chr310_c01`.
@@ -1033,7 +1032,7 @@ instance hierarchy, rotations, authoring pivots or semantic object names have
 been recovered. Disconnected prop pieces can split; connected props can merge.
 
 GLB embeds resolved diffuse/normal PNGs and uses the source UV orientation
-(top-left, unlike the OBJ V flip). Metallic defaults to zero. The former
+(top-left, unlike the former OBJ V flip). Metallic defaults to zero. The former
 conversion exported microfacet alpha directly as roughness (0.174
 for Ns=64 and 0.243 for Ns=32), which glTF squared again and therefore rendered
 excessively glossy. GLB now exports perceptual roughness (0.417 and 0.493) and

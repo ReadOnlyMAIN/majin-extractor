@@ -35,7 +35,7 @@ suggested values follow this convention:
 game_files/package       PAK files from the ISO
 game_files/decompressed  extracted binary resources
 output/textures          PNG textures
-output/models            OBJ/MTL models
+output/models            GLB models
 ```
 
 This layout is optional. Replace the suggested values before launching a
@@ -43,20 +43,21 @@ configuration if your files are stored elsewhere.
 
 ## Debugging with F5
 
-`launch.json` provides four configurations:
+`launch.json` provides these configurations:
 
 - `PAK: extract a file or directory`;
 - `XET: convert a file or directory`;
 - `DDS: convert a file or directory`;
-- `DDM: convert a file or directory`.
+- `DDM: convert to GLB`;
+- `DDM: experimental animation` (root-motion research on a skinned character);
+- `DDM: debug manual layout (no textures)`.
 
 Recursive mode is enabled for the XET, DDS, and DDM converters. The DDM launch
 configuration also asks whether to generate final assets only. Select `true` to
-keep the named OBJ, its required MTL file, and resolved textures; select `false`
-to include the reverse-engineering CSV, JSON, and position-cloud files. It also
-asks for the OBJ position scale, which defaults to `0.01` for the current
-centimeter-to-meter hypothesis. The PAK extractor asks for a worker count and
-defaults to `4`.
+keep the self-contained GLB and its resolved textures; select `false` to include
+the reverse-engineering JSON diagnostics. It also asks for the model position
+scale, which defaults to `0.01` for the current centimeter-to-meter hypothesis.
+The PAK extractor asks for a worker count and defaults to `4`.
 
 ## Tasks
 

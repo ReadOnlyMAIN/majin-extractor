@@ -12,7 +12,6 @@ from unittest import mock
 from tools.conversion import ddm_to_3d as ddm
 from tools.conversion import motion_decode
 
-
 def map_section(primitive, positions, indices, material=0):
     count = len(positions)
     data = bytearray(struct.pack('>4I', 7, count, 1, len(indices)))
@@ -39,11 +38,11 @@ class MapGeometryTests(unittest.TestCase):
         self.second = map_section(4, self.positions, [0, 1, 2, 3], material=1)
         self.data = ddm.MAGIC + struct.pack('>I', 3) + self.first + self.second
 
-    def test_exports_all_sections_with_correct_face_offsets(self):
+    def test_exports_all_sections_to_glb(self):
         args = SimpleNamespace(
             vertex_count=None, position_offset=None, index_offset=None,
             index_count=None, no_textures=True, texture_root=None,
-            final=False, scale=1.0, format="obj",
+            final=False, scale=1.0,
         )
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / 'map'
@@ -52,17 +51,21 @@ class MapGeometryTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 ddm.analyze_file(source, output, args)
             report = json.loads((output / 'map/analysis.json').read_text())
-            obj = (output / 'map/map.obj').read_text().splitlines()
             self.assertEqual(report['vertex_count'], 7)
             self.assertEqual(len(report['geometry_sections']), 2)
             self.assertEqual(report['index_buffer']['unconsumed_count'], 0)
             self.assertEqual([p['triangle_count'] for p in report['mesh_parts']], [1, 2])
-            self.assertEqual([line for line in obj if line.startswith('f ')], [
-                'f 1/1/1 2/2/2 3/3/3',
-                'f 4/4/4 5/5/5 6/6/6',
-                'f 6/6/6 5/5/5 7/7/7',
-            ])
-            self.assertIn('usemtl material_1', obj)
+            # GLB is the only geometry output; it must be present and valid.
+            glb = (output / 'map/map.glb').read_bytes()
+            self.assertEqual(glb[:4], b'glTF')
+            length = struct.unpack_from('<I', glb, 12)[0]
+            document = json.loads(glb[20:20 + length])
+            total_triangles = sum(
+                document['accessors'][primitive['indices']]['count'] // 3
+                for mesh in document['meshes']
+                for primitive in mesh['primitives']
+            )
+            self.assertEqual(total_triangles, 3)
 
     def test_rejects_incomplete_and_inconsistent_sections(self):
         self.assertEqual(ddm.find_map_geometry_sections(self.first[:-1]), [])
@@ -294,7 +297,13 @@ class MapGeometryTests(unittest.TestCase):
             # equivalently the ID table begins at clip + 2 * bone_count.
             motion[0xA6:0xA9] = bytes((7, 3, 9))
             sequence.write_bytes(motion)
-            package.write_bytes(b'\0crg' + struct.pack('>2I', 2, 9))
+            # A valid character rig graph: 0x88-byte header + 9 * 0x80 records.
+            # boundary_count lives at offset 8, record_count at offset 0x80.
+            rig = bytearray(0x88 + 9 * 0x80)
+            rig[:4] = b'\0crg'
+            struct.pack_into('>I', rig, 8, 10)
+            struct.pack_into('>I', rig, 0x80, 9)
+            package.write_bytes(bytes(rig))
             result = motion_decode.discover_character_motion(model)
             self.assertEqual(result['clip_count'], 2)
             self.assertEqual(result['segment_count'], 2)
