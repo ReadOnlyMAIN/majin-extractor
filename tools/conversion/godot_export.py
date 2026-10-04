@@ -194,46 +194,41 @@ def write_godot_utility(destination, overwrite=True):
 # import always yields StandardMaterial3D; this script replaces them using the
 # names recorded in ``material_bindings.json``.
 GODOT_ASSIGN_SCRIPT = '''@tool
-extends EditorScript
+extends EditorScenePostImport
 
 ## Assign the generated ShaderMaterial .tres files to an imported DDM GLB.
 ##
-## A glTF/GLB import cannot reference external Godot resources, so Godot creates
-## a StandardMaterial3D for every surface. This script walks the currently open
-## scene (or a chosen model directory) and, for each mesh surface, looks up the
-## material name in the sibling ``material_bindings.json`` and assigns the
-## matching ShaderMaterial.
+## Use this as the Godot 4 "Import Script" of the converted .glb (see
+## godot/README.md). Godot calls _post_import() after every import or reimport,
+## so the materials are applied automatically and survive asset reimports.
 ##
-## Usage in the Godot 4 editor:
-##   1. Open this file and run it (File > Run), or attach it to a @tool script.
-##   2. It defaults to the directory of the imported model. Adjust MODEL_DIR if
-##      you run it from a different location.
+## A glTF/GLB import cannot reference external Godot resources, so Godot creates
+## a StandardMaterial3D for every surface. This script walks the imported scene
+## and, for each mesh surface, looks up the material name in the sibling
+## ``material_bindings.json`` and assigns the matching ShaderMaterial.
+##
+## MATERIALS_DIR is where the sibling ``materials/`` folder was installed; each
+## model manifest is discovered from the imported scene's own directory.
 
-const MODEL_DIR := "res://"
+const MATERIALS_DIR := "res://majin_utility"
 
-func _run() -> void:
-	var assignments := _load_bindings()
+func _post_import(scene: Node) -> Object:
+	var assignments := _load_bindings(scene)
 	if assignments.is_empty():
-		push_warning("assign_materials: no material_bindings.json found under %s" % MODEL_DIR)
-		return
-	var roots := []
-	if Engine.is_editor_hint():
-		roots = EditorInterface.get_selection().get_selected_nodes()
-	if roots.is_empty():
-		roots = _find_mesh_roots()
-	var applied := 0
+		push_warning("assign_materials: no material_bindings.json found for %s" % scene.name)
+		return scene
 	var missing := {}
-	for root in roots:
-		applied += _assign_recursive(root, assignments, missing)
-	print("assign_materials: assigned %d surface(s)." % applied)
+	var applied := _assign_recursive(scene, assignments, missing)
+	print("assign_materials: assigned %d surface(s) for %s." % [applied, scene.name])
 	if not missing.is_empty():
 		push_warning("assign_materials: unmatched material names: %s" % str(missing.keys()))
+	return scene
 
-func _load_bindings() -> Dictionary:
-	# ~{material_name: ShaderMaterial}: built from every manifest found under
-	# MODEL_DIR so a whole export tree can be fixed in one run.
+func _load_bindings(scene: Node) -> Dictionary:
+	# ~{material_name: ShaderMaterial}: built from every manifest found next to
+	# the imported scene (so sibling ``materials/*.tres`` resolve correctly).
 	var result := {}
-	for path in _find_files(MODEL_DIR, "material_bindings.json"):
+	for path in _find_files(get_source_file().get_base_dir(), "material_bindings.json"):
 		var text := FileAccess.get_file_as_string(path)
 		var data = JSON.parse_string(text)
 		if typeof(data) != TYPE_DICTIONARY:
@@ -267,10 +262,6 @@ func _assign_recursive(node: Node, assignments: Dictionary, missing: Dictionary)
 	for child in node.get_children():
 		count += _assign_recursive(child, assignments, missing)
 	return count
-
-func _find_mesh_roots() -> Array:
-	var scene := EditorInterface.get_edited_scene_root()
-	return [scene] if scene != null else []
 
 func _find_files(dir_path: String, file_name: String) -> PackedStringArray:
 	var found := PackedStringArray()

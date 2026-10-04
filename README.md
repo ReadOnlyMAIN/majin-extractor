@@ -279,9 +279,9 @@ folder once into your Godot project at `res://majin_utility/`.
 
 A GLB cannot reference external Godot resources, so the imported model starts
 with `StandardMaterial3D` on every surface. `godot/utility/assign_materials.gd`
-is an `EditorScript` that assigns the generated `.tres` files by material name
-from `material_bindings.json`: open it in the Godot editor and run it
-(**File > Run**) once after importing the model.
+is an `EditorScenePostImport` **import script**: set it as the **Import Script**
+of the `.glb` in the Import tab, and it assigns the generated `.tres` files by
+material name from `material_bindings.json` on every import/reimport.
 
 `reflection_strength` and `invert_utility` are
 exposed because the P31/P33 sampler bindings are proven but their exact RSX

@@ -305,7 +305,7 @@ class GodotUtilityTests(unittest.TestCase):
             shader = (destination / "majin_original.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()
             self.assertIn("shader_type spatial;", shader)
-            self.assertIn("extends EditorScript", script)
+            self.assertIn("extends EditorScenePostImport", script)
             self.assertIn("material_bindings.json", script)
 
     def test_write_godot_utility_does_not_overwrite_by_default(self):
