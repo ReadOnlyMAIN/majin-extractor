@@ -26,22 +26,19 @@ except ImportError:
         write_png,
     )
 
-GODOT_SHADER = """shader_type spatial;
-
+GODOT_SHADER_COMMON = """
 // Visual approximation reconstructed from KbBase P31/P33 sampler bindings.
 // RSX disassembly shows that EnvSphere RGB is used as signed vector data, not
 // simply added as color. Strength and mask polarity remain exposed so this
 // portable shader is not mistaken for a byte-exact translation.
 //
-// Multi-material blending: the original game transitions smoothly between
-// submesh materials. The exporter writes a UV-space blend map whose RGBA
-// channels hold the weights of up to four material slots. When use_blend is
-// enabled, this shader interpolates between the corresponding base-color
-// textures at the seams. Vertices fully inside one submesh keep a single
-// dominant channel, so the single-material fast path is unchanged.
+// Fallback multi-material blending for layouts without source paint weights.
+// Map101 instead uses its decoded vertex alpha and leaves use_blend disabled.
 uniform sampler2D base_texture : source_color, hint_default_white;
+uniform sampler2D secondary_texture : source_color, hint_default_white;
 uniform sampler2D utility_texture : hint_default_white;
 uniform sampler2D normal_texture : hint_normal;
+uniform sampler2D secondary_normal_texture : hint_normal;
 uniform sampler2D env_sphere_texture : source_color, hint_default_black, repeat_disable;
 
 uniform sampler2D blend_map : hint_default_white, repeat_disable;
@@ -64,9 +61,12 @@ uniform float detail_strength : hint_range(0.0, 1.0, 0.01) = 0.5;
 
 uniform bool use_utility_texture = false;
 uniform bool use_normal_texture = false;
+uniform bool use_secondary_texture = false;
+uniform bool use_secondary_normal_texture = false;
 uniform bool use_env_sphere_texture = false;
 uniform bool invert_utility = false;
 uniform bool use_blend = false;
+uniform bool use_vertex_alpha = false;
 uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
 
@@ -90,12 +90,15 @@ void fragment() {
             : vec4(1.0, 0.0, 0.0, 0.0);
     }
     vec4 base = use_blend ? blend_base(UV, weights) : texture(base_texture, UV);
+    if (use_secondary_texture) {
+        base = mix(base, texture(secondary_texture, UV), COLOR.a);
+    }
 
-    // Fold the detail overlay into the base color where present. When a detail
-    // mask is available it modulates the mix per texel; otherwise a constant
-    // detail_strength is used.
+    // Fold a coincident detail pass into the base draw. Its original vertex
+    // alpha has been transferred to the host geometry, so COLOR.a is the
+    // source-authored paint mask rather than an invented constant blend.
     if (use_detail) {
-        float mix_amount = detail_strength;
+        float mix_amount = COLOR.a * detail_strength;
         if (use_detail_mask) {
             mix_amount *= texture(detail_mask, UV).r;
         }
@@ -105,12 +108,19 @@ void fragment() {
 
     vec3 view_normal = normalize(NORMAL);
 
-    if (use_normal_texture || use_detail_normal_texture) {
+    if (use_normal_texture || use_secondary_normal_texture || use_detail_normal_texture) {
         vec3 sampled_normal = use_normal_texture
             ? texture(normal_texture, UV).rgb
             : vec3(0.5, 0.5, 1.0);
+        if (use_secondary_normal_texture) {
+            sampled_normal = mix(
+                sampled_normal,
+                texture(secondary_normal_texture, UV).rgb,
+                COLOR.a
+            );
+        }
         if (use_detail_normal_texture) {
-            float mix_amount = detail_strength;
+            float mix_amount = COLOR.a * detail_strength;
             if (use_detail_mask) {
                 mix_amount *= texture(detail_mask, UV).r;
             }
@@ -138,12 +148,21 @@ void fragment() {
         reconstructed += reflection * utility * reflection_strength;
     }
 
-    ALBEDO = reconstructed;
-    ALPHA = base.a;
+    ALBEDO = reconstructed * COLOR.rgb;
+#if MATERIAL_ALPHA_MODE == 1
+    ALPHA = base.a * COLOR.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
+#elif MATERIAL_ALPHA_MODE == 2
+    ALPHA = base.a * (use_vertex_alpha ? COLOR.a : 1.0);
+#endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
 }
+"""
+
+GODOT_CUSTOM_SHADER = """shader_type spatial;
+#define MATERIAL_ALPHA_MODE 0
+#include "majin_material_common.gdshaderinc"
 """
 
 
@@ -163,7 +182,8 @@ ROLE_TO_UNIFORM = {
 # references the shader through this path so materials never embed a copy, and
 # ``godot/utility/`` only has to be installed once.
 GODOT_UTILITY_DIR = "res://majin_utility"
-SHADER_FILE_NAME = "majin_original.gdshader"
+CUSTOM_SHADER_FILE_NAME = "majin_multitexture.gdshader"
+SHADER_COMMON_FILE_NAME = "majin_material_common.gdshaderinc"
 ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
 
 
@@ -179,7 +199,8 @@ def write_godot_utility(destination, overwrite=True):
     destination.mkdir(parents=True, exist_ok=True)
     written = []
     for name, content in (
-        (SHADER_FILE_NAME, GODOT_SHADER),
+        (CUSTOM_SHADER_FILE_NAME, GODOT_CUSTOM_SHADER),
+        (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
     ):
         path = destination / name
@@ -189,14 +210,13 @@ def write_godot_utility(destination, overwrite=True):
     return written
 
 
-# Godot 4 helper that assigns the generated ShaderMaterial `.tres` files to the
-# imported GLB. A GLB cannot reference external resources, so the portable glTF
-# import always yields StandardMaterial3D; this script replaces them using the
-# names recorded in ``material_bindings.json``.
+# Godot 4 helper that assigns the generated Material `.tres` files to the
+# imported GLB. Most are StandardMaterial3D resources; decoded multi-texture
+# variants use ShaderMaterial.
 GODOT_ASSIGN_SCRIPT = '''@tool
 extends EditorScenePostImport
 
-## Assign the generated ShaderMaterial .tres files to an imported DDM GLB.
+## Assign the generated Material .tres files to an imported DDM GLB.
 ##
 ## Use this as the Godot 4 "Import Script" of the converted .glb (see
 ## godot/README.md). Godot calls _post_import() after every import or reimport,
@@ -205,12 +225,9 @@ extends EditorScenePostImport
 ## A glTF/GLB import cannot reference external Godot resources, so Godot creates
 ## a StandardMaterial3D for every surface. This script walks the imported scene
 ## and, for each mesh surface, looks up the material name in the sibling
-## ``material_bindings.json`` and assigns the matching ShaderMaterial.
+## ``material_bindings.json`` and assigns the matching Material resource.
 ##
-## MATERIALS_DIR is where the sibling ``materials/`` folder was installed; each
-## model manifest is discovered from the imported scene's own directory.
-
-const MATERIALS_DIR := "res://majin_utility"
+## Each model manifest is discovered from the imported scene's own directory.
 
 func _post_import(scene: Node) -> Object:
 	var assignments := _load_bindings(scene)
@@ -225,22 +242,26 @@ func _post_import(scene: Node) -> Object:
 	return scene
 
 func _load_bindings(scene: Node) -> Dictionary:
-	# ~{material_name: ShaderMaterial}: built from every manifest found next to
-	# the imported scene (so sibling ``materials/*.tres`` resolve correctly).
+	# ~{material_name: Material}: built from every manifest found next to
+	# the imported scene. Manifest resource paths are relative to the model
+	# directory, not to the ``materials/`` directory containing the manifest.
 	var result := {}
-	for path in _find_files(get_source_file().get_base_dir(), "material_bindings.json"):
+	var model_base := get_source_file().get_base_dir()
+	for path in _find_files(model_base, "material_bindings.json"):
 		var text := FileAccess.get_file_as_string(path)
 		var data = JSON.parse_string(text)
 		if typeof(data) != TYPE_DICTIONARY:
 			continue
-		var base := path.get_base_dir()
 		for entry in data.get("materials", []):
 			var name: String = entry.get("material_name", "")
-			var tres: String = entry.get("shader_material", "")
+			# ``shader_material`` is the legacy manifest key used before native
+			# StandardMaterial3D resources were emitted.
+			var tres: String = entry.get("material_resource", entry.get("shader_material", ""))
 			if name == "" or tres == "":
 				continue
-			var resource := load(base.path_join(tres))
-			if resource is ShaderMaterial:
+			var resource_path := tres if tres.is_absolute_path() else model_base.path_join(tres)
+			var resource := load(resource_path)
+			if resource is Material:
 				result[name] = resource
 	return result
 
@@ -284,6 +305,18 @@ func _find_files(dir_path: String, file_name: String) -> PackedStringArray:
 # Slot 0 is always the material the vertex originally belonged to. Slots 1..3
 # are foreign materials reachable within the blend radius.
 MAX_BLEND_SLOTS = 4
+
+
+def _requires_custom_shader(material: dict, uniforms: dict, use_blend=False) -> bool:
+    """Whether StandardMaterial3D cannot express this decoded feature set."""
+    shader_key = (material.get("render_state") or {}).get("shader_key")
+    return bool(
+        shader_key == "0x00847725"
+        or material.get("detail")
+        or use_blend
+        or "utility_texture" in uniforms
+        or "env_sphere_texture" in uniforms
+    )
 
 
 def _safe_resource_name(name: str) -> str:
@@ -331,6 +364,62 @@ def _write_shader_material(
     path.write_text("\n".join(lines), encoding="ascii")
 
 
+def _write_standard_material(
+    path: Path,
+    uniforms: dict[str, str],
+    render_mode: str,
+    roughness: float,
+    use_vertex_color: bool,
+) -> None:
+    """Write a native Godot 4 PBR material for a simple DDM pipeline."""
+    texture_properties = {
+        "base_texture": "albedo_texture",
+        "normal_texture": "normal_texture",
+    }
+    resources = []
+    texture_ids = {}
+    for number, (uniform, property_name) in enumerate(texture_properties.items(), 1):
+        texture_path = uniforms.get(uniform)
+        if not texture_path:
+            continue
+        resource_id = f"{number}_{property_name}"
+        relative_texture = (Path("..") / Path(texture_path)).as_posix()
+        resources.append((relative_texture, resource_id))
+        texture_ids[property_name] = resource_id
+
+    lines = [
+        f'[gd_resource type="StandardMaterial3D" load_steps={len(resources) + 1} format=3]',
+        "",
+    ]
+    lines.extend(
+        f'[ext_resource type="Texture2D" path="{resource_path}" id="{resource_id}"]'
+        for resource_path, resource_id in resources
+    )
+    lines.extend(["", "[resource]"])
+    lines.extend(
+        f'{property_name} = ExtResource("{resource_id}")'
+        for property_name, resource_id in texture_ids.items()
+    )
+    if "normal_texture" in texture_ids:
+        lines.append("normal_enabled = true")
+    transparency = {
+        "opaque": 0,
+        "alpha_blend": 1,
+        "alpha_scissor": 2,
+    }.get(render_mode, 0)
+    if transparency:
+        lines.append(f"transparency = {transparency}")
+    if render_mode == "alpha_scissor":
+        lines.extend(("alpha_scissor_threshold = 0.5", "cull_mode = 2"))
+    lines.extend((
+        f"vertex_color_use_as_albedo = {str(use_vertex_color).lower()}",
+        "metallic = 0.0",
+        f"roughness = {roughness:.9g}",
+        "",
+    ))
+    path.write_text("\n".join(lines), encoding="ascii")
+
+
 def _material_texture_map(material: dict) -> dict:
     """Return ``{uniform_name: output_path}`` for a material's own textures.
 
@@ -355,6 +444,31 @@ def _material_texture_map(material: dict) -> dict:
         if output:
             uniforms[uniform] = output
     return uniforms
+
+
+def _multitexture_map(material: dict) -> dict:
+    """Bind both albedo/normal pairs of the decoded 0x00847725 variant."""
+    textures = sorted(material.get("textures", []), key=lambda item: item.get("slot", 0))
+    albedos = [
+        texture["output"] for texture in textures
+        if texture.get("output")
+        and texture.get("role") in {"diffuse", "auxiliary"}
+        and texture.get("role") != "normal"
+    ]
+    normals = [
+        texture["output"] for texture in textures
+        if texture.get("output") and texture.get("role") == "normal"
+    ]
+    result = {}
+    if albedos:
+        result["base_texture"] = albedos[0]
+    if len(albedos) > 1:
+        result["secondary_texture"] = albedos[1]
+    if normals:
+        result["normal_texture"] = normals[0]
+    if len(normals) > 1:
+        result["secondary_normal_texture"] = normals[1]
+    return result
 
 
 def _build_blend_assets(
@@ -427,9 +541,9 @@ def _has_foreign_weight(rows) -> bool:
 def _position_signature(vertices, triangle):
     """Orientation-independent position-only signature of a face.
 
-    Multipass overlays paint a *different texture* onto the *same* geometry, so
-    they share positions but not UVs. Overlay detection therefore keys on
-    position alone, unlike the exact-attribute dedup used for the portable GLB.
+    Multipass overlays paint a *different texture* onto the *same* geometry.
+    Candidate detection keys on position; folding separately verifies that UVs
+    match before transferring the source alpha mask.
     """
     points = sorted(tuple(vertices[index]['position']) for index in triangle)
     return tuple(points)
@@ -446,10 +560,12 @@ def _fold_multipass_details(materials, mesh_parts, vertices):
 
     A material B is treated as an overlay of A when *every* B face shares its
     positions with an A face (100% coverage). The overlay's diffuse and normal
-    texture outputs are attached to A as ``material["detail"]``. Nothing is
-    removed: B keeps its own ``.tres`` so the GLB primitive stays valid.
+    texture outputs are attached to A as ``material["detail"]``. The overlay
+    alpha is copied to the coincident host vertices and the overlay material
+    index is reported so its coplanar GLB primitive can be omitted.
 
-    Returns a list of ``{host, detail, coverage}`` records for reporting.
+    Folding requires matching UVs as well as positions. A layout with distinct
+    UV sets needs a second exported UV stream and is deliberately left alone.
     """
     material_by_index = {int(m['index']): m for m in materials}
     roles = {
@@ -509,7 +625,44 @@ def _fold_multipass_details(materials, mesh_parts, vertices):
         # Never overwrite an existing detail layer.
         if host.get('detail'):
             continue
-        detail = {'source_material': material.get('name', f"material_{index}")}
+        # Match every overlay face to a host face and verify that the UV at
+        # each shared position is identical. This is true for map101's
+        # gake102 pair, so one draw can reproduce both passes losslessly.
+        host_faces = {
+            _position_signature(vertices, triangle): triangle
+            for triangle in faces_by_material[best_host]
+        }
+        uv_compatible = True
+        overlay_alpha = defaultdict(list)
+        for triangle in faces_by_material[index]:
+            host_triangle = host_faces.get(_position_signature(vertices, triangle))
+            if host_triangle is None:
+                uv_compatible = False
+                break
+            host_uv = {
+                tuple(vertices[vertex_index]['position']): tuple(vertices[vertex_index]['uv'])
+                for vertex_index in host_triangle
+            }
+            for vertex_index in triangle:
+                vertex = vertices[vertex_index]
+                position = tuple(vertex['position'])
+                if host_uv.get(position) != tuple(vertex['uv']):
+                    uv_compatible = False
+                    break
+                overlay_alpha[position].append(
+                    int(vertex.get('color', 0xFFFFFFFF)) & 0xFF
+                )
+            if not uv_compatible:
+                break
+        if not uv_compatible:
+            continue
+
+        detail = {
+            'source_material': material.get('name', f"material_{index}"),
+            'source_material_index': index,
+            'mask_source': 'vertex_alpha',
+            'strength': 1.0,
+        }
         diffuse = detail_texture(material, 'diffuse')
         normal = detail_texture(material, 'normal')
         if diffuse:
@@ -518,13 +671,52 @@ def _fold_multipass_details(materials, mesh_parts, vertices):
             detail['normal'] = normal
         if not detail.get('diffuse'):
             continue
+
+        # COLOR.a on the host becomes the detail mask. Vertices not covered by
+        # the overlay must be zero, otherwise the detail would spill outside
+        # the source-authored painted region.
+        host_vertex_indices = {
+            vertex_index
+            for triangle in faces_by_material[best_host]
+            for vertex_index in triangle
+        }
+        for vertex_index in host_vertex_indices:
+            vertex = vertices[vertex_index]
+            values = overlay_alpha.get(tuple(vertex['position']))
+            alpha = round(sum(values) / len(values)) if values else 0
+            color = int(vertex.get('color', 0xFFFFFFFF))
+            vertex['color'] = (color & 0xFFFFFF00) | alpha
+
         host['detail'] = detail
         folds.append({
             'host': host.get('name', f"material_{best_host}"),
             'detail': detail['source_material'],
             'coverage': round(best_ratio, 4),
+            'overlay_material_index': index,
+            'mask_source': 'vertex_alpha',
         })
     return folds
+
+
+def _material_uses_vertex_alpha(material_index, vertices, mesh_parts):
+    """Whether a material contains a source vertex alpha below full opacity."""
+    if not vertices or not mesh_parts:
+        return False
+    return any(
+        (int(vertices[vertex_index].get('color', 0xFFFFFFFF)) & 0xFF) < 255
+        for part in mesh_parts
+        if int(part['material_index']) == material_index
+        for triangle in part['triangles']
+        for vertex_index in triangle
+    )
+
+
+def _mesh_has_source_vertex_alpha(vertices, mesh_parts):
+    """Whether the DDM already supplies any non-opaque vertex paint masks."""
+    return any(
+        (int(vertex.get('color', 0xFFFFFFFF)) & 0xFF) < 255
+        for vertex in (vertices or [])
+    )
 
 
 def write_godot_material_assets(
@@ -535,6 +727,7 @@ def write_godot_material_assets(
     mesh_parts: list[dict] | None = None,
     scale: float = 1.0,
     radius: float = DEFAULT_BLEND_RADIUS,
+    detail_folds: list[dict] | None = None,
 ) -> dict:
     """Write the Godot shader, external PNGs, and their material bindings.
 
@@ -551,28 +744,35 @@ def write_godot_material_assets(
     # ``res://majin_utility/``; the generated materials reference that stable
     # path instead of regenerating the shader on every export. Use
     # :func:`write_godot_utility` to copy the folder into a Godot project.
-    shader_reference = f"{GODOT_UTILITY_DIR}/{SHADER_FILE_NAME}"
+    custom_shader_reference = f"{GODOT_UTILITY_DIR}/{CUSTOM_SHADER_FILE_NAME}"
 
     for relative, payload in image_data.items():
         destination = out_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(payload)
 
+    # Source-authored alpha masks supersede the old proximity-based blend-map
+    # reconstruction. Mixing both systems double-blends terrain and obscures
+    # the actual DDM signal. Keep the heuristic only for older layouts that
+    # contain no vertex alpha information at all.
+    has_source_vertex_alpha = _mesh_has_source_vertex_alpha(vertices, mesh_parts)
     blend_assets: dict[int, dict] = {}
-    if vertices and mesh_parts and len(materials) > 1:
+    if vertices and mesh_parts and len(materials) > 1 and not has_source_vertex_alpha:
         blend_assets = _build_blend_assets(
             out_dir, material_dir, materials, mesh_parts, vertices, scale, radius,
         )
 
-    detail_folds: list[dict] = []
-    if vertices and mesh_parts:
+    if detail_folds is None and vertices and mesh_parts:
         detail_folds = _fold_multipass_details(materials, mesh_parts, vertices)
+    detail_folds = detail_folds or []
 
     material_by_index = {int(m["index"]): m for m in materials}
     bindings = []
     material_resources = []
     for material in materials:
         uniforms = dict(_material_texture_map(material))
+        if (material.get("render_state") or {}).get("shader_key") == "0x00847725":
+            uniforms.update(_multitexture_map(material))
 
         asset = blend_assets.get(int(material["index"]))
         use_blend = bool(asset)
@@ -594,11 +794,20 @@ def write_godot_material_assets(
         switches = {
             "use_utility_texture": "utility_texture" in uniforms,
             "use_normal_texture": "normal_texture" in uniforms,
+            "use_secondary_texture": "secondary_texture" in uniforms,
+            "use_secondary_normal_texture": "secondary_normal_texture" in uniforms,
             "use_env_sphere_texture": "env_sphere_texture" in uniforms,
             "use_blend": use_blend,
             "use_detail": "detail_texture" in uniforms,
             "use_detail_normal_texture": "detail_normal_texture" in uniforms,
             "use_detail_mask": "detail_mask" in uniforms,
+            "use_vertex_alpha": (
+                not material.get("detail")
+                and (material.get("render_state") or {}).get("mode") == "alpha_blend"
+                and _material_uses_vertex_alpha(
+                    int(material["index"]), vertices, mesh_parts,
+                )
+            ),
         }
         estimate = material.get("pbr_estimate") or {}
         scalars = {"roughness": float(estimate.get("roughness", 1.0))}
@@ -610,20 +819,33 @@ def write_godot_material_assets(
             f'{_safe_resource_name(material.get("name", "material"))}.tres'
         )
         resource_path = material_dir / resource_name
-        _write_shader_material(
-            resource_path, shader_reference, uniforms, switches, scalars,
-        )
+        custom_shader = _requires_custom_shader(material, uniforms, use_blend)
+        render_mode = (material.get("render_state") or {}).get("mode", "opaque")
+        if custom_shader:
+            _write_shader_material(
+                resource_path, custom_shader_reference, uniforms, switches, scalars,
+            )
+        else:
+            _write_standard_material(
+                resource_path,
+                uniforms,
+                render_mode,
+                scalars["roughness"],
+                use_vertex_color=True,
+            )
         material_resources.append(resource_path.relative_to(out_dir).as_posix())
         bindings.append({
             "material_index": material["index"],
             "material_name": material.get("name", f'material_{material["index"]}'),
-            "shader": shader_reference,
-            "shader_material": resource_path.relative_to(out_dir).as_posix(),
+            "material_type": "ShaderMaterial" if custom_shader else "StandardMaterial3D",
+            "shader": custom_shader_reference if custom_shader else None,
+            "material_resource": resource_path.relative_to(out_dir).as_posix(),
             "uniforms": uniforms,
             "switches": switches,
             "scalars": scalars,
             "blend_map": asset["path"] if asset else None,
             "detail": material.get("detail"),
+            "render_state": material.get("render_state"),
         })
 
     manifest_path = material_dir / "material_bindings.json"
@@ -633,11 +855,14 @@ def write_godot_material_assets(
         encoding="ascii",
     )
     return {
-        "shader": shader_reference,
+        "shader": custom_shader_reference,
         "manifest": manifest_path.relative_to(out_dir).as_posix(),
         "shader_materials": material_resources,
         "texture_count": len(image_data),
         "blend_map_count": len(blend_assets),
+        "blend_source": (
+            "ddm_vertex_alpha" if has_source_vertex_alpha
+            else "reconstructed_proximity"
+        ),
         "detail_fold_count": len(detail_folds),
     }
-

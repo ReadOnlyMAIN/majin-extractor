@@ -186,6 +186,30 @@ class GlbExportTests(unittest.TestCase):
         self.assertEqual(filtered[0]['triangles'], [(0, 1, 2)])
         self.assertEqual(stats['removed_normal_only_surface_passes'], 0)
 
+    def test_excluded_multipass_material_is_absent_from_glb_primitives(self):
+        vertices = [vertex(p) for p in (
+            (0, 0, 0), (1, 0, 0), (0, 1, 0),
+            (0, 0, 0), (1, 0, 0), (0, 1, 0),
+        )]
+        parts = [
+            part(0, [(0, 1, 2)], 11),
+            part(1, [(3, 4, 5)], 12),
+        ]
+        materials = [{'index': 11}, {'index': 12}]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'folded.glb'
+            write_glb(
+                path, vertices, parts, materials, 'folded', 1.0,
+                excluded_materials={12},
+            )
+            doc, _ = read_glb(path)
+        used = {
+            primitive['material']
+            for mesh in doc['meshes']
+            for primitive in mesh['primitives']
+        }
+        self.assertEqual(used, {0})
+
     def test_tangent_handedness_and_orthogonalization(self):
         tangent = tangent_frame({'tangent': (2, 0, 0.1), 'bitangent': (0, -1, 0)}, (0, 0, 1))
         self.assertEqual(tangent, (1.0, 0.0, 0.0, -1.0))

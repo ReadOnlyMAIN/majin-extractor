@@ -1,7 +1,7 @@
 @tool
 extends EditorScenePostImport
 
-## Assign the generated ShaderMaterial .tres files to an imported DDM GLB.
+## Assign the generated Material .tres files to an imported DDM GLB.
 ##
 ## Use this as the Godot 4 "Import Script" of the converted .glb (see
 ## godot/README.md). Godot calls _post_import() after every import or reimport,
@@ -10,12 +10,9 @@ extends EditorScenePostImport
 ## A glTF/GLB import cannot reference external Godot resources, so Godot creates
 ## a StandardMaterial3D for every surface. This script walks the imported scene
 ## and, for each mesh surface, looks up the material name in the sibling
-## ``material_bindings.json`` and assigns the matching ShaderMaterial.
+## ``material_bindings.json`` and assigns the matching Material resource.
 ##
-## MATERIALS_DIR is where the sibling ``materials/`` folder was installed; each
-## model manifest is discovered from the imported scene's own directory.
-
-const MATERIALS_DIR := "res://majin_utility"
+## Each model manifest is discovered from the imported scene's own directory.
 
 func _post_import(scene: Node) -> Object:
 	var assignments := _load_bindings(scene)
@@ -30,22 +27,26 @@ func _post_import(scene: Node) -> Object:
 	return scene
 
 func _load_bindings(scene: Node) -> Dictionary:
-	# ~{material_name: ShaderMaterial}: built from every manifest found next to
-	# the imported scene (so sibling ``materials/*.tres`` resolve correctly).
+	# ~{material_name: Material}: built from every manifest found next to
+	# the imported scene. Manifest resource paths are relative to the model
+	# directory, not to the ``materials/`` directory containing the manifest.
 	var result := {}
-	for path in _find_files(get_source_file().get_base_dir(), "material_bindings.json"):
+	var model_base := get_source_file().get_base_dir()
+	for path in _find_files(model_base, "material_bindings.json"):
 		var text := FileAccess.get_file_as_string(path)
 		var data = JSON.parse_string(text)
 		if typeof(data) != TYPE_DICTIONARY:
 			continue
-		var base := path.get_base_dir()
 		for entry in data.get("materials", []):
 			var name: String = entry.get("material_name", "")
-			var tres: String = entry.get("shader_material", "")
+			# ``shader_material`` is the legacy manifest key used before native
+			# StandardMaterial3D resources were emitted.
+			var tres: String = entry.get("material_resource", entry.get("shader_material", ""))
 			if name == "" or tres == "":
 				continue
-			var resource := load(base.path_join(tres))
-			if resource is ShaderMaterial:
+			var resource_path := tres if tres.is_absolute_path() else model_base.path_join(tres)
+			var resource := load(resource_path)
+			if resource is Material:
 				result[name] = resource
 	return result
 

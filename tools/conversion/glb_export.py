@@ -198,7 +198,8 @@ def add_legacy_specular_extension(doc, item, phong):
 
 
 def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
-              mode='connected', image_data=None, roughness=None):
+              mode='connected', image_data=None, roughness=None,
+              excluded_materials=None):
     """Write nodes with local origins, material primitives, and embedded PNGs.
 
     Exact identical local meshes share a mesh index, including materials and
@@ -290,6 +291,12 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
         material_indices[material['index']] = len(doc['materials'])
         doc['materials'].append(item)
 
+    excluded_materials = set(excluded_materials or ())
+    if excluded_materials:
+        mesh_parts = [
+            part for part in mesh_parts
+            if part['material_index'] not in excluded_materials
+        ]
     mesh_cache = {}
     mesh_parts, filtering = remove_redundant_surface_passes(
         vertices, mesh_parts, materials,

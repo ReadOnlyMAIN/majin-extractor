@@ -185,6 +185,22 @@ class MapGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(phong['specular'][0], 0.2)
         self.assertEqual(phong['shininess'], 32.0)
 
+    def test_material_render_state_trailer_decodes_pipeline_mode(self):
+        phong_offset = 9
+        for value, mode in enumerate(('opaque', 'alpha_scissor', 'alpha_blend')):
+            data = bytes((value,)) + bytes.fromhex('00843105 00000002') + b'payload'
+            state = ddm.decode_material_render_state(
+                data, {'offset': phong_offset},
+            )
+            self.assertEqual(state['mode_value'], value)
+            self.assertEqual(state['mode'], mode)
+            self.assertEqual(state['shader_key'], '0x00843105')
+
+    def test_material_render_state_rejects_unknown_layout(self):
+        self.assertIsNone(ddm.decode_material_render_state(
+            b'\x00' * 16, {'offset': 9},
+        ))
+
     def test_normal_texture_green_channel_is_converted_from_directx(self):
         try:
             from PIL import Image

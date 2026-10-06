@@ -16,7 +16,8 @@ from tools.conversion.ddm.materials import (
 )
 from tools.conversion.godot_export import (
     GODOT_ASSIGN_SCRIPT,
-    GODOT_SHADER,
+    GODOT_CUSTOM_SHADER,
+    GODOT_SHADER_COMMON,
     _fold_multipass_details,
     write_godot_material_assets,
     write_godot_utility,
@@ -43,11 +44,13 @@ class GodotExportTests(unittest.TestCase):
             }
             result = write_godot_material_assets(out, materials, images)
             manifest = json.loads((out / result["manifest"]).read_text())
-            shader = GODOT_SHADER
-            self.assertIn("shader_type spatial;", shader)
-            self.assertIn("uniform bool use_blend", shader)
+            self.assertIn("shader_type spatial;", GODOT_CUSTOM_SHADER)
+            self.assertIn("uniform bool use_blend", GODOT_SHADER_COMMON)
             self.assertEqual(
-                result["shader"], "res://majin_utility/majin_original.gdshader"
+                result["shader"], "res://majin_utility/majin_multitexture.gdshader"
+            )
+            self.assertEqual(
+                manifest["materials"][0]["material_type"], "StandardMaterial3D"
             )
             self.assertEqual(manifest["materials"][0]["switches"]["use_blend"], False)
             self.assertIsNone(manifest["materials"][0]["blend_map"])
@@ -88,9 +91,8 @@ class GodotExportTests(unittest.TestCase):
                 binding["uniforms"]["detail_normal_texture"], "textures/multi_n.png"
             )
             self.assertEqual(binding["scalars"]["detail_strength"], 0.75)
-            shader = GODOT_SHADER
-            self.assertIn("uniform sampler2D detail_texture", shader)
-            tres = (out / binding["shader_material"]).read_text()
+            self.assertIn("uniform sampler2D detail_texture", GODOT_SHADER_COMMON)
+            tres = (out / binding["material_resource"]).read_text()
             self.assertIn("shader_parameter/detail_texture", tres)
             self.assertIn("shader_parameter/use_detail = true", tres)
 
@@ -197,6 +199,58 @@ class GodotExportTests(unittest.TestCase):
             result = write_godot_material_assets(out, materials, images)
             self.assertEqual(result["blend_map_count"], 0)
 
+    def test_decoded_render_modes_use_native_standard_material_properties(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root)
+            materials = [
+                {"index": 0, "name": "rock", "textures": [],
+                 "render_state": {"mode": "opaque"}},
+                {"index": 1, "name": "vine", "textures": [],
+                 "render_state": {"mode": "alpha_scissor"}},
+                {"index": 2, "name": "paint", "textures": [],
+                 "render_state": {"mode": "alpha_blend"}},
+            ]
+            result = write_godot_material_assets(out, materials, {})
+            manifest = json.loads((out / result["manifest"]).read_text())
+            self.assertEqual(
+                [entry["material_type"] for entry in manifest["materials"]],
+                ["StandardMaterial3D"] * 3,
+            )
+            resources = [
+                (out / entry["material_resource"]).read_text()
+                for entry in manifest["materials"]
+            ]
+            self.assertNotIn("transparency =", resources[0])
+            self.assertIn("transparency = 2", resources[1])
+            self.assertIn("alpha_scissor_threshold = 0.5", resources[1])
+            self.assertIn("cull_mode = 2", resources[1])
+            self.assertIn("transparency = 1", resources[2])
+
+    def test_four_texture_shader_key_keeps_custom_pipeline_and_all_textures(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root)
+            material = {
+                "index": 0,
+                "name": "zimen",
+                "render_state": {"mode": "opaque", "shader_key": "0x00847725"},
+                "textures": [
+                    {"slot": 0, "role": "diffuse", "output": "textures/a_c.png"},
+                    {"slot": 1, "role": "auxiliary", "output": "textures/b_c.png"},
+                    {"slot": 2, "role": "normal", "output": "textures/a_n.png"},
+                    {"slot": 3, "role": "normal", "output": "textures/b_n.png"},
+                ],
+            }
+            result = write_godot_material_assets(out, [material], {})
+            entry = json.loads((out / result["manifest"]).read_text())["materials"][0]
+            self.assertEqual(entry["material_type"], "ShaderMaterial")
+            self.assertEqual(entry["uniforms"]["secondary_texture"], "textures/b_c.png")
+            self.assertEqual(
+                entry["uniforms"]["secondary_normal_texture"], "textures/b_n.png"
+            )
+            tres = (out / entry["material_resource"]).read_text()
+            self.assertIn("majin_multitexture.gdshader", tres)
+            self.assertIn("shader_parameter/secondary_texture", tres)
+
 
 class MaterialModeTests(unittest.TestCase):
     def test_pbr_is_the_default_mode(self):
@@ -222,18 +276,18 @@ class MultipassDetailFoldTests(unittest.TestCase):
         return {"index": index, "name": name, "textures": textures}
 
     def test_overlay_material_is_folded_as_a_detail_layer(self):
-        # base and multi share the same positions (painted on the same surface)
-        # but use different UVs/textures. 'base' additionally has a face of its
+        # base and multi share positions and UVs (painted on the same surface)
+        # but use different textures. 'base' additionally has a face of its
         # own, so the overlay direction is unambiguous (like map101's terrain).
         base = self._material(11, "gake102__base", "textures/base_c.png", "textures/base_n.png")
         multi = self._material(12, "gake102__multi", "textures/multi_c.png", "textures/multi_n.png")
         vertices = [
-            {"position": (0, 0, 0), "uv": (0.0, 0.0)},
-            {"position": (1, 0, 0), "uv": (0.1, 0.0)},
-            {"position": (0, 1, 0), "uv": (0.0, 0.1)},
-            {"position": (0, 0, 0), "uv": (0.5, 0.5)},
-            {"position": (1, 0, 0), "uv": (0.6, 0.5)},
-            {"position": (0, 1, 0), "uv": (0.5, 0.6)},
+            {"position": (0, 0, 0), "uv": (0.0, 0.0), "color": 0xFFFFFF00},
+            {"position": (1, 0, 0), "uv": (0.1, 0.0), "color": 0xFFFFFF00},
+            {"position": (0, 1, 0), "uv": (0.0, 0.1), "color": 0xFFFFFF00},
+            {"position": (0, 0, 0), "uv": (0.0, 0.0), "color": 0xFFFFFFFF},
+            {"position": (1, 0, 0), "uv": (0.1, 0.0), "color": 0xFFFFFF7F},
+            {"position": (0, 1, 0), "uv": (0.0, 0.1), "color": 0xFFFFFF00},
             # A face belonging to base alone (not covered by multi).
             {"position": (3, 3, 3), "uv": (0.2, 0.2)},
             {"position": (4, 3, 3), "uv": (0.3, 0.2)},
@@ -245,12 +299,39 @@ class MultipassDetailFoldTests(unittest.TestCase):
         ]
         folds = _fold_multipass_details([base, multi], parts, vertices)
         self.assertEqual(folds, [
-            {"host": "gake102__base", "detail": "gake102__multi", "coverage": 1.0},
+            {
+                "host": "gake102__base", "detail": "gake102__multi",
+                "coverage": 1.0, "overlay_material_index": 12,
+                "mask_source": "vertex_alpha",
+            },
         ])
         self.assertEqual(base["detail"]["diffuse"], "textures/multi_c.png")
         self.assertEqual(base["detail"]["normal"], "textures/multi_n.png")
-        # The overlay keeps its own material so the GLB primitive stays valid.
+        self.assertEqual([vertex["color"] & 0xFF for vertex in vertices[:3]], [255, 127, 0])
+        self.assertEqual(base["detail"]["mask_source"], "vertex_alpha")
+        # The overlay keeps its material metadata, but its coplanar primitive
+        # is excluded from the Godot GLB by the scene exporter.
         self.assertNotIn("detail", multi)
+
+    def test_distinct_overlay_uvs_are_not_folded(self):
+        base = self._material(0, "base", "textures/base.png")
+        overlay = self._material(1, "overlay", "textures/overlay.png")
+        vertices = [
+            {"position": (0, 0, 0), "uv": (0, 0)},
+            {"position": (1, 0, 0), "uv": (1, 0)},
+            {"position": (0, 1, 0), "uv": (0, 1)},
+            {"position": (0, 0, 0), "uv": (0.5, 0.5)},
+            {"position": (1, 0, 0), "uv": (0.6, 0.5)},
+            {"position": (0, 1, 0), "uv": (0.5, 0.6)},
+            {"position": (2, 0, 0), "uv": (0, 0)},
+            {"position": (3, 0, 0), "uv": (1, 0)},
+            {"position": (2, 1, 0), "uv": (0, 1)},
+        ]
+        parts = [
+            {"material_index": 0, "triangles": [(0, 1, 2), (6, 7, 8)]},
+            {"material_index": 1, "triangles": [(3, 4, 5)]},
+        ]
+        self.assertEqual(_fold_multipass_details([base, overlay], parts, vertices), [])
 
     def test_material_with_unique_faces_is_not_folded(self):
         # Neither material is a pure overlay: each has a face the other does not
@@ -288,8 +369,12 @@ class GodotUtilityTests(unittest.TestCase):
             Path(__file__).resolve().parent.parent / "godot" / "utility"
         )
         self.assertEqual(
-            (repo_utility / "majin_original.gdshader").read_text(),
-            GODOT_SHADER,
+            (repo_utility / "majin_multitexture.gdshader").read_text(),
+            GODOT_CUSTOM_SHADER,
+        )
+        self.assertEqual(
+            (repo_utility / "majin_material_common.gdshaderinc").read_text(),
+            GODOT_SHADER_COMMON,
         )
         self.assertEqual(
             (repo_utility / "assign_materials.gd").read_text(),
@@ -301,18 +386,24 @@ class GodotUtilityTests(unittest.TestCase):
             destination = Path(root) / "majin_utility"
             written = write_godot_utility(destination)
             names = sorted(path.name for path in written)
-            self.assertEqual(names, ["assign_materials.gd", "majin_original.gdshader"])
-            shader = (destination / "majin_original.gdshader").read_text()
+            self.assertEqual(names, [
+                "assign_materials.gd",
+                "majin_material_common.gdshaderinc",
+                "majin_multitexture.gdshader",
+            ])
+            shader = (destination / "majin_multitexture.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()
             self.assertIn("shader_type spatial;", shader)
             self.assertIn("extends EditorScenePostImport", script)
             self.assertIn("material_bindings.json", script)
+            self.assertIn("model_base.path_join(tres)", script)
+            self.assertNotIn("path.get_base_dir().path_join(tres)", script)
 
     def test_write_godot_utility_does_not_overwrite_by_default(self):
         with tempfile.TemporaryDirectory() as root:
             destination = Path(root) / "majin_utility"
             write_godot_utility(destination)
-            shader_path = destination / "majin_original.gdshader"
+            shader_path = destination / "majin_multitexture.gdshader"
             shader_path.write_text("custom")
             write_godot_utility(destination, overwrite=False)
             self.assertEqual(shader_path.read_text(), "custom")

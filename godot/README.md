@@ -6,8 +6,15 @@ resources can reference a stable path.
 
 | File | Purpose |
 | --- | --- |
-| `majin_original.gdshader` | Spatial shader reproducing the reconstructed DDM look: multi-texture blend maps, multipass detail layers, matcap/environment lookup and the utility mask. |
-| `assign_materials.gd` | `EditorScenePostImport` import script that assigns the generated `ShaderMaterial` `.tres` files to an imported GLB, matching by material name through `material_bindings.json`. |
+| `majin_multitexture.gdshader` | Custom entry point for decoded effects outside `StandardMaterial3D`, notably Map101's two-albedo/two-normal `zimen` variant and folded detail layers. |
+| `majin_material_common.gdshaderinc` | Shared reconstructed lighting, normal and detail-layer implementation. |
+| `assign_materials.gd` | `EditorScenePostImport` import script that assigns generated native or custom `Material` resources by name. |
+
+The ordinary opaque, alpha-scissor and alpha-blend families are emitted as
+native `StandardMaterial3D` resources. This preserves Godot's own PBR, depth,
+shadow and transparency behavior. The custom shader is selected only when the
+decoded material needs multiple texture pairs, a folded detail pass, a utility
+lookup, or another feature the native material cannot express directly.
 
 ## Installing into a Godot project
 
@@ -16,12 +23,12 @@ Copy this folder into the project so it lands at `res://majin_utility/`:
 ```text
 <godot_project>/
   majin_utility/
-    majin_original.gdshader
+    majin_multitexture.gdshader
+    majin_material_common.gdshaderinc
     assign_materials.gd
 ```
 
-The generated `.tres` files reference
-`res://majin_utility/majin_original.gdshader`, so the folder name must be
+Custom `.tres` files reference the shader under `res://majin_utility/`, so the folder name must be
 `majin_utility` (or update `GODOT_UTILITY_DIR` in
 `tools/conversion/godot_export.py` and re-export).
 
@@ -47,7 +54,7 @@ import/reimport:
    **Import Script**, and pick `res://majin_utility/assign_materials.gd`.
 3. Click **Reimport**. Godot runs `_post_import()` on the imported scene: it
    reads the sibling `materials/material_bindings.json` next to the model and
-   assigns each matching `ShaderMaterial` to the mesh surfaces.
+   assigns each matching `Material` to the mesh surfaces.
 4. Unmatched names are reported as a `push_warning`; assigned surfaces are
    counted in the Output panel.
 

@@ -41,7 +41,7 @@ tools/
       scene.py             model/scene decoding and GLB export
       cli.py               command-line interface
     glb_export.py          low-level static and skinned GLB writer
-    godot_export.py        Godot 4 shader + ShaderMaterial assets
+    godot_export.py        Godot 4 native/custom material assets
     blend_mask.py          submesh seam blend-map generation
     material_pbr_estimator.py  Reserved matcap/mask-to-PBR research API
     motion_decode.py       Character motion discovery and track decoding
@@ -251,8 +251,8 @@ use `--scale` to override this.
   The GLB is self-contained and imports into any glTF 2.0 viewer or engine.
 - **`godot`** — faithfully reconstructs the original look for **Godot 4**.
   It keeps the same portable PBR material in the GLB *and* additionally writes
-  external PNG textures, a `majin_original.gdshader`, one ready-to-use
-  `ShaderMaterial` `.tres` per DDM material, and a
+  external PNG textures, native `StandardMaterial3D` resources for ordinary
+  PBR materials, custom shaders only for unsupported multi-texture effects, and a
   `materials/material_bindings.json` manifest. Use this mode whenever a PBR
   approximation is not enough (smooth submesh transitions, matcap/environment
   lookups, the utility mask) and you want a guaranteed-faithful Godot 4 result.
@@ -264,18 +264,19 @@ python tools/conversion/ddm_to_3d.py \
   --material-mode godot --final
 ```
 
-The `godot` mode adds one ready-to-use `ShaderMaterial` `.tres` per DDM
+The `godot` mode adds one ready-to-use Godot `Material` `.tres` per DDM
 material, external PNG textures, and `materials/material_bindings.json`. After
 importing the GLB in Godot, assign the matching `.tres` listed for each DDM
 material in the manifest.
 
 ### Godot utility assets
 
-The shader and the material-assignment helper are reusable and versioned in
+The custom multi-texture shader and material-assignment helper are versioned in
 [`godot/utility/`](godot/utility) (see [`godot/README.md`](godot/README.md)).
-They are **not** regenerated on every export; the `.tres` files reference the
-stable project path `res://majin_utility/majin_original.gdshader`. Install the
-folder once into your Godot project at `res://majin_utility/`.
+They are **not** regenerated on every export. Opaque, alpha-scissor and
+alpha-blend families use `StandardMaterial3D`; only decoded features outside
+that native model reference `res://majin_utility/majin_multitexture.gdshader`.
+Install the whole utility folder once into your Godot project.
 
 A GLB cannot reference external Godot resources, so the imported model starts
 with `StandardMaterial3D` on every surface. `godot/utility/assign_materials.gd`
@@ -299,63 +300,27 @@ avoid z-fighting. The `godot` mode instead **folds the overlay into its host as
 a second detail layer**: the host `.tres` gains `detail_texture`,
 `detail_normal_texture` and a `detail_strength`, and the generated shader mixes
 both texture sets in one draw. When a material's faces are *entirely* covered by
-a larger host material, the overlay is detected automatically (100% coverage)
-and recorded in `material_bindings.json` under `detail_folds`; nothing is
-deleted, so the overlay keeps its own `.tres` and the GLB primitives stay valid.
+a larger host material with matching UVs, the overlay is detected automatically
+(100% coverage). Its vertex alpha is transferred to the host as the authored
+paint mask, and the coplanar overlay primitive is omitted from the Godot GLB.
+The fold is recorded in `material_bindings.json` under `detail_folds`.
 This is where the two modes diverge: `godot` reproduces the layered look, `pbr`
 stays a portable single-texture approximation.
 
-### Smooth submesh transitions (blend maps)
+### Smooth terrain paint transitions
 
-The original game assigns one material per submesh, which produces hard seams
-where two submeshes meet. The real renderer hides those seams with a shader
-blend that cannot be recovered from the exported geometry alone: the RSX
-fragment program may use a mask texture, a derivative-based stencil, or
-per-fragment arithmetic that no longer exists in the DDM data. The
-`godot` mode therefore reconstructs an *approximation* of the smooth
-transition and bakes it into a UV-space texture.
+Map101 stores its paint weights in the alpha byte of `COLOR_0`. For example,
+the outer vertices of `tikeikusa_` are mostly alpha 0, its interior is mostly
+255, and intermediate values form the soft edge. Godot's native alpha-blend
+material consumes that interpolated source alpha directly instead of clipping
+it or guessing a transition from spatial proximity. `zimenA_` and
+`ALFsyokubutu_` use the same mode. `zimen_` is explicitly opaque in the DDM;
+its vertex alpha must not turn the whole surface transparent.
 
-When `--material-mode godot` is used and the DDM contains more than
-one material, the exporter measures, for every vertex, how close it is to
-faces belonging to other materials. Vertices within `--blend-radius` metres of
-a foreign face receive a weight proportional to the linear falloff to that
-face's centroid. The owner material always keeps at least half the total
-weight so a vertex does not drift toward an unrelated neighbour. These weights
-are packed into an RGBA texture (`materials/blend_NN.png`, 256×256) indexed by
-the vertex UV, and the generated `.gdshader` samples it to interpolate between
-up to four base-color textures:
-
-- channel `R` weights the owner's `base_texture`;
-- channels `G`, `B`, `A` weight `blend_base_texture_1/2/3`, which the manifest
-  binds to the *neighbouring* materials actually present in range (not to the
-  owner's own textures);
-- texels that no vertex maps to fall back to the owner-only weight, so the
-  single-material fast path is unchanged.
-
-The blend map is heuristic. It reproduces the visible effect (no hard color
-seam at a submesh boundary) without claiming to replicate the original RSX
-arithmetic. Treat the generated textures and the `use_blend` switch as an
-editable starting point, not as recovered source data. The following limits
-apply:
-
-- Vertex weights are baked per-texel in UV space. If two vertices share the
-  same UV but belong to different owners, their weights are averaged; this is
-  common in the DDM's non-atlased UV layout.
-- The blend is purely color-based. It does not affect normals, roughness, or
-  the utility/matcap paths, so a seam that is visible in specular response but
-  not in albedo will not be hidden.
-- Larger `--blend-radius` values (the default is `0.05`, roughly five source
-  units at the default `0.01` scale) produce wider transitions but can pull
-  small isolated submeshes toward their surroundings. Smaller values keep the
-  blend tighter but may miss narrow suture bands.
-- Blending is skipped entirely for a material whose submesh has no foreign
-  face within range. In that case `use_blend` stays `false` and the material
-  uses the unchanged single-texture path.
-
-Geometry that triggers blending is required: passing `--material-mode
-godot` on a DDM where every material is spatially isolated produces
-zero blend maps (`blend_map_count = 0` in the analysis report) and all
-materials keep `use_blend = false`.
+The older UV-space proximity blend-map reconstruction remains available in the
+code for DDM variants with no source alpha masks. It is automatically disabled
+for a model such as map101 where authored vertex alpha exists, preventing a
+second heuristic blend from being applied over the original paint weights.
 
 For maps, `--object-mode auto` (the default) creates one selectable GLB node per
 connected geometry component, joining exact shared edges across material/UV

@@ -303,7 +303,11 @@ In offset form:
 +16 half V
 ```
 
-The color field is `0xFFFFFFFF` on the models studied so far. UV values are
+The color field is RGBA8888. It is `0xFFFFFFFF` on the early character
+references, but map101 proves that it carries authored data: RGB varies per
+vertex and alpha forms terrain-paint masks. In `tikeikusa_`, boundary vertices
+are predominantly alpha 0 while interior vertices are predominantly alpha 255,
+with intermediate values producing the soft transition. UV values are
 consistent with a `float16` representation.
 
 ---
@@ -466,6 +470,53 @@ defines `alpha = roughness²`, the exported perceptual roughness is
 `pow(2 / (Ns + 2), 0.25)`, clearly marked as derived. The original
 `Kd`, `Ks`, and `Ns` values are written to MTL without this conversion. Since
 no source `Ka` has been identified, MTL output reuses `Kd` for `Ka`.
+
+### Material render-state trailer
+
+Map101 stores a nine-byte variant trailer immediately before each decoded
+Phong block. Its first byte selects the raster/blend family, followed by an
+unaligned four-byte shader feature key and the observed parameter count 2:
+
+```text
+uint8  render_mode;       // 0 opaque, 1 alpha test, 2 alpha blend/pass
+uint32 shader_key;        // feature bits, only grouped so far
+uint32 parameter_count;   // 2 on map101
+```
+
+The assignments are corroborated by independent asset evidence:
+
+| Map101 materials | Mode | Shader key | Evidence / Godot pipeline |
+| --- | ---: | --- | --- |
+| `mon`, `isidadami`, pillars, walls, `gake102__base` | 0 | `0x00847125` | opaque; native `StandardMaterial3D` with transparency disabled |
+| `ALFsyokubutuA`, `syokubutuB` | 1 | `0x00843105` | cutout foliage; native alpha scissor (`0.5`) and double-sided rendering |
+| `tikeikusa`, `zimenA`, `ALFsyokubutu` | 2 | `0x00807125` | feathered vertex alpha; native classic alpha blend |
+| `zimen` | 0 | `0x00847725` | opaque two-albedo/two-normal variant; custom shader blends both pairs with vertex alpha |
+| `gake102__multi` | 2 | `0x00847125` | coincident blend pass, folded into the opaque host for Godot |
+
+This corrects the earlier single-shader export, which wrote `ALPHA` for every
+material and therefore pushed opaque geometry into Godot's transparent
+pipeline. The exact bit-level meaning of `shader_key` remains under study; the
+render-mode byte itself is decoded with high confidence.
+
+### Godot native-material mapping
+
+The first three Map101 families do not require handwritten Godot shaders.
+The exporter writes `StandardMaterial3D` resources with `albedo_texture`,
+`normal_enabled`, `normal_texture`, `roughness`, `metallic = 0`, and
+`vertex_color_use_as_albedo = true`. Mode 0 leaves `transparency` disabled;
+mode 1 selects `TRANSPARENCY_ALPHA_SCISSOR`, threshold `0.5`, and disabled
+culling; mode 2 selects `TRANSPARENCY_ALPHA`. This retains Godot's native PBR,
+depth-prepass and shadow behavior instead of duplicating them in shader code.
+
+Key `0x00847725` is materially different: `zimen` references, in order,
+`yuka3_c`, `yuka2_c`, `yuka3_n`, and `yuka2_n`. Its custom shader samples both
+albedo/normal pairs and interpolates them with `COLOR.a`; that alpha is an
+internal texture weight, not surface transparency. The exact blend polarity is
+the current evidence-based interpretation and remains subject to visual
+comparison with the original game. A custom shader is also retained for a
+folded multipass detail layer such as `gake102`, because its source vertex-alpha
+mask cannot be connected directly to `StandardMaterial3D.detail_mask` without
+baking another UV texture.
 
 ### Compiled-shader verification
 
@@ -1067,7 +1118,7 @@ not represented.
 ### Multipass overlays as Godot detail layers
 
 Map geometry is frequently painted with more than one texture on the *same*
-surface. On map101, every `gake102__multi` face (14,175) shares its positions
+surface. On map101, every `gake102__multi` face (14,267) shares its positions
 with a `gake102__base` face, while only 57% of the `base` faces are covered;
 `multi` uses a different texture pair (`si_map104_iwa3_c/_n`) than `base`
 (`si_map104_yuka3_c/_n`). This is the game's "painted on the 3D" layering: one
@@ -1077,12 +1128,19 @@ only 10-37% coverage.
 
 The portable `pbr` GLB cannot express layered materials, so it collapses exact
 attribute duplicates to remove z-fighting. The `godot` mode instead detects a
-material whose faces are **100% covered** by a *strictly larger* host and folds
-its diffuse/normal textures into the host as a detail layer
-(`material["detail"]`), which the generated shader mixes in one draw. Nothing is
-removed: the overlay keeps its own `.tres`. Detection keys on **position only**
-(the overlay shares geometry but not UVs), so attribute-based dedup and the
-overlay fold are deliberately separate operations.
+material whose faces are **100% covered** by a strictly larger host. For
+map101, the coincident faces also have matching UVs; their differing RGBA
+values are intentional, not duplicate noise. The exporter transfers `multi`
+vertex alpha to the corresponding `base` vertices, uses it as the
+detail-texture/normal blend weight, and omits the coplanar `multi` primitive.
+The result is one draw with the source-authored paint mask, without depth bias
+or another z-fighting workaround. A coincident layer with different UVs is not
+folded until a second-UV representation is implemented.
+
+Map101 also contains non-coincident painted patches (`zimen_`, `tikeikusa_`,
+`zimenA_`, and `ALFsyokubutu_`). Their vertex alpha is exported through
+`COLOR_0` and consumed directly by the Godot shader. Because this source signal
+exists, the older proximity-generated blend maps are disabled for map101.
 Specification: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
 
 ### Matcap and red-mask caveat
@@ -1119,9 +1177,10 @@ is active in the converter.
 `--material-mode godot` (deprecated alias `original-godot`) preserves the
 portable PBR material in the GLB
 as a fallback and also writes a Godot 4 spatial shader, every referenced PNG,
-one configured `ShaderMaterial` `.tres` per DDM material, and a JSON
+one configured Godot `Material` `.tres` per DDM material, and a JSON
 sampler-binding manifest. Relative resource paths keep the generated Godot
-folder movable inside a project. The reconstructed shader applies the
+folder movable inside a project. Ordinary render families use native
+`StandardMaterial3D`; the reconstructed custom shader applies the
 utility mask to the spherical lookup and exposes strength and polarity controls;
 this is an explicit working reconstruction, not yet a byte-exact translation of
 the P31/P33 RSX fragment program. Fragment disassembly additionally shows that

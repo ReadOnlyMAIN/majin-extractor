@@ -26,11 +26,11 @@ from .skinned import analyze_skinned_file, find_skinned_geometry_header
 try:
     from ..blend_mask import DEFAULT_BLEND_RADIUS
     from ..glb_export import write_glb
-    from ..godot_export import write_godot_material_assets
+    from ..godot_export import _fold_multipass_details, write_godot_material_assets
 except ImportError:
     from blend_mask import DEFAULT_BLEND_RADIUS
     from glb_export import write_glb
-    from godot_export import write_godot_material_assets
+    from godot_export import _fold_multipass_details, write_godot_material_assets
 
 
 def analyze_file(
@@ -356,10 +356,19 @@ def analyze_file(
     object_mode = getattr(args, "object_mode", "auto")
     if object_mode == "auto":
         object_mode = "connected" if sections else "single"
+    detail_folds = []
+    excluded_materials = set()
+    if uses_godot_materials(args):
+        detail_folds = _fold_multipass_details(materials, mesh_parts, vertices)
+        excluded_materials = {
+            fold["overlay_material_index"] for fold in detail_folds
+        }
+
     report["glb_export"] = write_glb(
         mesh_path, vertices, mesh_parts, materials, path.stem, args.scale,
         mode=object_mode, image_data=image_data,
         roughness=getattr(args, "roughness", None),
+        excluded_materials=excluded_materials,
     )
     if uses_godot_materials(args):
         report["godot_materials"] = write_godot_material_assets(
@@ -368,6 +377,7 @@ def analyze_file(
             mesh_parts=mesh_parts,
             scale=args.scale,
             radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
+            detail_folds=detail_folds,
         )
 
     for part in mesh_parts:

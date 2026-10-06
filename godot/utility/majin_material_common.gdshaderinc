@@ -1,19 +1,16 @@
-shader_type spatial;
 
 // Visual approximation reconstructed from KbBase P31/P33 sampler bindings.
 // RSX disassembly shows that EnvSphere RGB is used as signed vector data, not
 // simply added as color. Strength and mask polarity remain exposed so this
 // portable shader is not mistaken for a byte-exact translation.
 //
-// Multi-material blending: the original game transitions smoothly between
-// submesh materials. The exporter writes a UV-space blend map whose RGBA
-// channels hold the weights of up to four material slots. When use_blend is
-// enabled, this shader interpolates between the corresponding base-color
-// textures at the seams. Vertices fully inside one submesh keep a single
-// dominant channel, so the single-material fast path is unchanged.
+// Fallback multi-material blending for layouts without source paint weights.
+// Map101 instead uses its decoded vertex alpha and leaves use_blend disabled.
 uniform sampler2D base_texture : source_color, hint_default_white;
+uniform sampler2D secondary_texture : source_color, hint_default_white;
 uniform sampler2D utility_texture : hint_default_white;
 uniform sampler2D normal_texture : hint_normal;
+uniform sampler2D secondary_normal_texture : hint_normal;
 uniform sampler2D env_sphere_texture : source_color, hint_default_black, repeat_disable;
 
 uniform sampler2D blend_map : hint_default_white, repeat_disable;
@@ -36,9 +33,12 @@ uniform float detail_strength : hint_range(0.0, 1.0, 0.01) = 0.5;
 
 uniform bool use_utility_texture = false;
 uniform bool use_normal_texture = false;
+uniform bool use_secondary_texture = false;
+uniform bool use_secondary_normal_texture = false;
 uniform bool use_env_sphere_texture = false;
 uniform bool invert_utility = false;
 uniform bool use_blend = false;
+uniform bool use_vertex_alpha = false;
 uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
 
@@ -62,12 +62,15 @@ void fragment() {
             : vec4(1.0, 0.0, 0.0, 0.0);
     }
     vec4 base = use_blend ? blend_base(UV, weights) : texture(base_texture, UV);
+    if (use_secondary_texture) {
+        base = mix(base, texture(secondary_texture, UV), COLOR.a);
+    }
 
-    // Fold the detail overlay into the base color where present. When a detail
-    // mask is available it modulates the mix per texel; otherwise a constant
-    // detail_strength is used.
+    // Fold a coincident detail pass into the base draw. Its original vertex
+    // alpha has been transferred to the host geometry, so COLOR.a is the
+    // source-authored paint mask rather than an invented constant blend.
     if (use_detail) {
-        float mix_amount = detail_strength;
+        float mix_amount = COLOR.a * detail_strength;
         if (use_detail_mask) {
             mix_amount *= texture(detail_mask, UV).r;
         }
@@ -77,12 +80,19 @@ void fragment() {
 
     vec3 view_normal = normalize(NORMAL);
 
-    if (use_normal_texture || use_detail_normal_texture) {
+    if (use_normal_texture || use_secondary_normal_texture || use_detail_normal_texture) {
         vec3 sampled_normal = use_normal_texture
             ? texture(normal_texture, UV).rgb
             : vec3(0.5, 0.5, 1.0);
+        if (use_secondary_normal_texture) {
+            sampled_normal = mix(
+                sampled_normal,
+                texture(secondary_normal_texture, UV).rgb,
+                COLOR.a
+            );
+        }
         if (use_detail_normal_texture) {
-            float mix_amount = detail_strength;
+            float mix_amount = COLOR.a * detail_strength;
             if (use_detail_mask) {
                 mix_amount *= texture(detail_mask, UV).r;
             }
@@ -110,9 +120,13 @@ void fragment() {
         reconstructed += reflection * utility * reflection_strength;
     }
 
-    ALBEDO = reconstructed;
-    ALPHA = base.a;
+    ALBEDO = reconstructed * COLOR.rgb;
+#if MATERIAL_ALPHA_MODE == 1
+    ALPHA = base.a * COLOR.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
+#elif MATERIAL_ALPHA_MODE == 2
+    ALPHA = base.a * (use_vertex_alpha ? COLOR.a : 1.0);
+#endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
 }

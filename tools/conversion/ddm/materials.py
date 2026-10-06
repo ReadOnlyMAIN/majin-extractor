@@ -91,6 +91,7 @@ def parse_materials(data: bytes, end: int, expected_count: int):
             max(item["end"] for item in material_strings),
             parameter_end,
         )
+        render_state = decode_material_render_state(data, phong)
         materials.append({
             "index": material_index,
             "name": strings[string_index]["text"],
@@ -100,9 +101,51 @@ def parse_materials(data: bytes, end: int, expected_count: int):
                 for item in material_strings[1:]
             ],
             "phong": phong,
+            "render_state": render_state,
             "pbr_estimate": phong_to_pbr_estimate(phong),
         })
     return materials
+
+
+MATERIAL_BLEND_MODES = {
+    0: "opaque",
+    1: "alpha_scissor",
+    2: "alpha_blend",
+}
+
+
+def decode_material_render_state(data: bytes, phong):
+    """Decode the render-mode byte and packed shader key before Phong data.
+
+    Map101 places a nine-byte material-variant trailer immediately before
+    the eleven-float Phong block::
+
+        uint8  blend_mode;       // 0 opaque, 1 alpha test, 2 alpha blend/pass
+        uint32 shader_key;       // feature bits still under study
+        uint32 parameter_count;  // observed 2
+
+    The mode assignments are supported independently by geometry and texture
+    evidence: mode 1 is used by cutout foliage with texture alpha, while mode
+    2 is used by terrain-paint passes with vertex alpha. Return ``None`` for a
+    different layout instead of guessing from names.
+    """
+    if not phong:
+        return None
+    offset = int(phong["offset"])
+    if offset < 9 or data[offset - 4:offset] != b"\x00\x00\x00\x02":
+        return None
+    mode_value = data[offset - 9]
+    mode = MATERIAL_BLEND_MODES.get(mode_value)
+    if mode is None:
+        return None
+    shader_key = be_u32(data, offset - 8)
+    return {
+        "mode_value": mode_value,
+        "mode": mode,
+        "shader_key": f"0x{shader_key:08x}",
+        "offset": offset - 9,
+        "confidence": "high",
+    }
 
 
 def find_phong_parameters(data: bytes, start: int, end: int):
