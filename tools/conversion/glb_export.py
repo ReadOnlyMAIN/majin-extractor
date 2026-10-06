@@ -182,12 +182,23 @@ def tangent_frame(vertex, normal):
     return (*tangent, sign)
 
 
-def add_legacy_specular_extension(doc, item, phong):
-    """Preserve legacy Ks as dielectric specular response, not metalness."""
+def add_legacy_specular_extension(doc, item, phong, estimate=None):
+    """Preserve legacy Ks or an explicit family policy as dielectric specular."""
     specular = phong.get('specular')
     if not specular or len(specular) != 3:
         return
     color = [min(1.0, max(0.0, float(value))) for value in specular]
+    estimate = estimate or {}
+    if estimate.get('specular_source') in {
+        'shared_map_surface_visual_calibration',
+        'double_sided_cutout_foliage_albedo_only',
+    }:
+        # Godot's conventional dielectric baseline is SPECULAR=.5 while glTF's
+        # KHR_materials_specular baseline multiplier is 1. Convert the explicit
+        # family policy to the equivalent neutral glTF multiplier. Raw Ks is
+        # still retained in extras.legacy_phong.
+        effective = min(1.0, max(0.0, float(estimate.get('specular', 0.5))))
+        color = [min(1.0, 2.0 * effective)] * 3
     item.setdefault('extensions', {})['KHR_materials_specular'] = {
         'specularFactor': 1.0,
         'specularColorFactor': color,
@@ -273,7 +284,7 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
             'source': (estimate.get('source') or estimate.get('roughness_source')
                        or 'phong_shininess') if roughness is None else 'export_override',
         }
-        add_legacy_specular_extension(doc, item, phong)
+        add_legacy_specular_extension(doc, item, phong, estimate)
         for texture in material.get('textures', []):
             output = texture.get('output')
             role = texture.get('role')
@@ -501,7 +512,7 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
                                          or 'phong_shininess') if roughness is None else 'export_override'},
             },
         }
-        add_legacy_specular_extension(doc, item, phong)
+        add_legacy_specular_extension(doc, item, phong, estimate)
         for texture in material.get('textures', []):
             output, role = texture.get('output'), texture.get('role')
             if not output or role not in ('diffuse', 'normal'):

@@ -69,6 +69,8 @@ uniform bool use_blend = false;
 uniform bool use_vertex_alpha = false;
 uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
+uniform float specular : hint_range(0.0, 1.0, 0.01) = 0.5;
+uniform vec4 albedo_modulate : source_color = vec4(1.0);
 
 vec4 blend_base(vec2 uv, vec4 weights) {
     vec4 base = texture(base_texture, uv) * weights.r;
@@ -148,7 +150,7 @@ void fragment() {
         reconstructed += reflection * utility * reflection_strength;
     }
 
-    ALBEDO = reconstructed * COLOR.rgb;
+    ALBEDO = reconstructed * COLOR.rgb * albedo_modulate.rgb;
 #if MATERIAL_ALPHA_MODE == 1
     ALPHA = base.a * COLOR.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
@@ -157,12 +159,35 @@ void fragment() {
 #endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
+    SPECULAR = specular;
 }
 """
 
 GODOT_CUSTOM_SHADER = """shader_type spatial;
 #define MATERIAL_ALPHA_MODE 0
 #include "majin_material_common.gdshaderinc"
+"""
+
+GODOT_FOLIAGE_SHADER = """shader_type spatial;
+render_mode cull_disabled;
+
+// Thin double-sided cutout cards. The source foliage variant only carries an
+// albedo/opacity texture; its generic Phong block is not representative of the
+// original leaf lighting. Flip the geometric normal on back faces so both
+// visible sides react to the sun from the correct direction.
+uniform sampler2D base_texture : source_color, hint_default_white;
+uniform vec4 albedo_modulate : source_color = vec4(1.0);
+
+void fragment() {
+\tvec4 base = texture(base_texture, UV);
+\tNORMAL = FRONT_FACING ? NORMAL : -NORMAL;
+\tALBEDO = base.rgb * COLOR.rgb * albedo_modulate.rgb;
+\tALPHA = base.a * COLOR.a;
+\tALPHA_SCISSOR_THRESHOLD = 0.5;
+\tMETALLIC = 0.0;
+\tROUGHNESS = 1.0;
+\tSPECULAR = 0.0;
+}
 """
 
 
@@ -183,6 +208,7 @@ ROLE_TO_UNIFORM = {
 # ``godot/utility/`` only has to be installed once.
 GODOT_UTILITY_DIR = "res://majin_utility"
 CUSTOM_SHADER_FILE_NAME = "majin_multitexture.gdshader"
+FOLIAGE_SHADER_FILE_NAME = "majin_foliage.gdshader"
 SHADER_COMMON_FILE_NAME = "majin_material_common.gdshaderinc"
 ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
 
@@ -200,6 +226,7 @@ def write_godot_utility(destination, overwrite=True):
     written = []
     for name, content in (
         (CUSTOM_SHADER_FILE_NAME, GODOT_CUSTOM_SHADER),
+        (FOLIAGE_SHADER_FILE_NAME, GODOT_FOLIAGE_SHADER),
         (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
     ):
@@ -311,11 +338,20 @@ def _requires_custom_shader(material: dict, uniforms: dict, use_blend=False) -> 
     """Whether StandardMaterial3D cannot express this decoded feature set."""
     shader_key = (material.get("render_state") or {}).get("shader_key")
     return bool(
-        shader_key == "0x00847725"
+        _is_double_sided_cutout_foliage(material)
+        or shader_key == "0x00847725"
         or material.get("detail")
         or use_blend
         or "utility_texture" in uniforms
         or "env_sphere_texture" in uniforms
+    )
+
+
+def _is_double_sided_cutout_foliage(material: dict) -> bool:
+    render_state = material.get("render_state") or {}
+    return bool(
+        render_state.get("mode") == "alpha_scissor"
+        and render_state.get("shader_key") == "0x00843105"
     )
 
 
@@ -330,6 +366,7 @@ def _write_shader_material(
     uniforms: dict[str, str],
     switches: dict[str, bool],
     scalars: dict[str, float],
+    colors: dict[str, list[float]] | None = None,
 ) -> None:
     resources = [("Shader", shader_reference, "1_shader")]
     texture_ids = {}
@@ -360,6 +397,11 @@ def _write_shader_material(
         f'shader_parameter/{name} = {value:.9g}'
         for name, value in scalars.items()
     )
+    lines.extend(
+        f'shader_parameter/{name} = Color({value[0]:.9g}, {value[1]:.9g}, '
+        f'{value[2]:.9g}, {value[3]:.9g})'
+        for name, value in (colors or {}).items()
+    )
     lines.append("")
     path.write_text("\n".join(lines), encoding="ascii")
 
@@ -369,6 +411,8 @@ def _write_standard_material(
     uniforms: dict[str, str],
     render_mode: str,
     roughness: float,
+    specular: float,
+    diffuse: list[float],
     use_vertex_color: bool,
 ) -> None:
     """Write a native Godot 4 PBR material for a simple DDM pipeline."""
@@ -412,11 +456,39 @@ def _write_standard_material(
     if render_mode == "alpha_scissor":
         lines.extend(("alpha_scissor_threshold = 0.5", "cull_mode = 2"))
     lines.extend((
+        f"albedo_color = Color({diffuse[0]:.9g}, {diffuse[1]:.9g}, {diffuse[2]:.9g}, 1)",
         f"vertex_color_use_as_albedo = {str(use_vertex_color).lower()}",
         "metallic = 0.0",
+        f"metallic_specular = {specular:.9g}",
         f"roughness = {roughness:.9g}",
         "",
     ))
+    path.write_text("\n".join(lines), encoding="ascii")
+
+
+def _write_foliage_material(
+    path: Path,
+    shader_reference: str,
+    base_texture: str,
+    diffuse: list[float],
+) -> None:
+    """Write the albedo-only, two-sided cutout foliage material."""
+    relative_texture = (Path("..") / Path(base_texture)).as_posix()
+    lines = [
+        '[gd_resource type="ShaderMaterial" load_steps=3 format=3]',
+        "",
+        f'[ext_resource type="Shader" path="{shader_reference}" id="1_shader"]',
+        f'[ext_resource type="Texture2D" path="{relative_texture}" id="2_albedo"]',
+        "",
+        "[resource]",
+        'shader = ExtResource("1_shader")',
+        'shader_parameter/base_texture = ExtResource("2_albedo")',
+        (
+            "shader_parameter/albedo_modulate = "
+            f"Color({diffuse[0]:.9g}, {diffuse[1]:.9g}, {diffuse[2]:.9g}, 1)"
+        ),
+        "",
+    ]
     path.write_text("\n".join(lines), encoding="ascii")
 
 
@@ -745,6 +817,7 @@ def write_godot_material_assets(
     # path instead of regenerating the shader on every export. Use
     # :func:`write_godot_utility` to copy the folder into a Godot project.
     custom_shader_reference = f"{GODOT_UTILITY_DIR}/{CUSTOM_SHADER_FILE_NAME}"
+    foliage_shader_reference = f"{GODOT_UTILITY_DIR}/{FOLIAGE_SHADER_FILE_NAME}"
 
     for relative, payload in image_data.items():
         destination = out_dir / relative
@@ -810,7 +883,14 @@ def write_godot_material_assets(
             ),
         }
         estimate = material.get("pbr_estimate") or {}
-        scalars = {"roughness": float(estimate.get("roughness", 1.0))}
+        scalars = {
+            "roughness": float(estimate.get("roughness", 1.0)),
+            "specular": float(estimate.get("specular", 0.5)),
+        }
+        diffuse = list(estimate.get("diffuse") or [1.0, 1.0, 1.0])[:3]
+        while len(diffuse) < 3:
+            diffuse.append(1.0)
+        colors = {"albedo_modulate": [*map(float, diffuse), 1.0]}
         if switches["use_detail"]:
             detail = material.get("detail") or {}
             scalars["detail_strength"] = float(detail.get("strength", 0.5))
@@ -820,10 +900,19 @@ def write_godot_material_assets(
         )
         resource_path = material_dir / resource_name
         custom_shader = _requires_custom_shader(material, uniforms, use_blend)
+        foliage_shader = _is_double_sided_cutout_foliage(material)
         render_mode = (material.get("render_state") or {}).get("mode", "opaque")
-        if custom_shader:
+        if foliage_shader:
+            _write_foliage_material(
+                resource_path,
+                foliage_shader_reference,
+                uniforms["base_texture"],
+                diffuse,
+            )
+        elif custom_shader:
             _write_shader_material(
                 resource_path, custom_shader_reference, uniforms, switches, scalars,
+                colors,
             )
         else:
             _write_standard_material(
@@ -831,18 +920,26 @@ def write_godot_material_assets(
                 uniforms,
                 render_mode,
                 scalars["roughness"],
+                scalars["specular"],
+                diffuse,
                 use_vertex_color=True,
             )
         material_resources.append(resource_path.relative_to(out_dir).as_posix())
+        selected_shader = (
+            foliage_shader_reference if foliage_shader
+            else custom_shader_reference if custom_shader
+            else None
+        )
         bindings.append({
             "material_index": material["index"],
             "material_name": material.get("name", f'material_{material["index"]}'),
             "material_type": "ShaderMaterial" if custom_shader else "StandardMaterial3D",
-            "shader": custom_shader_reference if custom_shader else None,
+            "shader": selected_shader,
             "material_resource": resource_path.relative_to(out_dir).as_posix(),
             "uniforms": uniforms,
             "switches": switches,
             "scalars": scalars,
+            "colors": colors,
             "blend_map": asset["path"] if asset else None,
             "detail": material.get("detail"),
             "render_state": material.get("render_state"),

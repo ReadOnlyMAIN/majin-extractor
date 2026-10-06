@@ -7,14 +7,31 @@ resources can reference a stable path.
 | File | Purpose |
 | --- | --- |
 | `majin_multitexture.gdshader` | Custom entry point for decoded effects outside `StandardMaterial3D`, notably Map101's two-albedo/two-normal `zimen` variant and folded detail layers. |
+| `majin_foliage.gdshader` | Albedo-only double-sided cutout foliage with corrected back-face normals. |
 | `majin_material_common.gdshaderinc` | Shared reconstructed lighting, normal and detail-layer implementation. |
 | `assign_materials.gd` | `EditorScenePostImport` import script that assigns generated native or custom `Material` resources by name. |
 
-The ordinary opaque, alpha-scissor and alpha-blend families are emitted as
-native `StandardMaterial3D` resources. This preserves Godot's own PBR, depth,
-shadow and transparency behavior. The custom shader is selected only when the
-decoded material needs multiple texture pairs, a folded detail pass, a utility
-lookup, or another feature the native material cannot express directly.
+The ordinary opaque and alpha-blend families are emitted as native
+`StandardMaterial3D` resources. The decoded double-sided alpha-scissor foliage
+family uses its small dedicated shader because native disabled culling does not
+correct the lighting normal on back-facing fragments. Other custom shaders are
+selected only for multiple texture pairs, folded detail passes, utility
+lookups, or features the native material cannot express directly.
+
+PBR values remain evidence-based conversions from the source legacy material:
+`Kd` modulates albedo, `Ks` scales dielectric specular, `Ns` is matched to a
+GGX lobe by half-power width, and metallic stays zero when the DDM provides no
+conductor evidence. Map101's common `Ks=.8, Ns=32` template becomes specular
+`.40`, roughness `.5520` by direct conversion; `zimen`'s `Ks=.1, Ns=64`
+becomes `.05`, `.4709`. For rendering, the non-foliage map shader families use
+a shared lower specular `.20`: this preserves sky/probe response without a
+wet appearance or a reflectance seam at `zimen` transitions. The direct
+`.40`/`.05` values remain recorded as `specular_from_phong`.
+The dedicated double-sided alpha-scissor foliage family is albedo-only:
+roughness `1` (smoothness `0`), specular `0`, and metallic `0`. Its shader
+negates `NORMAL` when `FRONT_FACING` is false, so the visible back side reacts
+to sunlight using the opposite geometric normal. The direct `.5520`/`.40`
+Phong conversion remains recorded only as provenance.
 
 ## Installing into a Godot project
 

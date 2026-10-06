@@ -92,6 +92,8 @@ def parse_materials(data: bytes, end: int, expected_count: int):
             parameter_end,
         )
         render_state = decode_material_render_state(data, phong)
+        pbr_estimate = phong_to_pbr_estimate(phong)
+        apply_render_state_pbr_policy(pbr_estimate, render_state)
         materials.append({
             "index": material_index,
             "name": strings[string_index]["text"],
@@ -102,7 +104,7 @@ def parse_materials(data: bytes, end: int, expected_count: int):
             ],
             "phong": phong,
             "render_state": render_state,
-            "pbr_estimate": phong_to_pbr_estimate(phong),
+            "pbr_estimate": pbr_estimate,
         })
     return materials
 
@@ -114,6 +116,60 @@ MATERIAL_BLEND_MODES = {
 }
 
 
+FOLIAGE_ALPHA_SCISSOR_SHADER_KEY = "0x00843105"
+FOLIAGE_ROUGHNESS = 1.0
+MAP_SURFACE_SHADER_KEYS = {
+    "0x00807125",  # feathered terrain/detail
+    "0x00847125",  # ordinary opaque map surface / folded pass
+    "0x00847725",  # two-albedo/two-normal terrain blend
+}
+MAP_SURFACE_SPECULAR = 0.2
+
+
+def apply_render_state_pbr_policy(estimate, render_state):
+    """Apply shader-family semantics that are not present in the Phong block.
+
+    Map101's double-sided cutout foliage has a dedicated shader key but reuses
+    the generic Ks=.8/Ns=32 authoring template found on stone and architecture.
+    Treating that exponent as an ordinary surface produces implausibly tight,
+    wet highlights. Keep the mathematical conversion for provenance and make
+    the effective Godot/glTF foliage material fully rough and non-specular.
+    """
+    if not estimate or not render_state:
+        return estimate
+    if (
+        render_state.get("mode") == "alpha_scissor"
+        and render_state.get("shader_key") == FOLIAGE_ALPHA_SCISSOR_SHADER_KEY
+    ):
+        estimate["roughness_from_phong"] = estimate.get("roughness")
+        estimate["specular_from_phong"] = estimate.get("specular")
+        estimate["roughness"] = FOLIAGE_ROUGHNESS
+        estimate["specular"] = 0.0
+        estimate["roughness_source"] = (
+            "double_sided_cutout_foliage_shader_family"
+        )
+        estimate["specular_source"] = (
+            "double_sided_cutout_foliage_albedo_only"
+        )
+    elif (
+        render_state.get("shader_key") in MAP_SURFACE_SHADER_KEYS
+        and any(value > 0.0 for value in estimate.get("specular_rgb", ()))
+    ):
+        # The DDM Ks values distinguish authoring records, but no evidence
+        # shows that they map linearly to Godot's dielectric SPECULAR control.
+        # A shared low response avoids a visible reflectance discontinuity
+        # between the two-texture zimen terrain and its neighbouring surfaces,
+        # while retaining sky/reflection-probe influence.
+        # Preserve an explicit Ks=0: Map102/Map103 prove that the same terrain
+        # shader family also contains materials whose legacy lobe is disabled.
+        estimate["specular_from_phong"] = estimate.get("specular")
+        estimate["specular"] = MAP_SURFACE_SPECULAR
+        estimate["specular_source"] = (
+            "shared_map_surface_visual_calibration"
+        )
+    return estimate
+
+
 def decode_material_render_state(data: bytes, phong):
     """Decode the render-mode byte and packed shader key before Phong data.
 
@@ -122,7 +178,7 @@ def decode_material_render_state(data: bytes, phong):
 
         uint8  blend_mode;       // 0 opaque, 1 alpha test, 2 alpha blend/pass
         uint32 shader_key;       // feature bits still under study
-        uint32 parameter_count;  // observed 2
+        uint32 variant_word;     // observed 0 or 2; exact meaning unresolved
 
     The mode assignments are supported independently by geometry and texture
     evidence: mode 1 is used by cutout foliage with texture alpha, while mode
@@ -132,17 +188,31 @@ def decode_material_render_state(data: bytes, phong):
     if not phong:
         return None
     offset = int(phong["offset"])
-    if offset < 9 or data[offset - 4:offset] != b"\x00\x00\x00\x02":
+    if offset < 9:
+        return None
+    variant_word = be_u32(data, offset - 4)
+    # Map101 consistently uses 2, while several otherwise identical Map102
+    # and Map103 records use 0.  Both forms retain the same mode/key layout.
+    # Keep the value explicit because its component-level meaning is not yet
+    # established; accepting arbitrary words here would weaken the structural
+    # check and make false-positive Phong matches more likely.
+    if variant_word not in (0, 2):
         return None
     mode_value = data[offset - 9]
     mode = MATERIAL_BLEND_MODES.get(mode_value)
     if mode is None:
         return None
     shader_key = be_u32(data, offset - 8)
+    # All correlated KbBase map feature keys occupy the 0x008xxxxx range.
+    # This also keeps a zero-filled control block from passing merely because
+    # zero is valid for both the opaque mode and the newly observed word.
+    if (shader_key & 0xFFF00000) != 0x00800000:
+        return None
     return {
         "mode_value": mode_value,
         "mode": mode,
         "shader_key": f"0x{shader_key:08x}",
+        "variant_word": variant_word,
         "offset": offset - 9,
         "confidence": "high",
     }
@@ -188,7 +258,18 @@ def find_phong_parameters(data: bytes, start: int, end: int):
             continue
         if not -0.001 <= trailing_scalar <= 1.001:
             continue
-        if not 2.0 <= shininess <= 512.0:
+        # A zero exponent is valid when Ks is also zero: Map102/kusa5 uses
+        # exactly that combination to disable the legacy specular lobe.  A
+        # nonzero Ks still needs a plausible exponent so an all-zero padding
+        # run cannot masquerade as a material record.
+        # Require the serialized IEEE values to be exactly zero. Tiny
+        # denormals occur in neighbouring integer/control records and are not
+        # evidence of a deliberately disabled material lobe.
+        zero_specular = all(value == 0.0 for value in specular)
+        if not (
+            2.0 <= shininess <= 512.0
+            or (zero_specular and shininess == 0.0)
+        ):
             continue
 
         # Real RGB triplets tend to have related components. Only score the
@@ -227,17 +308,54 @@ def phong_to_pbr_estimate(phong):
     if not phong:
         return None
 
-    shininess = phong["shininess"]
-    # Matching a normalized Phong lobe to a Beckmann microfacet distribution
-    # gives alpha=sqrt(2/(Ns+2)). glTF uses perceptual roughness with
-    # alpha=roughness^2, hence the additional square root.
-    roughness = min(1.0, max(0.0, (2.0 / (shininess + 2.0)) ** 0.25))
+    shininess = max(0.0, float(phong["shininess"]))
+    # Godot and glTF use a Schlick-GGX lobe, not Beckmann. Match the half-power
+    # angle of the source Blinn-Phong cos(Ns) lobe to the GGX NDF. If
+    # c2=cos(theta_half)^2=2^(-2/Ns), solving D_GGX(theta)/D_GGX(0)=1/2 gives
+    # alpha^2=(1-c2)/(sqrt(2)-c2). Perceptual roughness is sqrt(alpha).
+    if shininess <= 0.0:
+        roughness = 1.0
+        roughness_source = "disabled_legacy_specular_lobe"
+    else:
+        half_power_cosine_squared = 2.0 ** (-2.0 / shininess)
+        alpha_squared = (
+            (1.0 - half_power_cosine_squared)
+            / (math.sqrt(2.0) - half_power_cosine_squared)
+        )
+        roughness = min(1.0, max(0.0, alpha_squared ** 0.25))
+        roughness_source = "blinn_phong_to_ggx_half_power_match"
+
+    specular_rgb = [
+        min(1.0, max(0.0, float(value)))
+        for value in phong.get("specular", (1.0, 1.0, 1.0))[:3]
+    ]
+    while len(specular_rgb) < 3:
+        specular_rgb.append(specular_rgb[-1] if specular_rgb else 1.0)
+    specular_luminance = (
+        0.2126 * specular_rgb[0]
+        + 0.7152 * specular_rgb[1]
+        + 0.0722 * specular_rgb[2]
+    )
+    # KHR_materials_specular multiplies the conventional dielectric F0=0.04 by
+    # Ks. Godot's scalar value 0.5 represents that same baseline, so 0.5*Ks
+    # preserves the relative source strength for Map101's neutral-grey Ks.
+    godot_specular = min(1.0, max(0.0, 0.5 * specular_luminance))
     return {
         "metallic": None,
         "roughness": roughness,
-        "roughness_source": "derived_from_phong_shininess",
-        "roughness_formula": "pow(2 / (Ns + 2), 0.25)",
-        "microfacet_alpha_formula": "sqrt(2 / (Ns + 2))",
+        "roughness_source": roughness_source,
+        "roughness_formula": (
+            "pow((1 - pow(2, -2 / Ns)) / "
+            "(sqrt(2) - pow(2, -2 / Ns)), 0.25)"
+        ),
+        "specular": godot_specular,
+        "specular_source": "0.5_times_legacy_Ks_luminance",
+        "specular_rgb": specular_rgb,
+        "diffuse": [
+            min(1.0, max(0.0, float(value)))
+            for value in phong.get("diffuse", (1.0, 1.0, 1.0))[:3]
+        ],
+        "metallic_source": "no_conductor_parameter_in_ddm",
     }
 
 

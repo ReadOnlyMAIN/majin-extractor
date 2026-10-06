@@ -17,6 +17,7 @@ from tools.conversion.ddm.materials import (
 from tools.conversion.godot_export import (
     GODOT_ASSIGN_SCRIPT,
     GODOT_CUSTOM_SHADER,
+    GODOT_FOLIAGE_SHADER,
     GODOT_SHADER_COMMON,
     _fold_multipass_details,
     write_godot_material_assets,
@@ -204,9 +205,17 @@ class GodotExportTests(unittest.TestCase):
             out = Path(root)
             materials = [
                 {"index": 0, "name": "rock", "textures": [],
-                 "render_state": {"mode": "opaque"}},
+                 "render_state": {"mode": "opaque"},
+                 "pbr_estimate": {
+                     "roughness": 0.552, "specular": 0.4,
+                     "diffuse": [1.0, 0.5, 0.25],
+                 }},
                 {"index": 1, "name": "vine", "textures": [],
-                 "render_state": {"mode": "alpha_scissor"}},
+                 "render_state": {"mode": "alpha_scissor"},
+                 "pbr_estimate": {
+                     "roughness": 0.9, "specular": 0.4,
+                     "diffuse": [1.0, 1.0, 1.0],
+                 }},
                 {"index": 2, "name": "paint", "textures": [],
                  "render_state": {"mode": "alpha_blend"}},
             ]
@@ -221,9 +230,13 @@ class GodotExportTests(unittest.TestCase):
                 for entry in manifest["materials"]
             ]
             self.assertNotIn("transparency =", resources[0])
+            self.assertIn("roughness = 0.552", resources[0])
+            self.assertIn("metallic_specular = 0.4", resources[0])
+            self.assertIn("albedo_color = Color(1, 0.5, 0.25, 1)", resources[0])
             self.assertIn("transparency = 2", resources[1])
             self.assertIn("alpha_scissor_threshold = 0.5", resources[1])
             self.assertIn("cull_mode = 2", resources[1])
+            self.assertIn("roughness = 0.9", resources[1])
             self.assertIn("transparency = 1", resources[2])
 
     def test_four_texture_shader_key_keeps_custom_pipeline_and_all_textures(self):
@@ -250,6 +263,38 @@ class GodotExportTests(unittest.TestCase):
             tres = (out / entry["material_resource"]).read_text()
             self.assertIn("majin_multitexture.gdshader", tres)
             self.assertIn("shader_parameter/secondary_texture", tres)
+
+    def test_cutout_foliage_uses_two_sided_albedo_only_shader(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root)
+            materials = [{
+                "index": 0,
+                "name": "foliage",
+                "textures": [{
+                    "role": "diffuse",
+                    "output": "textures/foliage.png",
+                }],
+                "render_state": {
+                    "mode": "alpha_scissor",
+                    "shader_key": "0x00843105",
+                },
+                "pbr_estimate": {
+                    "roughness": 1.0,
+                    "specular": 0.0,
+                    "diffuse": [1.0, 1.0, 1.0],
+                },
+            }]
+            result = write_godot_material_assets(out, materials, {})
+            manifest = json.loads((out / result["manifest"]).read_text())
+            binding = manifest["materials"][0]
+            self.assertEqual(binding["material_type"], "ShaderMaterial")
+            self.assertIn("majin_foliage.gdshader", binding["shader"])
+            tres = (out / binding["material_resource"]).read_text()
+            self.assertIn("majin_foliage.gdshader", tres)
+            self.assertNotIn("normal_texture", tres)
+            self.assertIn("FRONT_FACING", GODOT_FOLIAGE_SHADER)
+            self.assertIn("ROUGHNESS = 1.0", GODOT_FOLIAGE_SHADER)
+            self.assertIn("SPECULAR = 0.0", GODOT_FOLIAGE_SHADER)
 
 
 class MaterialModeTests(unittest.TestCase):
@@ -377,6 +422,10 @@ class GodotUtilityTests(unittest.TestCase):
             GODOT_SHADER_COMMON,
         )
         self.assertEqual(
+            (repo_utility / "majin_foliage.gdshader").read_text(),
+            GODOT_FOLIAGE_SHADER,
+        )
+        self.assertEqual(
             (repo_utility / "assign_materials.gd").read_text(),
             GODOT_ASSIGN_SCRIPT,
         )
@@ -388,6 +437,7 @@ class GodotUtilityTests(unittest.TestCase):
             names = sorted(path.name for path in written)
             self.assertEqual(names, [
                 "assign_materials.gd",
+                "majin_foliage.gdshader",
                 "majin_material_common.gdshaderinc",
                 "majin_multitexture.gdshader",
             ])

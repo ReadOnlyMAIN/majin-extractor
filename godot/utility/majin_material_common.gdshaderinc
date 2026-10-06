@@ -41,6 +41,8 @@ uniform bool use_blend = false;
 uniform bool use_vertex_alpha = false;
 uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
+uniform float specular : hint_range(0.0, 1.0, 0.01) = 0.5;
+uniform vec4 albedo_modulate : source_color = vec4(1.0);
 
 vec4 blend_base(vec2 uv, vec4 weights) {
     vec4 base = texture(base_texture, uv) * weights.r;
@@ -120,7 +122,7 @@ void fragment() {
         reconstructed += reflection * utility * reflection_strength;
     }
 
-    ALBEDO = reconstructed * COLOR.rgb;
+    ALBEDO = reconstructed * COLOR.rgb * albedo_modulate.rgb;
 #if MATERIAL_ALPHA_MODE == 1
     ALPHA = base.a * COLOR.a;
     ALPHA_SCISSOR_THRESHOLD = 0.5;
@@ -129,4 +131,5 @@ void fragment() {
 #endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
+    SPECULAR = specular;
 }

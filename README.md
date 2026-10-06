@@ -51,6 +51,7 @@ tools/
 research/
   legacy/                  archived prototypes and historical documents
 REVERSE_DDM.md             current DDM reverse-engineering notes
+MAP_BINARY_FORMATS.md      map folder formats and detailed map101 inventory
 MATERIAL_PBR.md            matcap/mask-to-PBR research plan
 ROADMAP.md                 project action plan and current status
 game_files/                ISO, PAK, and extracted resources (ignored by Git)
@@ -271,11 +272,12 @@ material in the manifest.
 
 ### Godot utility assets
 
-The custom multi-texture shader and material-assignment helper are versioned in
+The custom multi-texture/foliage shaders and material-assignment helper are versioned in
 [`godot/utility/`](godot/utility) (see [`godot/README.md`](godot/README.md)).
-They are **not** regenerated on every export. Opaque, alpha-scissor and
-alpha-blend families use `StandardMaterial3D`; only decoded features outside
-that native model reference `res://majin_utility/majin_multitexture.gdshader`.
+They are **not** regenerated on every export. Ordinary opaque and alpha-blend
+families use `StandardMaterial3D`. Double-sided cutout foliage uses
+`majin_foliage.gdshader` to correct back-face normals; other decoded features
+outside the native model use `majin_multitexture.gdshader`.
 Install the whole utility folder once into your Godot project.
 
 A GLB cannot reference external Godot resources, so the imported model starts
@@ -335,7 +337,9 @@ can become separate objects, and connected props can remain together. Use
 `--object-mode submeshes` for DDM descriptor groups, `connected` to explicitly
 split any model, or `single` to keep one object. These modes apply to GLB only.
 Legacy Phong materials are converted to PBR values while their original values
-remain in GLB extras. Roughness is derived from DDM Phong shininess. In PBR
+remain in GLB extras. Roughness is derived by matching the DDM Blinn-Phong
+half-power width to Godot/glTF GGX; neutral `Ks` controls relative dielectric
+specular strength and `Kd` modulates albedo. In PBR
 mode, a reflection matcap overrides that fallback with documented roughness and
 confidence metadata based on highlight coverage. Matcaps do not determine
 metalness: without stronger evidence, materials remain dielectric and legacy

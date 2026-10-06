@@ -345,6 +345,31 @@ class GlbExportTests(unittest.TestCase):
                          ['specularColorFactor'], [0.5, 0.3, 0.1])
         self.assertIn('KHR_materials_specular', doc['extensionsUsed'])
 
+    def test_map_surface_specular_policy_is_exported_to_khr_extension(self):
+        vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0))]
+        materials = [{
+            'index': 0,
+            'phong': {
+                'diffuse': [1.0, 1.0, 1.0],
+                'specular': [0.8, 0.8, 0.8],
+            },
+            'pbr_estimate': {
+                'specular': 0.2,
+                'specular_source': 'shared_map_surface_visual_calibration',
+            },
+        }]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'specular-policy.glb'
+            write_glb(path, vertices, [part(0, [(0, 1, 2)])], materials,
+                      'scene', 1)
+            doc, _ = read_glb(path)
+        extension = doc['materials'][0]['extensions']['KHR_materials_specular']
+        self.assertEqual(extension['specularColorFactor'], [0.4, 0.4, 0.4])
+        self.assertEqual(
+            doc['materials'][0]['extras']['legacy_phong']['specular'],
+            [0.8, 0.8, 0.8],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -166,11 +166,96 @@ class MapGeometryTests(unittest.TestCase):
             found = ddm.resolve_texture_path('shared_c', model, root)
             self.assertEqual(found, canonical)
 
-    def test_phong_shininess_becomes_gltf_perceptual_roughness(self):
-        estimate = ddm.phong_to_pbr_estimate({'shininess': 30.0})
-        self.assertAlmostEqual(estimate['roughness'], 0.5)
-        self.assertEqual(estimate['roughness_formula'],
-                         'pow(2 / (Ns + 2), 0.25)')
+    def test_phong_shininess_matches_ggx_half_power_width(self):
+        estimate = ddm.phong_to_pbr_estimate({
+            'shininess': 32.0,
+            'specular': [0.8, 0.8, 0.8],
+            'diffuse': [1.0, 0.5, 0.25],
+        })
+        self.assertAlmostEqual(estimate['roughness'], 0.5520096136264181)
+        self.assertEqual(
+            estimate['roughness_source'],
+            'blinn_phong_to_ggx_half_power_match',
+        )
+        self.assertAlmostEqual(estimate['specular'], 0.4)
+        self.assertEqual(estimate['diffuse'], [1.0, 0.5, 0.25])
+
+        low_specular = ddm.phong_to_pbr_estimate({
+            'shininess': 64.0,
+            'specular': [0.1, 0.1, 0.1],
+            'diffuse': [1.0, 1.0, 1.0],
+        })
+        self.assertAlmostEqual(low_specular['roughness'], 0.4709369682047095)
+        self.assertAlmostEqual(low_specular['specular'], 0.05)
+
+    def test_cutout_foliage_uses_broad_shader_family_roughness(self):
+        estimate = ddm.phong_to_pbr_estimate({
+            'shininess': 32.0,
+            'specular': [0.8, 0.8, 0.8],
+            'diffuse': [1.0, 1.0, 1.0],
+        })
+        ddm.apply_render_state_pbr_policy(estimate, {
+            'mode': 'alpha_scissor',
+            'shader_key': '0x00843105',
+        })
+        self.assertAlmostEqual(estimate['roughness'], 1.0)
+        self.assertAlmostEqual(estimate['specular'], 0.0)
+        self.assertAlmostEqual(
+            estimate['roughness_from_phong'], 0.5520096136264181,
+        )
+        self.assertAlmostEqual(estimate['specular_from_phong'], 0.4)
+        self.assertEqual(
+            estimate['roughness_source'],
+            'double_sided_cutout_foliage_shader_family',
+        )
+
+        opaque = ddm.phong_to_pbr_estimate({
+            'shininess': 32.0,
+            'specular': [0.8, 0.8, 0.8],
+        })
+        ddm.apply_render_state_pbr_policy(opaque, {
+            'mode': 'opaque',
+            'shader_key': '0x00847125',
+        })
+        self.assertAlmostEqual(opaque['roughness'], 0.5520096136264181)
+
+    def test_map_surface_shader_families_share_low_nonzero_specular(self):
+        common = ddm.phong_to_pbr_estimate({
+            'shininess': 32.0,
+            'specular': [0.8, 0.8, 0.8],
+        })
+        zimen = ddm.phong_to_pbr_estimate({
+            'shininess': 64.0,
+            'specular': [0.1, 0.1, 0.1],
+        })
+        ddm.apply_render_state_pbr_policy(common, {
+            'mode': 'opaque',
+            'shader_key': '0x00847125',
+        })
+        ddm.apply_render_state_pbr_policy(zimen, {
+            'mode': 'opaque',
+            'shader_key': '0x00847725',
+        })
+        self.assertAlmostEqual(common['specular'], 0.2)
+        self.assertAlmostEqual(zimen['specular'], 0.2)
+        self.assertAlmostEqual(common['specular_from_phong'], 0.4)
+        self.assertAlmostEqual(zimen['specular_from_phong'], 0.05)
+        self.assertEqual(
+            zimen['specular_source'],
+            'shared_map_surface_visual_calibration',
+        )
+
+        disabled = ddm.phong_to_pbr_estimate({
+            'shininess': 0.0,
+            'specular': [0.0, 0.0, 0.0],
+        })
+        ddm.apply_render_state_pbr_policy(disabled, {
+            'mode': 'opaque',
+            'shader_key': '0x00847725',
+        })
+        self.assertEqual(disabled['specular'], 0.0)
+        self.assertEqual(disabled['roughness'], 1.0)
+        self.assertNotIn('specular_from_phong', disabled)
 
     def test_legacy_material_block_separates_diffuse_alpha_from_unknowns(self):
         values = (1.0, 0.8, 0.6, 1.0, 0.0, 0.0,
@@ -185,6 +270,21 @@ class MapGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(phong['specular'][0], 0.2)
         self.assertEqual(phong['shininess'], 32.0)
 
+    def test_legacy_material_block_accepts_disabled_specular_lobe(self):
+        values = (1.0, 1.0, 0.5, 1.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0)
+        data = b'prefix' + struct.pack('>11f', *values) + b'suffix'
+        phong = ddm.find_phong_parameters(data, 0, len(data))
+        self.assertEqual(phong['offset'], len(b'prefix'))
+        self.assertEqual(phong['specular'], [0.0, 0.0, 0.0])
+        self.assertEqual(phong['shininess'], 0.0)
+        estimate = ddm.phong_to_pbr_estimate(phong)
+        self.assertEqual(estimate['roughness'], 1.0)
+        self.assertEqual(estimate['specular'], 0.0)
+        self.assertEqual(
+            estimate['roughness_source'], 'disabled_legacy_specular_lobe',
+        )
+
     def test_material_render_state_trailer_decodes_pipeline_mode(self):
         phong_offset = 9
         for value, mode in enumerate(('opaque', 'alpha_scissor', 'alpha_blend')):
@@ -195,6 +295,14 @@ class MapGeometryTests(unittest.TestCase):
             self.assertEqual(state['mode_value'], value)
             self.assertEqual(state['mode'], mode)
             self.assertEqual(state['shader_key'], '0x00843105')
+            self.assertEqual(state['variant_word'], 2)
+
+    def test_material_render_state_accepts_zero_variant_word(self):
+        data = b'\x00' + bytes.fromhex('0084733f 00000000') + b'payload'
+        state = ddm.decode_material_render_state(data, {'offset': 9})
+        self.assertEqual(state['mode'], 'opaque')
+        self.assertEqual(state['shader_key'], '0x0084733f')
+        self.assertEqual(state['variant_word'], 0)
 
     def test_material_render_state_rejects_unknown_layout(self):
         self.assertIsNone(ddm.decode_material_render_state(

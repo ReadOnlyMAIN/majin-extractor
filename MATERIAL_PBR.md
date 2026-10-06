@@ -44,17 +44,117 @@ not read a native metallic or perceptual-roughness scalar. The DDM material
 block supplies specular RGB and a legacy exponent. The portable conversion
 therefore keeps two independent quantities:
 
-- `Ns` becomes glTF perceptual roughness through
-  `pow(2 / (Ns + 2), 0.25)`;
+- `Ns` becomes perceptual GGX roughness by matching the half-power width of
+  `cos(theta)^Ns`: with `c²=2^(-2/Ns)`, `roughness=((1-c²)/(sqrt(2)-c²))^0.25`;
 - `Ks.rgb` becomes dielectric specular strength/color through
   `KHR_materials_specular`;
+- Godot's scalar `metallic_specular` becomes `0.5*luminance(Ks)`, preserving
+  the same dielectric-F0 scaling for Map101's neutral-grey `Ks` values;
+- `Kd.rgb` modulates the albedo texture (notably `tikeikusa` has
+  `Kd=(1,1,0.1)`);
 - metallic remains zero unless future material-specific evidence identifies a
   conductor.
+
+The direct conversion yields roughness `.5520`, specular `.40`, metallic `0`
+for Map101's common `Ks=.8, Ns=32` template. `zimen` directly yields roughness
+`.4709` and specular `.05` from `Ks=.1, Ns=64`. These specular numbers are kept
+as provenance rather than treated as exact Godot values: `Ks` is a legacy
+shader input and no linear equivalence with Godot's control has been proven.
+
+For the effective Map101 reconstruction, the decoded map-surface shader keys
+`0x00807125`, `0x00847125`, and `0x00847725` share specular `.2`. This retains
+some sky/reflection-probe response while avoiding both the wet `.4` appearance
+and a reflectance seam between `zimen` and adjacent terrain. The direct values
+remain available in `specular_from_phong`.
 
 Map materials often reuse `Ns=32` across unrelated surfaces. That is source
 authoring granularity, not numerical instability in the converter, so the
 export records reduced confidence rather than inventing surface-dependent
 roughness values.
+
+The decoded double-sided cutout foliage family (`alpha_scissor`, shader key
+`0x00843105`) is an exception: it reuses the generic `Ks=.8, Ns=32` block but
+the original renderer selects a distinct shader variant. The exporter treats
+these thin cards as albedo-only diffuse surfaces: smoothness `0` (roughness
+`1`), specular `0`, and metallic `0`. It keeps the direct `.5520` roughness and
+`.40` specular conversions in `roughness_from_phong` and
+`specular_from_phong` for provenance.
+
+## Map101–Map103 binary correlation
+
+The detailed DDMs and their `L0` variants provide 50 decoded material records.
+Their legacy specular values are low-cardinality and always neutral grey; no
+colored `Ks` was found:
+
+| DDM | `Ks/Ns` populations |
+| --- | --- |
+| `map101` | 12 × `.8/32`, 1 × `.1/64` |
+| `map102` | 7 × `.8/32`, 3 × `.2/32`, 1 × `.1/64`, 1 × `0/0` |
+| `map103` | 6 × `.8/32`, 3 × `.2/32`, 2 × `.1/64`, 2 × `.1/32`, 3 × `0/32` |
+| three `*_L0` files | 9 × `.8/32` |
+
+This establishes the following source semantics with different confidence
+levels:
+
+- `Ks` is a legacy RGB specular-lobe multiplier. The compiled fragment shader
+  multiplies its computed highlight by `specularColor`, and Map102/103 contain
+  intentional `Ks=0` records. A zero value must therefore remain zero. The
+  shared Godot `.2` visual calibration is applied only when source `Ks` is
+  nonzero.
+- `Ns` is the legacy exponent controlling lobe width. `Ns=0` occurs with
+  `Ks=0` on Map102 `kusa5`, where the exponent has no visible effect. `Ns=32`
+  is overwhelmingly the exporter default; `64` is a narrower-lobe preset, not
+  a stored PBR roughness.
+- `Kd` is an albedo tint and is not a roughness clue. Non-white examples are
+  reproducible (`map101/tikeikusa = 1,1,.1`, `map102/kusa5 = 1,1,.5`, and
+  `map103/kusa5 = 1,1,.135`).
+- Metallic remains unsupported by the scalar block. Every map `Ks` is grey,
+  including the two gold-colored `kin` materials, so there is no conductor F0
+  color or metalness flag in these values.
+
+The same shader key accepts multiple surface-response presets. In particular,
+`0x00847725` occurs as `.1/64`, `0/32`, and `0/0`. Consequently neither `Ks`
+nor `Ns` may be inferred from the shader key alone. Conversely, exact reused
+assets retain their settings: Map101 `zimen` and Map102
+`map101_0216_colladafxShader1` share the same four textures, key
+`0x00847725`, `Ks=.1`, and `Ns=64`; the `map103_0217_tunagi` material in
+Map102/103 retains key `0x00807125`, `.8/32`; and the Map102/103
+`map610_0222_ki` tree retains key `0x00843105`, `.8/32`.
+
+The LOD comparison limits how physically precise these values can be. Rock,
+grass, architecture, and broken-wall LOD textures all collapse to `.8/32`.
+`Ks/Ns` therefore preserve the original renderer's authored response, but in
+many records that response is a broad authoring preset rather than a measured
+surface property. The half-power `Ns`→GGX conversion remains preferable to an
+arbitrary roughness, while its confidence must remain moderate.
+
+Map103 adds a separate per-pixel signal. `kin001` and `gim123_kin002` use key
+`0x0084733f`, `Ks=.1`, `Ns=32`, plus red-channel `nm_kin005_m` /
+`nm_kin006_m` masks. Their image content follows the decorated surface and is
+strongly mask-like. This is credible evidence for a local surface-response
+mask, but not yet for its operation or polarity: it could modulate specular
+strength, gloss, or another lookup. It must not be connected to metallic or
+roughness until that shader variant is disassembled.
+
+The remaining scalars provide no PBR mapping. The two values after diffuse are
+`0,0` in every detailed material and in Map102/103 L0; Map101 L0 alone uses
+`1,0` while keeping the same `.8/32` preset. The scalar after `Ks` is zero in
+all 50 records. This variation rules the first unknown out as the primary
+roughness, metallic, or specular-strength value, but does not identify it.
+Likewise, diffuse alpha is not treated as a PBR control.
+
+The practical mapping supported by this evidence is therefore:
+
+| Source | Godot/glTF use |
+| --- | --- |
+| `Kd.rgb` | albedo multiplier |
+| `Ks.rgb = 0` | disable specular response |
+| `Ks.rgb > 0` | preserve as legacy provenance; use family-calibrated dielectric strength, not a claimed linear conversion |
+| `Ns > 0` | half-power conversion to GGX perceptual roughness |
+| `Ns = 0` with `Ks = 0` | roughness `1`, specular `0` |
+| red `_m` mask on key `0x0084733f` | preserve/classify as an unresolved surface-response mask |
+| unknown scalars | preserve only; no PBR connection |
+| metallic | `0` pending independent conductor evidence |
 
 Normal-map handedness is handled independently of reflection estimation. DDM
 normal textures are converted from source Y− (DirectX style) to the Y+

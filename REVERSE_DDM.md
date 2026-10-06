@@ -464,31 +464,78 @@ Observed reference values:
 
 These are legacy Phong parameters, not metallic/roughness PBR parameters. No
 metallic scalar has been identified in the DDM material records. Roughness is
-also not stored directly; for diagnostics the converter reports the common
-microfacet-width approximation `alpha = sqrt(2 / (Ns + 2))`. Because glTF
-defines `alpha = roughness²`, the exported perceptual roughness is
-`pow(2 / (Ns + 2), 0.25)`, clearly marked as derived. The original
-`Kd`, `Ks`, and `Ns` values are written to MTL without this conversion. Since
-no source `Ka` has been identified, MTL output reuses `Kd` for `Ka`.
+also not stored directly. Since Godot/glTF use Schlick-GGX, the converter now
+matches the half-power angle of the source `cos(theta)^Ns` lobe to the GGX NDF:
+
+```text
+c² = 2^(-2/Ns)
+alpha² = (1 - c²) / (sqrt(2) - c²)
+perceptual_roughness = sqrt(alpha) = pow(alpha², 0.25)
+```
+
+This is a model conversion, not a recovered roughness value. `Kd` modulates
+Godot albedo. Neutral-grey `Ks` is preserved by `KHR_materials_specular`; for
+Godot its luminance scales the conventional dielectric setting, so
+`metallic_specular = 0.5 * luminance(Ks)`. Metallic remains zero because
+Map101 has neither a conductor flag nor colored conductor reflectance. The
+original `Kd`, `Ks`, and `Ns` values are also written to MTL. Since no source
+`Ka` has been identified, MTL output reuses `Kd` for `Ka`.
+
+Map101's resulting values are deliberately low-cardinality because the source
+itself reuses an authoring template:
+
+| Source values / policy | Godot metallic | Godot specular | GGX roughness | Materials |
+| --- | ---: | ---: | ---: | --- |
+| shared map-surface policy (`Ks=.8`, `Ns=32`) | 0 | .20 | .5520 | most Map101 materials |
+| shared map-surface policy (`Ks=.1`, `Ns=64`) | 0 | .20 | .4709 | `zimen` |
+| `Ks=.8`, `Ns=32`, cutout key `0x00843105` | 0 | 0 | 1.0000 | double-sided foliage (`ALFsyokubutuA`, `syokubutuB`) |
+
+The previous exporter ignored `Ks`, leaving Godot's default specular `0.5` on
+every material. This especially over-reflected `zimen`, whose source strength
+is only `0.1`, and contributed to a wet appearance. It also used a Beckmann
+width approximation (`.493`/`.417`) for a GGX renderer; half-power matching
+produces the slightly broader, drier `.552`/`.471` lobes above.
+
+The initial Godot mapping used `metallic_specular = 0.5*luminance(Ks)`, hence
+`.40` for most records and `.05` for `zimen`. This was a documented model
+conversion, not a recovered scale. Visual comparison shows that `.40` remains
+too wet and that the `.05`/`.40` discontinuity breaks transitions between the
+two-texture `zimen` terrain and neighbouring surfaces. The three decoded
+map-surface shader keys therefore use a shared `.20` calibration. It is low but
+nonzero, retaining sky/reflection-probe influence. The former `.40` and `.05`
+values remain in `specular_from_phong`; raw `Ks` remains in `legacy_phong`.
+
+The cutout foliage override is deliberately keyed to its decoded shader
+family, not to texture names or alpha in general. Its `.5520` mathematical
+Phong conversion and `.40` specular remain recorded as
+`roughness_from_phong` and `specular_from_phong`. The effective export uses
+roughness `1`, specular `0`, and metallic `0`: only albedo and cutout opacity
+remain. This policy does not affect unrelated alpha-blended terrain paint.
 
 ### Material render-state trailer
 
-Map101 stores a nine-byte variant trailer immediately before each decoded
-Phong block. Its first byte selects the raster/blend family, followed by an
-unaligned four-byte shader feature key and the observed parameter count 2:
+Map101–Map103 store a nine-byte variant trailer immediately before each
+decoded Phong block. Its first byte selects the raster/blend family, followed
+by an unaligned four-byte shader feature key and an unresolved word which is
+`2` on all Map101 records but can be `0` or `2` on Map102/103:
 
 ```text
 uint8  render_mode;       // 0 opaque, 1 alpha test, 2 alpha blend/pass
 uint32 shader_key;        // feature bits, only grouped so far
-uint32 parameter_count;   // 2 on map101
+uint32 variant_word;      // 2 on map101; 0 or 2 on map102/map103
 ```
+
+The word is exposed as `render_state.variant_word`; calling it a parameter
+count is premature. Both values preserve the same mode/key layout. For
+example, Map103's two red-mask `kin` materials use mode 0, key `0x0084733f`,
+and word 0, while Map102/103 also contain key `0x00847127` with either word.
 
 The assignments are corroborated by independent asset evidence:
 
 | Map101 materials | Mode | Shader key | Evidence / Godot pipeline |
 | --- | ---: | --- | --- |
 | `mon`, `isidadami`, pillars, walls, `gake102__base` | 0 | `0x00847125` | opaque; native `StandardMaterial3D` with transparency disabled |
-| `ALFsyokubutuA`, `syokubutuB` | 1 | `0x00843105` | cutout foliage; native alpha scissor (`0.5`) and double-sided rendering |
+| `ALFsyokubutuA`, `syokubutuB` | 1 | `0x00843105` | cutout foliage; dedicated albedo-only shader, alpha scissor (`0.5`), double-sided rendering and corrected back-face normals |
 | `tikeikusa`, `zimenA`, `ALFsyokubutu` | 2 | `0x00807125` | feathered vertex alpha; native classic alpha blend |
 | `zimen` | 0 | `0x00847725` | opaque two-albedo/two-normal variant; custom shader blends both pairs with vertex alpha |
 | `gake102__multi` | 2 | `0x00847125` | coincident blend pass, folded into the opaque host for Godot |
@@ -500,13 +547,20 @@ render-mode byte itself is decoded with high confidence.
 
 ### Godot native-material mapping
 
-The first three Map101 families do not require handwritten Godot shaders.
-The exporter writes `StandardMaterial3D` resources with `albedo_texture`,
-`normal_enabled`, `normal_texture`, `roughness`, `metallic = 0`, and
+The ordinary opaque and alpha-blend Map101 families do not require handwritten
+Godot shaders. The exporter writes `StandardMaterial3D` resources with `albedo_texture`,
+`normal_enabled`, `normal_texture`, decoded `Kd`, GGX `roughness`,
+`metallic = 0`, decoded relative specular strength, and
 `vertex_color_use_as_albedo = true`. Mode 0 leaves `transparency` disabled;
-mode 1 selects `TRANSPARENCY_ALPHA_SCISSOR`, threshold `0.5`, and disabled
-culling; mode 2 selects `TRANSPARENCY_ALPHA`. This retains Godot's native PBR,
-depth-prepass and shadow behavior instead of duplicating them in shader code.
+mode 2 selects `TRANSPARENCY_ALPHA`. This retains Godot's native PBR,
+depth-prepass and shadow behavior where no source shader distinction requires
+custom handling.
+
+The cutout foliage key `0x00843105` uses `majin_foliage.gdshader`. Merely
+disabling culling leaves the source front normal on back-facing fragments and
+can invert their apparent sunlight response. The shader uses Godot's
+`FRONT_FACING` fragment input to negate `NORMAL` on the back face, performs
+alpha scissor at `0.5`, and fixes metallic/specular/roughness to `0/0/1`.
 
 Key `0x00847725` is materially different: `zimen` references, in order,
 `yuka3_c`, `yuka2_c`, `yuka3_n`, and `yuka2_n`. Its custom shader samples both
@@ -535,6 +589,22 @@ conversion lossless. On map101/map102, many unrelated surfaces share the same
 `Ns=32` authoring template while their `Ks` values differ. glTF preserves that
 strength separately through `KHR_materials_specular`. No shader evidence was
 found for deriving metalness from these fields, so it remains zero.
+
+Cross-correlation of all detailed Map101/102/103 records and their three L0
+files further shows that `Ks` is restricted to neutral-grey `0`, `.1`, `.2`,
+or `.8`, while `Ns` is normally `32` or `64`. Map102 `kusa5` contains the
+valid disabled pair `Ks=0, Ns=0`; the parser accepts this only when all three
+serialized `Ks` components are exactly zero. The same shader key
+`0x00847725` also occurs with `.1/64` and `0/32`, proving these are material
+inputs rather than values implied by the feature key. All nine L0 materials
+use `.8/32` across unrelated rock, vegetation, and architecture, so those
+numbers are often exporter presets rather than physically measured values.
+
+Map103's `kin001` and `gim123_kin002` additionally reference red-channel
+`*_m` masks under key `0x0084733f`. They are retained as unresolved
+surface-response/specular-mask candidates. Their existence is not evidence of
+metalness: the associated `Ks` remains neutral `.1`, and the exact mask
+operation and polarity have not yet been recovered from that fragment variant.
 
 The reflection tables use four-byte relocation entries containing a 16-bit
 fragment-program byte offset followed by a zero 16-bit reserved field. The
@@ -1073,7 +1143,7 @@ force a variant the heuristics miss.
 
 ## Map GLB export
 
-`map101_R0` has three validated geometry sections and 38 descriptors containing
+`map101` has three validated geometry sections and 38 descriptors containing
 79,567 vertices and 76,395 nondegenerate-index triangles. The map positions are
 already placed in world space. Descriptor +0x28 indexes the 64-entry OBB table
 (count at 0xB0, records at 0xB4, stride 0x30): all 38 referenced boxes match the
@@ -1083,7 +1153,7 @@ Some descriptors cover large spatial batches rather than individual props.
 The GLB exporter reconstructs objects by connectivity: original shared vertex
 indices and exact shared geometric edges (including material/UV seams). It does
 not weld nearby coordinates or merge duplicated vertices touching at one point.
-This produces 1,881 nodes / 1,842 distinct meshes for map101_R0. Geometry and
+This produces 1,881 nodes / 1,842 distinct meshes for `map101`. Geometry and
 material assignments are retained. Centers are reconstructed AABB centers;
 local coordinates plus node translation preserve world positions. Only exactly
 identical exported local geometry and materials share mesh data. No original
@@ -1091,11 +1161,12 @@ instance hierarchy, rotations, authoring pivots or semantic object names have
 been recovered. Disconnected prop pieces can split; connected props can merge.
 
 GLB embeds resolved diffuse/normal PNGs and uses the source UV orientation
-(top-left, unlike the former OBJ V flip). Metallic defaults to zero. The former
-conversion exported microfacet alpha directly as roughness (0.174
-for Ns=64 and 0.243 for Ns=32), which glTF squared again and therefore rendered
-excessively glossy. GLB now exports perceptual roughness (0.417 and 0.493) and
-records both the exported and derived values in material extras; `--roughness`
+(top-left, unlike the former OBJ V flip). Metallic defaults to zero. An early
+conversion incorrectly exported microfacet alpha directly as roughness (0.174
+for Ns=64 and 0.243 for Ns=32), which glTF squared again. The next Beckmann
+approximation produced `.417`/`.493`; the current conversion instead matches
+the source lobe's half-power width to glTF/Godot's GGX, producing `.471`/`.552`.
+The method and source values are recorded in material extras; `--roughness`
 can still provide an explicit diagnostic override.
 
 The source tangent-space normal maps use the DirectX-style Y− convention. glTF
@@ -1106,7 +1177,7 @@ inverts the green channel (`G' = 255 - G`) for textures classified as
 `xet_to_png.py` itself continues to decode the source pixels without semantic
 channel conversion.
 
-14,267 map101_R0 triangles are exact overlaps where `gake102__multi` provides
+14,267 `map101` triangles are exact overlaps where `gake102__multi` provides
 only a normal-map pass over a diffuse surface (including 26 overlaps shared
 with another diffuse material). Core glTF cannot reproduce this legacy
 multipass shader, and exporting both copies causes z-fighting. The GLB exporter
