@@ -296,6 +296,35 @@ class GodotExportTests(unittest.TestCase):
             self.assertIn("ROUGHNESS = 1.0", GODOT_FOLIAGE_SHADER)
             self.assertIn("SPECULAR = 0.0", GODOT_FOLIAGE_SHADER)
 
+    def test_instance_foliage_shader_keys_use_foliage_material(self):
+        for shader_key in ("0x0082b105", "0x0086b105"):
+            with tempfile.TemporaryDirectory() as root:
+                out = Path(root)
+                materials = [{
+                    "index": 0,
+                    "name": "instance_foliage",
+                    "textures": [{
+                        "role": "diffuse",
+                        "output": "textures/foliage.png",
+                    }],
+                    "render_state": {
+                        "mode": "opaque",
+                        "shader_key": shader_key,
+                    },
+                    "pbr_estimate": {
+                        "roughness": 1.0,
+                        "specular": 0.0,
+                        "diffuse": [1.0, 1.0, 1.0],
+                    },
+                }]
+                result = write_godot_material_assets(out, materials, {})
+                manifest = json.loads((out / result["manifest"]).read_text())
+                binding = manifest["materials"][0]
+                tres = (out / binding["material_resource"]).read_text()
+            self.assertEqual(binding["material_type"], "ShaderMaterial")
+            self.assertTrue(binding["shader"].endswith("majin_foliage.gdshader"))
+            self.assertIn("shader_parameter/base_texture", tres)
+
 
 class MaterialModeTests(unittest.TestCase):
     def test_pbr_is_the_default_mode(self):
@@ -407,6 +436,17 @@ class MultipassDetailFoldTests(unittest.TestCase):
 
 
 class GodotUtilityTests(unittest.TestCase):
+    def test_instance_importer_persists_materials_on_extracted_mesh(self):
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "godot" / "utility" / "import_instance.gd"
+        ).read_text()
+        self.assertIn('extends EditorScenePostImport', script)
+        self.assertIn('mesh.surface_set_material(surface, assignments[material_name])', script)
+        self.assertIn('ResourceSaver.save(extracted, mesh_path)', script)
+        self.assertIn('get_source_file().get_file().get_basename()', script)
+        self.assertIn('res://terrain/foliage/meshes', script)
+
     def test_repository_utility_folder_matches_the_constants(self):
         # godot/utility/ is the versioned source of truth; the Python constants
         # must stay identical so an installed copy never drifts from the export.
@@ -437,17 +477,20 @@ class GodotUtilityTests(unittest.TestCase):
             names = sorted(path.name for path in written)
             self.assertEqual(names, [
                 "assign_materials.gd",
+                "import_instance.gd",
                 "majin_foliage.gdshader",
                 "majin_material_common.gdshaderinc",
                 "majin_multitexture.gdshader",
             ])
             shader = (destination / "majin_multitexture.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()
+            instance_script = (destination / "import_instance.gd").read_text()
             self.assertIn("shader_type spatial;", shader)
             self.assertIn("extends EditorScenePostImport", script)
             self.assertIn("material_bindings.json", script)
             self.assertIn("model_base.path_join(tres)", script)
             self.assertNotIn("path.get_base_dir().path_join(tres)", script)
+            self.assertIn("ResourceSaver.save(extracted, mesh_path)", instance_script)
 
     def test_write_godot_utility_does_not_overwrite_by_default(self):
         with tempfile.TemporaryDirectory() as root:

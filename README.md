@@ -331,6 +331,12 @@ multiple material primitives. Each node has a local origin at its component's
 bounding-box center and a translation preserving its placement. Exactly
 identical exported local meshes share mesh data between nodes.
 
+Reusable models below `KB/instance` are the exception: their source origin is
+preserved in the mesh because HSC placement transforms are authored relative
+to that pivot. Their GLB node therefore has zero translation. This also allows
+`import_instance.gd` to extract the mesh without losing a vertical or lateral
+pivot offset.
+
 This reconstructs editable objects from baked geometry; it does **not** recover
 original authoring instances or their pivots. Disconnected pieces of one prop
 can become separate objects, and connected props can remain together. Use
@@ -381,6 +387,35 @@ does not alter channels because it has no material-role context.
 ```bash
 python tools/conversion/ddm_to_3d.py game_files/decompressed/KB/map/map101 output/models_glb --final --texture-root game_files/decompressed/KB/texture/common/area1
 ```
+
+### Map instance tables to Godot foliage
+
+`hsc_to_foliage.py` converts a map's HSC `*_ins` table directly to a Godot 4
+`FoliageSceneData` text resource. It preserves each instance transform and
+model in the same coordinate axes as the exported map, converts source
+positions from centimetre-like units to metres, and maps the source culling
+distance to `visibility_ranges`:
+
+```bash
+python tools/conversion/hsc_to_foliage.py game_files/decompressed/KB/map/map101/map101_ins output/foliage/map101_foliage.tres
+```
+
+The defaults target these project resources:
+
+```text
+res://addons/procedural_tools/foliage/resources/foliage_data.gd
+res://addons/procedural_tools/foliage/resources/foliage_scene_data.gd
+res://terrain/foliage/meshes/{model}.res
+```
+
+The resulting map101 resource contains 332 entries referencing `ins107.res`
+through `ins111.res`. Those five DDMs are exported as one GLB mesh each
+automatically because the default `auto` mode recognizes `KB/instance`. Use
+`godot/utility/import_instance.gd` as their Godot Import Script: it assigns the
+generated materials to the mesh surfaces and saves them as `ins107.res`, etc.
+For a different naming convention, pass `--mesh-path-template`, which must
+contain `{model}`. Script paths, Euler order, position scale and coordinate
+conversion also have explicit CLI overrides; see `--help`.
 
 Equivalent configurations are available in VS Code. The
 `Pipeline: extraction and textures` task runs PAK extraction followed by both

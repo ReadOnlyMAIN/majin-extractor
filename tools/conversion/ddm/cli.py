@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .binary import MAGIC, UnsupportedDDMVariant
 from .materials import DEFAULT_EXPORT_SCALE
-from .scene import analyze_file
+from .scene import analyze_file, output_key_for
 
 try:
     from ..blend_mask import DEFAULT_BLEND_RADIUS
@@ -43,12 +43,7 @@ def iter_input_files(path: Path, recursive: bool = False):
 
 
 def output_directory_for(path: Path, out_root: Path, relative_path=None):
-    output_key = (
-        Path(path.stem)
-        if relative_path is None
-        else relative_path.parent / path.stem
-    )
-    return out_root / output_key
+    return out_root / output_key_for(path, relative_path)
 
 
 def prune_empty_output_directories(path: Path, out_root: Path):
@@ -83,9 +78,10 @@ def main():
     )
     ap.add_argument("--object-mode", choices=("auto", "connected", "submeshes", "single"),
                     default="auto", help=(
-                        "GLB object separation: auto splits map geometry into connected "
-                        "components and keeps character models together. Components "
-                        "are reconstructed, not original DDM authoring instances."))
+                        "GLB object separation: auto keeps KB/instance assets and "
+                        "character models together, and splits map geometry into "
+                        "connected components. Components are reconstructed, not "
+                        "original DDM authoring instances."))
     ap.add_argument(
         "--roughness",
         type=float,

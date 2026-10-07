@@ -5,12 +5,12 @@ Game Republic PS3 xet (.bin) -> PNG converter
 
 What this version does
 ----------------------
-- Uses the working xet layout you identified:
+- Uses the decoded XET layout:
   * magic: b'\x00xet'
   * width/height at 0x80 (big-endian u16)
   * the largest mip starts at 0x88
-  * DXT5 block order is selected by the XET storage flag: either
-    color-first/alpha-second or standard alpha-first/color-second
+  * DXT5 uses standard BC3 alpha-first/color-second blocks. The changing byte
+    at 0x2F belongs to the build identifier and is not a storage-order flag.
   * mip chain stops at 2x2 (no 1x1 mip in this format)
 - Supports single files, folders, and recursive scanning
 - Accepts files with or without an extension
@@ -175,16 +175,21 @@ def decode_dxt1(raw: bytes, w: int, h: int) -> bytes:
 
 
 def dxt5_color_first(data: bytes) -> bool:
-    """Return the DXT5 block order selected by the XET storage flag."""
-    return len(data) <= 0x2F or not (data[0x2F] & 0x80)
+    """Return false: observed XET DXT5 payloads use standard BC3 ordering.
+
+    Kept as a compatibility helper for callers that report the selected block
+    layout. Earlier code mistook byte 0x2F, part of the recurring build ID at
+    0x28, for a texture storage flag. Both observed values use alpha first.
+    """
+    return False
 
 
 def decode_dxt5_xet(raw: bytes, w: int, h: int,
                     color_first: bool = True) -> bytes:
     """Decode either observed XET DXT5 block layout.
 
-    Some archives store ``[color][alpha]`` while flag 0x2F bit 7 selects the
-    standard ``[alpha][color]`` order.
+    XET payloads use standard ``[alpha][color]`` BC3 blocks. ``color_first``
+    remains available only for explicit diagnostics of the discarded layout.
 
     Color block layout:
     - bytes 0..1: c0

@@ -210,7 +210,7 @@ def add_legacy_specular_extension(doc, item, phong, estimate=None):
 
 def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
               mode='connected', image_data=None, roughness=None,
-              excluded_materials=None):
+              excluded_materials=None, preserve_source_origin=False):
     """Write nodes with local origins, material primitives, and embedded PNGs.
 
     Exact identical local meshes share a mesh index, including materials and
@@ -316,8 +316,14 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
     for number, faces in enumerate(groups):
         used = sorted({index for _, triangle in faces for index in triangle})
         points = [vertices[i]['position'] for i in used]
-        center = tuple((min(p[a] for p in points) + max(p[a] for p in points)) / 2
-                       for a in range(3))
+        center = (
+            (0.0, 0.0, 0.0)
+            if preserve_source_origin
+            else tuple(
+                (min(p[a] for p in points) + max(p[a] for p in points)) / 2
+                for a in range(3)
+            )
+        )
         translation = [x * scale for x in center]
         by_material = defaultdict(list)
         for part, triangle in faces:
@@ -366,7 +372,10 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
             mesh_cache[key] = len(doc['meshes'])
             doc['meshes'].append({'name': name, 'primitives': primitives})
         node = {'name': name, 'mesh': mesh_cache[key], 'translation': translation,
-                'extras': {'separation': mode, 'origin': 'reconstructed_aabb_center',
+                'extras': {'separation': mode, 'origin': (
+                               'source_origin' if preserve_source_origin
+                               else 'reconstructed_aabb_center'
+                           ),
                            'ddm_submeshes': sorted({p['submesh_index'] for p, _ in faces})}}
         doc['scenes'][0]['nodes'].append(len(doc['nodes']))
         doc['nodes'].append(node)

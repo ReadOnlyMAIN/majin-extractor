@@ -255,6 +255,28 @@ class GlbExportTests(unittest.TestCase):
         expected = [tuple(x * 0.01 for x in p) for p in points]
         self.assertEqual(Counter(world), Counter(expected))
 
+    def test_preserved_source_origin_does_not_recenter_instance_mesh(self):
+        points = [(10, 20, 30), (12, 20, 30), (10, 22, 30)]
+        vertices = [vertex(point) for point in points]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'instance.glb'
+            result = write_glb(
+                path, vertices, [part(0, [(0, 1, 2)])],
+                [{'index': 0}], 'instance', 0.01,
+                mode='single', preserve_source_origin=True,
+            )
+            doc, blob = read_glb(path)
+        node = doc['nodes'][0]
+        primitive = doc['meshes'][node['mesh']]['primitives'][0]
+        positions = values(doc, blob, primitive['attributes']['POSITION'])
+        self.assertEqual(node['translation'], [0.0, 0.0, 0.0])
+        self.assertEqual(node['extras']['origin'], 'source_origin')
+        expected = [tuple(value * 0.01 for value in point) for point in points]
+        for actual_point, expected_point in zip(positions, expected):
+            for actual, expected_value in zip(actual_point, expected_point):
+                self.assertAlmostEqual(actual, expected_value)
+        self.assertEqual(result['object_count'], 1)
+
     def test_material_primitives_and_embedded_png(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
         vertices = [vertex(p) for p in ((0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0))]

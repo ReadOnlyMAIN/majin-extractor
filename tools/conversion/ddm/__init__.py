@@ -86,7 +86,7 @@ from .skinned import (
     decode_skinned_skeleton,
     find_skinned_geometry_header,
 )
-from .scene import analyze_file
+from .scene import analyze_file, output_key_for
 from .cli import (
     iter_input_files,
     main,
@@ -113,7 +113,7 @@ __all__ = [
     "find_phong_parameters", "find_skinned_geometry_header",
     "find_submesh_descriptors", "finite3", "image_content_stats",
     "iter_input_files", "main", "normal_alignment_stats",
-    "material_mode_of", "output_directory_for", "parse_bool", "parse_int",
+    "material_mode_of", "output_directory_for", "output_key_for", "parse_bool", "parse_int",
     "parse_materials",
     "phong_to_pbr_estimate", "prune_empty_output_directories",
     "quaternion_rotate", "resolve_material_textures", "resolve_texture_path",

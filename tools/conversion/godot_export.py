@@ -16,6 +16,7 @@ try:
         select_material_slots,
         write_png,
     )
+    from .ddm.materials import is_foliage_render_state
 except ImportError:
     from blend_mask import (
         BLEND_MAP_SIZE,
@@ -25,6 +26,7 @@ except ImportError:
         select_material_slots,
         write_png,
     )
+    from ddm.materials import is_foliage_render_state
 
 GODOT_SHADER_COMMON = """
 // Visual approximation reconstructed from KbBase P31/P33 sampler bindings.
@@ -211,6 +213,7 @@ CUSTOM_SHADER_FILE_NAME = "majin_multitexture.gdshader"
 FOLIAGE_SHADER_FILE_NAME = "majin_foliage.gdshader"
 SHADER_COMMON_FILE_NAME = "majin_material_common.gdshaderinc"
 ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
+IMPORT_INSTANCE_SCRIPT_FILE_NAME = "import_instance.gd"
 
 
 def write_godot_utility(destination, overwrite=True):
@@ -224,11 +227,21 @@ def write_godot_utility(destination, overwrite=True):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     written = []
+    instance_script_path = (
+        Path(__file__).resolve().parents[2]
+        / "godot" / "utility" / IMPORT_INSTANCE_SCRIPT_FILE_NAME
+    )
+    if not instance_script_path.is_file():
+        raise FileNotFoundError(
+            f"Missing Godot utility source: {instance_script_path}"
+        )
     for name, content in (
         (CUSTOM_SHADER_FILE_NAME, GODOT_CUSTOM_SHADER),
         (FOLIAGE_SHADER_FILE_NAME, GODOT_FOLIAGE_SHADER),
         (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
+        (IMPORT_INSTANCE_SCRIPT_FILE_NAME,
+         instance_script_path.read_text(encoding="utf-8")),
     ):
         path = destination / name
         if overwrite or not path.exists():
@@ -348,11 +361,7 @@ def _requires_custom_shader(material: dict, uniforms: dict, use_blend=False) -> 
 
 
 def _is_double_sided_cutout_foliage(material: dict) -> bool:
-    render_state = material.get("render_state") or {}
-    return bool(
-        render_state.get("mode") == "alpha_scissor"
-        and render_state.get("shader_key") == "0x00843105"
-    )
+    return is_foliage_render_state(material.get("render_state"))
 
 
 def _safe_resource_name(name: str) -> str:

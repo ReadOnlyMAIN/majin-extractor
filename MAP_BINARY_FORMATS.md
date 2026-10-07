@@ -184,9 +184,10 @@ Répartition des 332 instances :
 
 Ces cinq ressources sont des DDM très petits qui référencent les textures
 `si_map101_syokubutu*`; il s'agit donc de cartes ou touffes de végétation
-instanciées. Les 332 lignes ont `isPerVertex=1`, `isCullByDistance=1` et une
-distance de culling de 7 000 unités source. Les `GroupID` varient et doivent
-probablement permettre l'activation ou le culling groupé.
+instanciées. Les 332 lignes ont `isPerVertex=1` et `isCullByDistance=1`.
+266 placements utilisent une distance de culling de 7 000 unités source ; les
+66 placements de `ins109` utilisent 10 000 unités. Les `GroupID` varient et
+doivent probablement permettre l'activation ou le culling groupé.
 
 Pour une reconstruction Godot fidèle, `_ins` devra devenir un ou plusieurs
 `MultiMeshInstance3D`, avec les transforms converties dans le même repère et à

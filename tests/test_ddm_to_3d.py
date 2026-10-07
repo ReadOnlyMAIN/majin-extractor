@@ -104,6 +104,52 @@ class MapGeometryTests(unittest.TestCase):
             self.assertNotEqual(document['nodes'][0]['translation'],
                                 document['nodes'][1]['translation'])
 
+    def test_instance_asset_auto_mode_keeps_disconnected_foliage_together(self):
+        source = Path(
+            'game_files/decompressed/KB/instance/ins107/ins107'
+        )
+        if not source.exists():
+            self.skipTest('ins107 fixture is unavailable')
+        args = SimpleNamespace(
+            vertex_count=None, position_offset=None, index_offset=None,
+            index_count=None, no_textures=True, texture_root=None,
+            final=True, scale=0.01, object_mode='auto',
+        )
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / 'out'
+            with contextlib.redirect_stdout(io.StringIO()):
+                ddm.analyze_file(
+                    source, output, args,
+                    relative_path=Path('ins107/ins107'),
+                )
+            glb = (output / 'ins107/ins107.glb').read_bytes()
+            length = struct.unpack_from('<I', glb, 12)[0]
+            document = json.loads(glb[20:20 + length])
+            self.assertEqual(len(document['nodes']), 1)
+            self.assertEqual(len(document['meshes']), 1)
+            self.assertEqual(
+                document['nodes'][0]['extras']['separation'], 'single'
+            )
+            self.assertEqual(
+                document['nodes'][0]['extras']['origin'], 'source_origin'
+            )
+            self.assertEqual(document['nodes'][0]['translation'], [0.0, 0.0, 0.0])
+
+    def test_recursive_output_only_collapses_matching_container_name(self):
+        root = Path('output')
+        self.assertEqual(
+            ddm.output_directory_for(
+                Path('source/ins107/ins107'), root, Path('ins107/ins107'),
+            ),
+            root / 'ins107',
+        )
+        self.assertEqual(
+            ddm.output_directory_for(
+                Path('source/group/model'), root, Path('group/model'),
+            ),
+            root / 'group/model',
+        )
+
     def test_unresolved_texture_does_not_crash_or_become_diffuse(self):
         texture = {'conversion': None, 'role': 'unresolved'}
         ddm.classify_material_textures([texture])
@@ -208,6 +254,22 @@ class MapGeometryTests(unittest.TestCase):
             estimate['roughness_source'],
             'double_sided_cutout_foliage_shader_family',
         )
+
+        for shader_key in ('0x0082b105', '0x0086b105'):
+            instance_estimate = ddm.phong_to_pbr_estimate({
+                'shininess': 32.0,
+                'specular': [0.8, 0.8, 0.8],
+            })
+            ddm.apply_render_state_pbr_policy(instance_estimate, {
+                'mode': 'opaque',
+                'shader_key': shader_key,
+            })
+            self.assertEqual(instance_estimate['roughness'], 1.0)
+            self.assertEqual(instance_estimate['specular'], 0.0)
+            self.assertEqual(
+                instance_estimate['roughness_source'],
+                'double_sided_cutout_foliage_shader_family',
+            )
 
         opaque = ddm.phong_to_pbr_estimate({
             'shininess': 32.0,
