@@ -244,6 +244,110 @@ chacune des 16 sections. Elles ne doivent donc pas être connectées directement
 à des propriétés Godot avant comparaison croisée avec plusieurs maps et, si
 possible, avec les shaders ou le code du moteur.
 
+## Couche gameplay : `KB/data/map/mapXXXX`
+
+La géométrie et les instances visuelles de `KB/map/map101` ne constituent pas
+à elles seules la map jouable. Une seconde arborescence contient les objets
+avec logique, leurs transforms et les déclencheurs associés :
+
+```text
+KB/data/map/map0101/
+  effect
+  event
+  gimmick
+  placer
+  resource
+  RetryPoint
+```
+
+Les fichiers `effect`, `event`, `gimmick`, `placer` et `RetryPoint` portent le
+magic `\0lpt`. Les enregistrements observés contiennent au minimum :
+
+- une position XYZ écrite sous forme de chaîne décimale ;
+- un quaternion XYZW, également écrit sous forme de chaîne ;
+- un identifiant de ressource ou de type ;
+- des identifiants d'instance, flags et paramètres propres à l'objet.
+
+Les positions emploient les mêmes unités source que les autres données de map
+et doivent donc être multipliées par `0.01` pour le projet Godot. Le découpage
+complet des champs LPT reste à formaliser, mais les transforms et plusieurs
+références sont déjà directement vérifiables.
+
+Rôle observé ou probable de chaque table :
+
+| Fichier | Rôle | Confiance |
+| --- | --- | --- |
+| `placer` | placement des objets de gameplay et de leurs paramètres | confirmé pour les transforms et références principales |
+| `gimmick` | mécanismes interactifs propres à la map | fortement probable |
+| `event` | déclencheurs et volumes/points d'événements | fortement probable |
+| `effect` | placements et paramètres d'effets | fortement probable |
+| `RetryPoint` | positions et orientations de réapparition | fortement probable |
+| `resource` | manifeste des ressources `gim`, `enm` et `instance` requises | confirmé |
+
+### Arbre de soin/sauvegarde et totems de `map101`
+
+Le modèle `KB/gimmick/gim102/gim102` est l'arbre brillant. Son DDM référence
+notamment `ct_savetree_eda_c` et `ct_savetree_happa_c`. Son script appelle le
+système de jeu, et `map0101/placer` contient le placement suivant :
+
+```text
+ressource       gim102
+position source (-1662, -537, 16051)
+position Godot  (-16.62, -5.37, 160.51)
+quaternion      (0, 0, 0, 1)
+```
+
+Le modèle `gim650` correspond aux totems de checkpoint : ses scripts appellent
+explicitement `setRetryPoint`. Deux placements `gim650` sont présents dans
+`map0101/placer` :
+
+```text
+position source (-6890.775879, -748.649597, 16925.109375)
+position Godot  (-68.907759, -7.486496, 169.251094)
+quaternion      (0, 0.901221, 0, 0.433360)
+
+position source (-2192.416748, -429.767944, 11663.518555)
+position Godot  (-21.924167, -4.297679, 116.635186)
+quaternion      (0, 0.249179, 0, 0.968457)
+```
+
+Les quatre transforms de `map0101/RetryPoint` forment deux groupes proches de
+ces totems. Elles semblent représenter les positions exactes où replacer le
+joueur selon le checkpoint ou le sens d'entrée dans la zone ; cette relation
+spatiale est confirmée, mais la règle de sélection reste à décoder.
+
+Le manifeste HSC `map0101/resource` référence les gimmicks `102`, `610`,
+`650`, `659`, `673`, `118`, `119` et `656`, ainsi que les instances visuelles
+`107`, `108`, `109`, `110` et `111`.
+
+### Ennemis et combats de `map102`
+
+Le manifeste `KB/data/map/map0102/resource` définit trois ensembles ennemis :
+
+```text
+enm0 : 300
+enm1 : 300, 370
+enm2 : 300, 370
+```
+
+Les identifiants correspondent aux ressources `KB/chara/chr300` et
+`KB/chara/chr370`, nommées respectivement `ENEMY_300_ZAKO_A` et
+`ENEMY_370_NIGHT_A` dans la base de données des personnages.
+
+Les fichiers suivants complètent cette déclaration :
+
+| Fichier | Magic | Rôle probable |
+| --- | --- | --- |
+| `KB/map/map102/map102_battle` | `\0dab` | configuration de combat de base |
+| `map102_battle_1` | `\0dab` | placements/configuration de la variante `enm1` |
+| `map102_battle_2` | `\0dab` | placements/configuration de la variante `enm2` |
+| `map102_path` | `\0pvn` | chemins ou points de déplacement liés aux combats |
+| `map102_R0..R3` | `\0mvn` | régions et connexions de navigation |
+
+Les relations entre les variantes DAB et les lignes `enm0..enm2` sont très
+probables grâce aux noms et aux références croisées, mais le format interne
+DAB n'est pas encore suffisamment décodé pour exporter les spawns ennemis.
+
 ## Relations entre les ressources
 
 ```text
@@ -265,6 +369,14 @@ map101_R0 (MVN)
 
 map101.resource_f4fa1318 (EPM)
   └─ paramètres de scène classés en 16 sections
+
+KB/data/map/map0101 (LPT + HSC)
+  ├─ placements des objets de gameplay et gimmicks
+  ├─ événements, effets et points de réapparition
+  └─ manifeste vers KB/gimmick, KB/chara et KB/instance
+
+map102_battle* / map102_path (DAB + PVN)
+  └─ combats, spawns ennemis et chemins associés probables
 ```
 
 ## Priorités de recherche
@@ -279,3 +391,7 @@ map101.resource_f4fa1318 (EPM)
    catégorie à la fois, pour nommer les paramètres sans spéculation.
 5. Vérifier les relations entre `L0`, les distances de culling HSC et les
    éventuelles transitions de LOD observées dans le jeu.
+6. Formaliser le lecteur LPT et exporter `placer`, `gimmick`, `event`,
+   `effect` et `RetryPoint` vers des ressources ou scènes Godot.
+7. Décoder DAB et PVN pour reconstruire les groupes d'ennemis, leurs points de
+   spawn et leurs chemins de déplacement.
