@@ -57,24 +57,12 @@
             }
         },
         {
-            "name": "DDM: convert to GLB",
+            "name": "Godot: export selected folder",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
+            "program": "${workspaceFolder}/tools/conversion/export_folder_to_godot.py",
             "args": [
-                "${input:ddmSource}",
-                "${input:modelOutput}",
-                "--material-mode",
-                "${input:ddmMaterialMode}",
-                "--object-mode",
-                "${input:ddmObjectMode}",
-                "--recursive",
-                "--final",
-                "${input:ddmFinalOutput}",
-                "--scale",
-                "0.01",
-                "--texture-root",
-                "${input:ddmTextureRoot}"
+                "${input:godotExportSource}"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -171,10 +159,10 @@
             "default": "output/textures"
         },
         {
-            "id": "ddmSource",
+            "id": "godotExportSource",
             "type": "promptString",
-            "description": "DDM file or directory to convert recursively",
-            "default": "game_files/decompressed/KB/chara"
+            "description": "Extracted KB folder to export for Godot",
+            "default": "game_files/decompressed/KB/map/map101"
         },
         {
             "id": "ddmCharacterSource",
@@ -195,16 +183,6 @@
             "default": "output/decoded/chara"
         },
         {
-            "id": "ddmFinalOutput",
-            "type": "pickString",
-            "description": "Generate final GLB only (embedded textures)",
-            "options": [
-                "true",
-                "false"
-            ],
-            "default": "true"
-        },
-        {
             "id": "ddmMaterialMode",
             "type": "pickString",
             "description": "GLB material output",
@@ -216,28 +194,10 @@
             "default": "pbr"
         },
         {
-            "id": "ddmObjectMode",
-            "type": "pickString",
-            "description": "GLB object separation",
-            "options": [
-                "auto",
-                "connected",
-                "submeshes",
-                "single"
-            ],
-            "default": "auto"
-        },
-        {
             "id": "ddmExportScale",
             "type": "promptString",
             "description": "DDM position scale applied to GLB export",
             "default": "0.01"
-        },
-        {
-            "id": "ddmTextureRoot",
-            "type": "promptString",
-            "description": "Root used to resolve referenced XET textures",
-            "default": "game_files/decompressed"
         },
         {
             "id": "ddmAnimationClips",

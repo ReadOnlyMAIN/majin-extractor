@@ -265,6 +265,10 @@ def main(argv=None):
         "--reflect-z", action="store_true",
         help="Explicitly mirror transforms through Z for a mirrored mesh pipeline.",
     )
+    parser.add_argument(
+        "--require-existing-output-parent", action="store_true",
+        help="Fail instead of creating the output's parent directory.",
+    )
     args = parser.parse_args(argv)
     if not math.isfinite(args.position_scale) or args.position_scale <= 0.0:
         parser.error("--position-scale must be finite and greater than zero")
@@ -281,6 +285,8 @@ def main(argv=None):
         euler_order=args.euler_order,
         reflect_z=args.reflect_z,
     )
+    if args.require_existing_output_parent and not args.output.parent.is_dir():
+        parser.error(f"output directory does not exist: {args.output.parent}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(resource, encoding="utf-8", newline="\n")
     counts = {model: sum(i.model_name == model for i in instances)
