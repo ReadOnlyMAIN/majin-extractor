@@ -48,16 +48,17 @@ configuration if your files are stored elsewhere.
 - `PAK: extract a file or directory`;
 - `XET: convert a file or directory`;
 - `DDS: convert a file or directory`;
-- `DDM: convert to GLB`;
+- `Godot: export selected folder`;
 - `DDM: experimental animation` (root-motion research on a skinned character);
 - `DDM: debug manual layout (no textures)`.
 
-Recursive mode is enabled for the XET, DDS, and DDM converters. The DDM launch
-configuration also asks whether to generate final assets only. Select `true` to
-keep the self-contained GLB and its resolved textures; select `false` to include
-the reverse-engineering JSON diagnostics. It also asks for the model position
-scale, which defaults to `0.01` for the current centimeter-to-meter hypothesis.
-The PAK extractor asks for a worker count and defaults to `4`.
+Recursive mode is enabled for the XET and DDS converters. The Godot exporter
+asks for one extracted folder below `KB`. For example, selecting
+`game_files/decompressed/KB/map/map101` mirrors it to
+`output/decoded/map/map101`, runs the DDM conversion in Godot/final mode, then
+converts `map101_ins` to `map101_foliage.tres`. Folders without an `*_ins` table
+still export their DDM files and simply skip foliage generation. The PAK
+extractor asks for a worker count and defaults to `4`.
 
 ## Tasks
 
