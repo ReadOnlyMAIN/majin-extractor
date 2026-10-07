@@ -72,13 +72,15 @@ authoring granularity, not numerical instability in the converter, so the
 export records reduced confidence rather than inventing surface-dependent
 roughness values.
 
-The decoded double-sided cutout foliage family (`alpha_scissor`, shader key
-`0x00843105`) is an exception: it reuses the generic `Ks=.8, Ns=32` block but
-the original renderer selects a distinct shader variant. The exporter treats
-these thin cards as albedo-only diffuse surfaces: smoothness `0` (roughness
-`1`), specular `0`, and metallic `0`. It keeps the direct `.5520` roughness and
-`.40` specular conversions in `roughness_from_phong` and
-`specular_from_phong` for provenance.
+The decoded double-sided cutout foliage family is an exception. Map foliage
+uses `alpha_scissor` with shader key `0x00843105`; reusable instance foliage
+uses the related keys `0x0082b105` and `0x0086b105`, whose separate mode byte
+is zero even though their color textures contain transparent pixels. These
+variants reuse the generic `Ks=.8, Ns=32` block, but the original renderer
+selects a distinct shader family. The exporter treats the thin cards as
+albedo-only diffuse surfaces: smoothness `0` (roughness `1`), specular `0`, and
+metallic `0`. It keeps the direct `.5520` roughness and `.40` specular
+conversions in `roughness_from_phong` and `specular_from_phong` for provenance.
 
 ## Map101–Map103 binary correlation
 

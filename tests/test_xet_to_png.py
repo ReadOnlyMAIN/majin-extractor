@@ -55,9 +55,9 @@ class XetLayoutTests(unittest.TestCase):
         )
         self.assertEqual(tuple(rgba[:4]), (255, 0, 0, 255))
 
-    def test_xet_storage_flag_selects_dxt5_order(self):
+    def test_build_id_byte_does_not_change_standard_dxt5_order(self):
         data = bytearray(0x30)
-        self.assertTrue(xet_to_png.dxt5_color_first(data))
+        self.assertFalse(xet_to_png.dxt5_color_first(data))
         data[0x2f] = 0x80
         self.assertFalse(xet_to_png.dxt5_color_first(data))
 

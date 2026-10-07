@@ -556,11 +556,15 @@ mode 2 selects `TRANSPARENCY_ALPHA`. This retains Godot's native PBR,
 depth-prepass and shadow behavior where no source shader distinction requires
 custom handling.
 
-The cutout foliage key `0x00843105` uses `majin_foliage.gdshader`. Merely
-disabling culling leaves the source front normal on back-facing fragments and
-can invert their apparent sunlight response. The shader uses Godot's
-`FRONT_FACING` fragment input to negate `NORMAL` on the back face, performs
-alpha scissor at `0.5`, and fixes metallic/specular/roughness to `0/0/1`.
+The cutout foliage keys `0x00843105`, `0x0082b105`, and `0x0086b105` use
+`majin_foliage.gdshader`. The first is the map-material variant; the latter two
+occur on reusable `KB/instance` assets, including `ins107..111`. Their textures
+contain transparent pixels even though their separate mode byte is zero.
+Merely disabling culling leaves the source front normal on back-facing
+fragments and can invert their apparent sunlight response. The shader uses
+Godot's `FRONT_FACING` fragment input to negate `NORMAL` on the back face,
+performs alpha scissor at `0.5`, and fixes metallic/specular/roughness to
+`0/0/1`.
 
 Key `0x00847725` is materially different: `zimen` references, in order,
 `yuka3_c`, `yuka2_c`, `yuka3_n`, and `yuka2_n`. Its custom shader samples both

@@ -117,6 +117,14 @@ MATERIAL_BLEND_MODES = {
 
 
 FOLIAGE_ALPHA_SCISSOR_SHADER_KEY = "0x00843105"
+FOLIAGE_INSTANCE_SHADER_KEYS = {
+    "0x0082b105",
+    "0x0086b105",
+}
+FOLIAGE_SHADER_KEYS = {
+    FOLIAGE_ALPHA_SCISSOR_SHADER_KEY,
+    *FOLIAGE_INSTANCE_SHADER_KEYS,
+}
 FOLIAGE_ROUGHNESS = 1.0
 MAP_SURFACE_SHADER_KEYS = {
     "0x00807125",  # feathered terrain/detail
@@ -124,6 +132,14 @@ MAP_SURFACE_SHADER_KEYS = {
     "0x00847725",  # two-albedo/two-normal terrain blend
 }
 MAP_SURFACE_SPECULAR = 0.2
+
+
+def is_foliage_render_state(render_state) -> bool:
+    """Identify decoded map and reusable-instance foliage shader variants."""
+    return bool(
+        render_state
+        and render_state.get("shader_key") in FOLIAGE_SHADER_KEYS
+    )
 
 
 def apply_render_state_pbr_policy(estimate, render_state):
@@ -137,10 +153,7 @@ def apply_render_state_pbr_policy(estimate, render_state):
     """
     if not estimate or not render_state:
         return estimate
-    if (
-        render_state.get("mode") == "alpha_scissor"
-        and render_state.get("shader_key") == FOLIAGE_ALPHA_SCISSOR_SHADER_KEY
-    ):
+    if is_foliage_render_state(render_state):
         estimate["roughness_from_phong"] = estimate.get("roughness")
         estimate["specular_from_phong"] = estimate.get("specular")
         estimate["roughness"] = FOLIAGE_ROUGHNESS

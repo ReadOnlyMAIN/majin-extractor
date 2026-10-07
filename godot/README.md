@@ -10,6 +10,7 @@ resources can reference a stable path.
 | `majin_foliage.gdshader` | Albedo-only double-sided cutout foliage with corrected back-face normals. |
 | `majin_material_common.gdshaderinc` | Shared reconstructed lighting, normal and detail-layer implementation. |
 | `assign_materials.gd` | `EditorScenePostImport` import script that assigns generated native or custom `Material` resources by name. |
+| `import_instance.gd` | Instance-specific post-import script that assigns materials directly to one complete mesh and extracts it to `res://terrain/foliage/meshes/`. |
 
 The ordinary opaque and alpha-blend families are emitted as native
 `StandardMaterial3D` resources. The decoded double-sided alpha-scissor foliage
@@ -80,3 +81,22 @@ conversions) keep the materials assigned with no manual step.
 
 Nothing here is DDM-specific beyond the shader uniforms; the shader and the
 import script can be reused across every converted model.
+
+## Extracting reusable instance meshes
+
+Models below `KB/instance` are kept as one mesh automatically in the default
+`--object-mode auto`, even when foliage cards are disconnected. Their original
+DDM pivot is retained instead of recentering the mesh on its AABB, since the
+HSC transforms are relative to that source origin. Convert them with Godot
+material output, preserving the source directory layout:
+
+```bash
+python tools/conversion/ddm_to_3d.py game_files/decompressed/KB/instance output/instances --recursive --final --material-mode godot --texture-root game_files/decompressed/KB
+```
+
+Use `import_instance.gd` as the Godot Import Script for those GLBs. It expects
+exactly one `MeshInstance3D`, reads the sibling `material_bindings.json`, puts
+the matching generated materials directly on the mesh surfaces, and saves the
+result using the GLB filename. For example, importing `ins107.glb` creates
+`res://terrain/foliage/meshes/ins107.res`, matching the default paths emitted
+by `hsc_to_foliage.py`.

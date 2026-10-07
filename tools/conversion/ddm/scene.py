@@ -33,6 +33,22 @@ except ImportError:
     from godot_export import _fold_multipass_details, write_godot_material_assets
 
 
+def output_key_for(path: Path, relative_path: Path | None = None) -> Path:
+    """Return a stable model directory without duplicating named containers.
+
+    Extracted assets commonly use ``ins107/ins107`` or ``map101/map101``.
+    During recursive conversion the containing directory already identifies
+    the model, so appending the file stem again would create a redundant
+    ``ins107/ins107`` output directory.
+    """
+    if relative_path is None:
+        return Path(path.stem)
+    parent = relative_path.parent
+    if parent.name.casefold() == path.stem.casefold():
+        return parent
+    return parent / path.stem
+
+
 def analyze_file(
     path: Path,
     out_root: Path,
@@ -47,11 +63,7 @@ def analyze_file(
         return
 
     version = be_u32(data, 4)
-    output_key = (
-        Path(path.stem)
-        if relative_path is None
-        else relative_path.parent / path.stem
-    )
+    output_key = output_key_for(path, relative_path)
     out_dir = out_root / output_key
 
     periodic = find_periodic_marker_run(data)
@@ -353,9 +365,17 @@ def analyze_file(
         )
         write_indices(out_dir / "indices.csv", indices)
 
+    is_instance_asset = any(
+        component.casefold() == "instance" for component in path.parts[:-1]
+    )
     object_mode = getattr(args, "object_mode", "auto")
     if object_mode == "auto":
-        object_mode = "connected" if sections else "single"
+        # DDM instance assets are complete reusable props. Their disconnected
+        # cards (especially foliage) are parts of one model, not authoring
+        # instances to reconstruct as separate GLB nodes.
+        object_mode = "single" if is_instance_asset else (
+            "connected" if sections else "single"
+        )
     detail_folds = []
     excluded_materials = set()
     if uses_godot_materials(args):
@@ -369,6 +389,7 @@ def analyze_file(
         mode=object_mode, image_data=image_data,
         roughness=getattr(args, "roughness", None),
         excluded_materials=excluded_materials,
+        preserve_source_origin=is_instance_asset,
     )
     if uses_godot_materials(args):
         report["godot_materials"] = write_godot_material_assets(
