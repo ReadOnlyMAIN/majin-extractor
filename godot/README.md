@@ -9,8 +9,8 @@ resources can reference a stable path.
 | `majin_multitexture.gdshader` | Custom entry point for decoded effects outside `StandardMaterial3D`, notably Map101's two-albedo/two-normal `zimen` variant and folded detail layers. |
 | `majin_foliage.gdshader` | Albedo-only double-sided cutout foliage with corrected back-face normals. |
 | `majin_material_common.gdshaderinc` | Shared reconstructed lighting, normal and detail-layer implementation. |
-| `assign_materials.gd` | `EditorScenePostImport` import script that assigns generated native or custom `Material` resources by name. |
-| `import_instance.gd` | Instance-specific post-import script that assigns materials directly to one complete mesh and extracts it to `res://terrain/foliage/meshes/`. |
+| `assign_materials.gd` | Universal `EditorScenePostImport` script: assigns generated materials on every model and reconnects IK when character target bones are present. |
+| `import_instance.gd` | Deprecated compatibility script; `assign_materials.gd` now also handles explicitly tagged reusable instances. |
 
 The ordinary opaque and alpha-blend families are emitted as native
 `StandardMaterial3D` resources. The decoded double-sided alpha-scissor foliage
@@ -61,7 +61,7 @@ write_godot_utility("/path/to/godot_project/majin_utility")
 
 A GLB (glTF 2.0) is a self-contained container and imports as
 `StandardMaterial3D`; it cannot reference the external `.tres` resources.
-`assign_materials.gd` is an **import script**
+`assign_materials.gd` is the single general-purpose **import script**
 (`@tool extends EditorScenePostImport`) that fixes this automatically on every
 import/reimport:
 
@@ -77,7 +77,32 @@ import/reimport:
    counted in the Output panel.
 
 Because the script runs on every import, later reimports (texture changes, new
-conversions) keep the materials assigned with no manual step.
+conversions) keep the materials assigned with no manual step. Use this same
+script for maps, ordinary models, and characters; it detects character IK from
+the exported control-bone names and otherwise performs no character-specific
+work.
+
+## Experimental humanoid IK
+
+Convert a humanoid with `--experimental-humanoid-ik-mode godot` in addition to
+the experimental animation options. Unlike `bake`, this preserves the FK limb
+rotations for Godot and adds four unweighted animated control
+bones named `ik_hand_l_target`, `ik_hand_r_target`,
+`ik_foot_l_target`, and `ik_foot_r_target`. Select the GLB in Godot's Import
+tab, set the same `res://majin_utility/assign_materials.gd` as its Import
+Script, and reimport it. The script assigns the character materials, then
+creates `ModifierBoneTarget3D` adapters, four pole
+nodes, and one `TwoBoneIK3D` modifier after the animation system. Because that
+solver ignores target rotation, a following `CopyTransformModifier3D` copies
+only the target rotations onto the four end bones; their IK-solved positions
+remain intact.
+
+The pole positions are anatomical defaults, not yet decoded animation data.
+They remain editable in the imported scene for knee/elbow alignment tests.
+By default, target orientations use the source engine's row-vector convention,
+transposed into Godot space and made relative to the selected reference pose.
+Use `--experimental-ik-target-orientation none` for the position-only control
+comparison.
 
 Nothing here is DDM-specific beyond the shader uniforms; the shader and the
 import script can be reused across every converted model.
@@ -94,9 +119,10 @@ material output, preserving the source directory layout:
 python tools/conversion/ddm_to_3d.py game_files/decompressed/KB/instance output/instances --recursive --final --material-mode godot --texture-root game_files/decompressed/KB
 ```
 
-Use `import_instance.gd` as the Godot Import Script for those GLBs. It expects
-exactly one `MeshInstance3D`, reads the sibling `material_bindings.json`, puts
-the matching generated materials directly on the mesh surfaces, and saves the
-result using the GLB filename. For example, importing `ins107.glb` creates
+Use the same `assign_materials.gd` Import Script for those GLBs. The converter
+tags their manifest with `asset_kind: instance`; the universal script then
+expects exactly one `MeshInstance3D`, puts the matching generated materials
+directly on its surfaces, and saves the result using the GLB filename. For
+example, importing `ins107.glb` creates
 `res://terrain/foliage/meshes/ins107.res`, matching the default paths emitted
 by `hsc_to_foliage.py`.

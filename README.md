@@ -198,34 +198,94 @@ apparently supplied by state/gameplay logic outside the scalar clip. Per-clip
 initial/final root transforms are recorded in `analysis.json` so such
 non-standalone motions can be identified without relying on their names.
 
-For focused `chr300` experiments, selected scalar triples can be interpreted as
-absolute extrinsic XYZ Euler angles. Implicit components retain their bind-pose
-angle. This interpretation preserves the head and torso in the initial test,
-but the mask, arms, lower body, and tentacle chains prove that it is not the
-complete rig binding. In particular, treating positions `5 + 4*j .. 7 + 4*j`
-as Euler values and ignoring the fourth position is only a working hypothesis,
-not a decoded format. `--experimental-rotation-units auto` is retained for
-reproducing that experiment; its radians/degrees split is not established.
-The command writes a separately named `_motion_experimental_auto.glb`:
+Cross-character comparison invalidated the former contiguous joint-suffix
+interpretation. After the eight verified root scalars, related humanoid rigs
+store ordered three-scalar transform groups for both skeleton joints and
+auxiliary rig controls. `chr302` has 66 groups for 42 non-root joints, leaving
+24 auxiliary groups; `chr303` inserts exactly 20 groups when its 20 additional
+bones appear; `chr301` has 30 auxiliary groups. The controls are interleaved by
+anatomical segment, not collected in a prefix or suffix. Within each observed
+humanoid segment, joint triplets follow skeleton order and are followed by a
+fixed control block: 3 controls after the trunk and each arm, 1 after the
+pelvis, and 7 after each leg. `chr301` additionally has 6 controls after its
+accessory chain. The experimental humanoid export now uses this structural
+binding and emits rotations for every skeleton joint needed by the hierarchy;
+only auxiliary rig-control triplets outside the skeleton are omitted. The Euler space/order interpretation remains
+experimental, while root motion remains independently available.
+The 332/334/336/338 layouts (and their chr302/303 equivalents) also contain
+optional two-scalar controller sections rather than a simple truncated suffix;
+their indices are remapped before binding. Cross-character equality identifies
+model-space IK targets for both wrists and ankles. The opt-in
+`--experimental-humanoid-ik-mode bake` probe bakes those targets through
+two-bone chains instead of interpreting their position values as Euler angles.
+Use `--experimental-humanoid-ik-mode godot` to preserve the decoded FK curves
+and export four controls for a Godot runtime solver. The triplet following each
+target can be disabled with `--experimental-ik-target-orientation none`. Its
+default `source-row` interpretation treats it as an absolute Euler orientation
+using the same row-vector-to-Godot transpose established for HSC instances,
+then cancels the selected reference pose. Its exact semantics remain
+experimental. The legacy `--experimental-humanoid-ik` and
+`--experimental-export-ik-targets` flags remain aliases for `bake` and `godot`.
+`--experimental-rotation-units auto` is retained for comparison. The bound
+joint curves use radians by default: their extrema repeatedly land near
+multiples of pi, consistently with the verified root Euler channels.
+
+`--experimental-rotation-axes` keeps the stored `xyz` component order and can
+emit separately named axis-permutation probes. Structurally bound humanoid
+triplets are composed as Euler deltas in each joint's local bind space. The
+default model is `bind_local * delta`; `--experimental-rotation-model` can emit
+the reversed composition as a separately named comparison probe.
+`--experimental-rotation-signs` independently controls the source-component
+signs. The `zyx` coordinate-basis probe uses `---` to account for the odd
+X/Z permutation's handedness change.
+
+The earlier `--experimental-controller-bake` probe is retained only for code
+comparison. It cannot repair the newly established interleaved layout and is
+not reached by automatic joint export.
+
+The command writes a separately named `_motion_experimental.glb`:
 
 ```bash
 python tools/conversion/ddm_to_3d.py \
   game_files/decompressed/KB/chara/chr300/chr300 output \
   --animation-clips 0 --experimental-root-motion \
   --experimental-rotation-joints 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61 \
-  --experimental-rotation-units auto
+  --experimental-rotation-units degrees
+```
+
+For the 81-joint humanoid `chr301`, export a first complete test without
+spelling out every joint index:
+
+```bash
+python tools/conversion/ddm_to_3d.py \
+  game_files/decompressed/KB/chara/chr301/chr301 output \
+  --animation-clips 0 --experimental-root-motion \
+  --experimental-rotation-joints all \
+  --experimental-rotation-units degrees
+```
+
+For reference-pose diagnostics, a clip endpoint can be cancelled before the
+Euler curves are composed with the local bind pose. The root heading can also
+be excluded when it duplicates the root joint's local Y rotation:
+
+```bash
+python tools/conversion/ddm_to_3d.py \
+  game_files/decompressed/KB/chara/chr301/chr301 output \
+  --animation-clips 0,2,3,8 --experimental-root-motion \
+  --experimental-root-rotation-source local \
+  --experimental-rotation-joints all \
+  --experimental-rotation-reference-clip 8 \
+  --experimental-rotation-reference-frame end
 ```
 
 The state-sequence table supplies original clip names. For example,
 `motion_000` is `c300_0000_boredom_01_00`; these names are preserved in the
 analysis report and exported glTF animation.
 
-An attempted three-scalars-per-joint prefix layout was rejected after visual
-testing: it rotates the torso by approximately 90 degrees around X and then Y
-and propagates that error to the head and tentacles. It is not available as a
-converter option. Cross-character comparison also shows that descriptor counts
-are rig-dependent, so the numerical identity `253 = 5 + 4*62` must not be
-generalized to other characters.
+Earlier four-scalars-per-joint and contiguous three-scalars-per-joint layouts
+were both rejected. Descriptor counts are rig-dependent, and arithmetic
+identities such as `253 = 5 + 4*62` or `338 = 95 + 3*81` do not establish a
+scalar-to-joint binding.
 
 `chr300.crg` is a separate character-rig graph. Its eight fixed 128-byte
 records are now exposed in `analysis.json`, including referenced bone IDs,

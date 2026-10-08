@@ -469,6 +469,14 @@ class GodotUtilityTests(unittest.TestCase):
             (repo_utility / "assign_materials.gd").read_text(),
             GODOT_ASSIGN_SCRIPT,
         )
+        universal_importer = (repo_utility / "assign_materials.gd").read_text()
+        self.assertIn('ClassDB.class_exists(&"TwoBoneIK3D")', universal_importer)
+        self.assertIn('IK_CHAINS', universal_importer)
+        self.assertIn('CopyTransformModifier3D', universal_importer)
+        self.assertIn('"set_copy_flags", index, 2', universal_importer)
+        self.assertIn('_assign_recursive(scene, assignments, missing)', universal_importer)
+        self.assertIn('_asset_kind == "instance"', universal_importer)
+        self.assertIn('ResourceSaver.save(extracted, mesh_path)', universal_importer)
 
     def test_write_godot_utility_copies_shader_and_script(self):
         with tempfile.TemporaryDirectory() as root:

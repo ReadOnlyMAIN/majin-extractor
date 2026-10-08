@@ -311,13 +311,58 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         if external_motion else None
     )
     skeleton = decode_skinned_skeleton(data, transform_bone_ids)
+    geometry = decode_skinned_geometry(data, header, skeleton)
+    deforming_bone_ids = {
+        bone_id
+        for section in geometry["sections"]
+        for bone_id in section["palette_ids"]
+    }
+    deforming_joint_indices = [
+        joint["index"] for joint in skeleton.get("joints", [])
+        if joint["global_id"] in deforming_bone_ids
+    ]
+    rotation_joints = getattr(args, "experimental_rotation_joints", None)
+    if rotation_joints == "all":
+        rotation_joints = list(range(len(skeleton.get("joints", []))))
     animations = decode_character_animations(
         external_motion, skeleton, getattr(args, "animation_clips", None),
         getattr(args, "experimental_root_motion", False),
-        getattr(args, "experimental_rotation_joints", None),
-        getattr(args, "experimental_rotation_units", "degrees"),
+        rotation_joints,
+        getattr(args, "experimental_rotation_units", "radians"),
+        deforming_joint_indices,
+        getattr(args, "experimental_rotation_axes", "xyz"),
+        getattr(args, "experimental_rotation_signs", "+++"),
+        getattr(args, "experimental_rotation_model", "local_delta_post"),
+        getattr(args, "experimental_rotation_reference_clip", None),
+        getattr(args, "experimental_rotation_reference_frame", "end"),
+        getattr(args, "experimental_root_rotation_source", "combined"),
+        getattr(args, "experimental_deforming_rotations_only", False),
+        getattr(args, "experimental_humanoid_ik", False),
+        getattr(args, "experimental_export_ik_targets", False),
+        getattr(args, "experimental_ik_target_orientation", "source-row"),
     )
-    geometry = decode_skinned_geometry(data, header, skeleton)
+    ik_control_indices = {}
+    for animation in animations:
+        for channel in animation.get("channels", []):
+            control_name = channel.get("ik_control")
+            if not control_name or control_name in ik_control_indices:
+                continue
+            joint_index = len(skeleton["joints"])
+            skeleton["joints"].append({
+                "index": joint_index,
+                "global_id": -(joint_index + 1),
+                "parent": None,
+                "translation": (0.0, 0.0, 0.0),
+                "rotation": (0.0, 0.0, 0.0, 1.0),
+                "name": control_name,
+                "ik_control": True,
+            })
+            ik_control_indices[control_name] = joint_index
+    for animation in animations:
+        for channel in animation.get("channels", []):
+            control_name = channel.get("ik_control")
+            if control_name:
+                channel["joint"] = ik_control_indices[control_name]
     vertices = geometry["vertices"]
     mesh_parts = geometry["mesh_parts"]
     material_count = max(part["material_index"] for part in mesh_parts) + 1
@@ -358,11 +403,46 @@ def analyze_skinned_file(path, data, out_dir, args, header):
 
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = ""
-    if getattr(args, "experimental_rotation_joints", None):
+    if rotation_joints:
         suffix = "_motion_experimental"
-        units = getattr(args, "experimental_rotation_units", "degrees")
+        units = getattr(args, "experimental_rotation_units", "radians")
         if units != "degrees":
             suffix += f"_{units}"
+        axes = getattr(args, "experimental_rotation_axes", "xyz")
+        if axes != "xyz":
+            suffix += f"_axes_{axes}"
+        signs = getattr(args, "experimental_rotation_signs", "+++")
+        if signs != "+++":
+            suffix += "_signs_" + signs.replace("+", "p").replace("-", "m")
+        model = getattr(args, "experimental_rotation_model", "local_delta_post")
+        suffix += f"_{model}"
+        reference_clip = getattr(
+            args, "experimental_rotation_reference_clip", None,
+        )
+        if reference_clip is not None:
+            reference_frame = getattr(
+                args, "experimental_rotation_reference_frame", "end",
+            )
+            suffix += f"_ref_{reference_clip}_{reference_frame}"
+        if getattr(args, "experimental_controller_bake", False):
+            suffix += "_controllers"
+        if getattr(args, "experimental_deforming_rotations_only", False):
+            suffix += "_deforming_only"
+        if getattr(args, "experimental_humanoid_ik", False):
+            suffix += "_ik_baked"
+        if getattr(args, "experimental_export_ik_targets", False):
+            suffix += "_ik_godot_targets"
+        if (getattr(args, "experimental_humanoid_ik", False)
+                or getattr(args, "experimental_export_ik_targets", False)):
+            orientation = getattr(
+                args, "experimental_ik_target_orientation", "source-row",
+            )
+            suffix += f"_orientation_{orientation.replace('-', '_')}"
+        root_source = getattr(
+            args, "experimental_root_rotation_source", "combined",
+        )
+        if root_source != "combined":
+            suffix += f"_root_{root_source}"
     mesh_path = out_dir / f"{path.stem}{suffix}.glb"
     result = write_skinned_glb(
         mesh_path,
@@ -384,6 +464,12 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             mesh_parts=mesh_parts,
             scale=args.scale,
             radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
+            asset_kind="character",
+            ik_target_orientation=(
+                getattr(args, "experimental_ik_target_orientation", "none")
+                if getattr(args, "experimental_export_ik_targets", False)
+                else "none"
+            ),
         )
     report = {
         "file": str(path),
@@ -409,8 +495,13 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         ),
         "animations": animations,
         "animation_note": (
-            "Only the selected clips' verified root translation and heading are exported; joint "
-            "rotations remain unresolved and omitted."
+            "The selected clips export verified root motion plus an experimental "
+            "XYZ Euler deltas composed in local bind space for structurally bound humanoid joints"
+            + ("; matching unskinned duplicate controllers are baked onto deforming joints."
+               if getattr(args, "experimental_controller_bake", False) else ".")
+            if animations and rotation_joints else
+            "Only the selected clips' verified root translation and heading are exported; "
+            "joint rotations remain unresolved and omitted."
             if animations else
             "External scalar curves are decoded and validated, but their association "
             "with joint transforms remains unresolved. No guessed animation is exported."

@@ -19,6 +19,12 @@ def parse_int(value: str):
     return int(value, 0)
 
 
+def parse_joint_indices(value: str):
+    if value.strip().casefold() == "all":
+        return "all"
+    return [int(index.strip()) for index in value.split(",") if index.strip()]
+
+
 def parse_bool(value: str):
     normalized = value.strip().lower()
     if normalized in {"1", "true", "yes", "on"}:
@@ -153,18 +159,116 @@ def main():
     )
     ap.add_argument(
         "--experimental-rotation-joints",
-        type=lambda value: [int(index.strip()) for index in value.split(",") if index.strip()],
+        type=parse_joint_indices,
         help=(
-            "Export experimental absolute XYZ Euler rotations for the "
-            "listed joint indices. Requires --experimental-root-motion and "
-            "a 5+4*joints descriptor layout; the fourth scalar per joint is "
-            "ignored pending identification."
+            "Export structurally bound humanoid joint triplets for the listed "
+            "joint indices, or 'all'. Auxiliary controls outside the skeleton "
+            "are omitted; transform semantics remain experimental."
         ),
     )
     ap.add_argument(
-        "--experimental-rotation-units", choices=("degrees", "radians", "auto"),
-        default="degrees",
+        "--experimental-rotation-units",
+        choices=("degrees", "radians", "auto", "adaptive"),
+        default="radians",
         help="Angle units for the experimental XYZ rotation interpretation.",
+    )
+    ap.add_argument(
+        "--experimental-rotation-axes",
+        choices=("xyz", "xzy", "yxz", "yzx", "zxy", "zyx"),
+        default="xyz",
+        help=(
+            "Map the three stored rotation components onto target axes. "
+            "The default 'xyz' preserves the global-delta baseline."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-root-rotation-source",
+        choices=("combined", "local", "heading"), default="combined",
+        help=(
+            "Choose the root rotation channel. 'combined' preserves the old "
+            "probe; 'local' avoids adding the extracted heading twice."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-rotation-signs",
+        choices=("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---"),
+        default="+++",
+        help=(
+            "Signs applied to the three stored rotation components before "
+            "row-vector conversion. The default preserves the baseline."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-controller-bake", action="store_true",
+        help=(
+            "Bake matching unskinned duplicate-controller curves onto deforming "
+            "joints. Disabled by default to preserve the global-delta baseline."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-deforming-rotations-only", action="store_true",
+        help=(
+            "Animate only joints referenced by skin palettes; keep IK/control "
+            "helpers at their bind transforms."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-humanoid-ik", action="store_true",
+        help=(
+            "Deprecated alias for --experimental-humanoid-ik-mode bake."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-export-ik-targets", action="store_true",
+        help=(
+            "Deprecated alias for --experimental-humanoid-ik-mode godot."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-humanoid-ik-mode",
+        choices=("none", "bake", "godot"), default="none",
+        help=(
+            "Humanoid IK output: 'bake' writes portable solved limb rotations; "
+            "'godot' preserves FK rotations and embeds wrist/ankle targets for "
+            "Godot TwoBoneIK3D; 'none' disables IK processing."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-ik-target-orientation",
+        choices=("source-row", "none"), default="source-row",
+        help=(
+            "Interpret the triplet following each IK position as an absolute "
+            "source-engine row-vector Euler orientation, or ignore it. "
+            "'source-row' transposes/inverts it into Godot/glTF space and "
+            "cancels the selected reference pose."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-rotation-model",
+        choices=(
+            "local_delta_post", "local_delta_pre", "local_absolute", "global_delta",
+            "global_delta_active", "global_delta_row", "global_delta_row_inverse",
+            "global_reference_active", "global_reference_active_inverse",
+            "global_reference_row", "global_reference_row_inverse",
+        ),
+        default="local_delta_post",
+        help=(
+            "Compose bound Euler curves with the bind pose. The default applies "
+            "the delta in each joint's local bind axes."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-rotation-reference-clip", type=int,
+        help=(
+            "Cancel each joint's stored orientation at one reference clip "
+            "endpoint before applying it in local bind space. This tests "
+            "whether curves are absolute orientations around a neutral pose."
+        ),
+    )
+    ap.add_argument(
+        "--experimental-rotation-reference-frame",
+        choices=("start", "end"), default="end",
+        help="Endpoint used by --experimental-rotation-reference-clip.",
     )
     ap.add_argument("--position-offset", type=parse_int)
     ap.add_argument("--index-offset", type=parse_int)
@@ -199,6 +303,40 @@ def main():
         args.material_mode = "godot"
     if args.material_mode == "godot" and args.no_textures:
         ap.error("--material-mode godot cannot be used with --no-textures")
+    legacy_ik_mode = (
+        "godot" if args.experimental_export_ik_targets else
+        "bake" if args.experimental_humanoid_ik else "none"
+    )
+    if (args.experimental_humanoid_ik
+            and args.experimental_export_ik_targets):
+        ap.error(
+            "Use one --experimental-humanoid-ik-mode; bake and godot are "
+            "distinct output pipelines."
+        )
+    if (args.experimental_humanoid_ik_mode != "none"
+            and legacy_ik_mode != "none"
+            and args.experimental_humanoid_ik_mode != legacy_ik_mode):
+        ap.error("Conflicting experimental humanoid IK modes")
+    if args.experimental_humanoid_ik_mode == "none":
+        args.experimental_humanoid_ik_mode = legacy_ik_mode
+    args.experimental_humanoid_ik = (
+        args.experimental_humanoid_ik_mode == "bake"
+    )
+    args.experimental_export_ik_targets = (
+        args.experimental_humanoid_ik_mode == "godot"
+    )
+    if (args.experimental_humanoid_ik_mode != "none"
+            and not args.experimental_root_motion):
+        ap.error(
+            "--experimental-humanoid-ik-mode requires "
+            "--experimental-root-motion"
+        )
+    if (args.experimental_humanoid_ik_mode != "none"
+            and not args.experimental_rotation_joints):
+        ap.error(
+            "--experimental-humanoid-ik-mode requires "
+            "--experimental-rotation-joints"
+        )
     if args.experimental_rotation_joints and not args.experimental_root_motion:
         ap.error("--experimental-rotation-joints requires --experimental-root-motion")
     if not math.isfinite(args.scale) or args.scale <= 0.0:
