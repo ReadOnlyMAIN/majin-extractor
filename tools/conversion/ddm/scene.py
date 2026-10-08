@@ -399,6 +399,7 @@ def analyze_file(
             scale=args.scale,
             radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
             detail_folds=detail_folds,
+            asset_kind="instance" if is_instance_asset else "model",
         )
 
     for part in mesh_parts:
