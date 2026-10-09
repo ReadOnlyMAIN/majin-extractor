@@ -36,6 +36,13 @@ def parse_bool(value: str):
     )
 
 
+def ik_output_flags(mode: str):
+    """Return independent offline-bake and Godot-target output switches."""
+    if mode not in ("none", "bake", "godot"):
+        raise ValueError(f"Unknown humanoid IK mode: {mode}")
+    return mode == "bake", mode == "godot"
+
+
 def iter_input_files(path: Path, recursive: bool = False):
     if path.is_file():
         yield path
@@ -183,10 +190,12 @@ def main():
     )
     ap.add_argument(
         "--experimental-root-rotation-source",
-        choices=("combined", "local", "heading"), default="combined",
+        choices=("local", "heading", "combined"), default="local",
         help=(
-            "Choose the root rotation channel. 'combined' preserves the old "
-            "probe; 'local' avoids adding the extracted heading twice."
+            "Choose the root rotation channel. 'local' exports bone_000's "
+            "complete XYZ Euler rotation from scalars 5..7. 'heading' keeps "
+            "only scalar 0's Y heading for diagnostics. 'combined' is the "
+            "rejected double-turn comparison probe."
         ),
     )
     ap.add_argument(
@@ -229,8 +238,9 @@ def main():
         choices=("none", "bake", "godot"), default="none",
         help=(
             "Humanoid IK output: 'bake' writes portable solved limb rotations; "
-            "'godot' preserves FK rotations and embeds wrist/ankle targets for "
-            "Godot TwoBoneIK3D; 'none' disables IK processing."
+            "'godot' writes the same bind-pose-constrained solution and also "
+            "embeds wrist/ankle targets for Godot TwoBoneIK3D; 'none' disables "
+            "IK processing."
         ),
     )
     ap.add_argument(
@@ -319,11 +329,11 @@ def main():
         ap.error("Conflicting experimental humanoid IK modes")
     if args.experimental_humanoid_ik_mode == "none":
         args.experimental_humanoid_ik_mode = legacy_ik_mode
-    args.experimental_humanoid_ik = (
-        args.experimental_humanoid_ik_mode == "bake"
-    )
-    args.experimental_export_ik_targets = (
-        args.experimental_humanoid_ik_mode == "godot"
+    (
+        args.experimental_humanoid_ik,
+        args.experimental_export_ik_targets,
+    ) = ik_output_flags(
+        args.experimental_humanoid_ik_mode,
     )
     if (args.experimental_humanoid_ik_mode != "none"
             and not args.experimental_root_motion):

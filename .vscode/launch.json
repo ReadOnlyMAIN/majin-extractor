@@ -88,6 +88,10 @@
                 "${input:ddmRotationJoints}",
                 "--experimental-rotation-units",
                 "${input:ddmRotationUnits}",
+                "--experimental-rotation-model",
+                "local_delta_post",
+                "--experimental-root-rotation-source",
+                "local",
                 "--scale",
                 "${input:ddmExportScale}"
             ],
@@ -209,7 +213,7 @@
             "id": "ddmRotationJoints",
             "type": "promptString",
             "description": "Comma-separated experimental rotation joint indices",
-            "default": "0"
+            "default": "all"
         },
         {
             "id": "ddmRotationUnits",
@@ -220,7 +224,7 @@
                 "radians",
                 "auto"
             ],
-            "default": "degrees"
+            "default": "radians"
         },
         {
             "id": "ddmVertexCount",

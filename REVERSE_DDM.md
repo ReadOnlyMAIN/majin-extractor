@@ -1113,6 +1113,473 @@ NEXT PRIORITY:
 
 ---
 
+# 27. Generic discriminating fields (cross-character survey)
+
+The decoder must pick the correct layout for **every** DDM in the game from the
+bytes alone, never from a file name or a hard-coded offset. This section records
+the fields that actually vary between files and whether they can be trusted as
+discriminants.
+
+Reproduce the raw survey with:
+
+```bash
+python research/ddm_variant_probe.py            # every chara/ + map/ DDM
+python research/ddm_structural_scan.py chara    # structural fields per char
+python research/ddm_variant_probe.py --fourcc data_base
+```
+
+## 27.1 The envelope is *not* a discriminant
+
+Every DDM in `KB/chara` (112 files) and `KB/map` (67 files) shares the exact
+same 0x80-byte envelope prefix:
+
+```text
+0x00  \0ddm                     magic
+0x04  00 00 00 03               version word, always 3
+0x08  8f 01 00 33  (or 8f 00 00 33)   type word — see below
+0x0C  00 00 00 23               flags word, always 0x23 = 35
+0x10  00 00 00 01               constant 1 on every observed file
+0x14..0x27                      zero
+0x28  <8 bytes>                 build id / content hash — see 27.3
+0x80  <uint32>                  per-file size word — see 27.4
+0x90  <float32>                 bounding-sphere radius — see 27.4
+```
+
+**Confidence: confirmed.** The version word is *never* a usable layout
+discriminant: static maps and skinned characters both report `3`. The current
+`KNOWN_DDM_VERSIONS` table in `tools/conversion/ddm/binary.py` therefore cannot
+separate the two families. Layout selection has to be structural (see 27.5).
+
+## 27.2 Type word `0x8f010033` vs `0x8f000033`
+
+Cross-character counts:
+
+| Group | `0x8f010033` | `0x8f000033` |
+| --- | ---: | ---: |
+| `chara` | 94 | 18 |
+| `map` | 53 | 14 |
+
+The single differing bit is `0x00010000`. The `0x8f000033` group is **not**
+build-order ordered (it mixes the old `chr145-156`, `map697/698` with the newer
+`chr727-729`, `chr990-992`), so it does not encode a revision. It correlates
+with a small, stable set of characters/maps and looks like an **authoring/tool
+variant** flag.
+
+**Confidence: confirmed that the field varies; medium for its meaning.** It is a
+*reliable discriminator* (byte-exact and stable) but its semantics are unknown.
+It must **not** be used to choose the geometry layout: both groups contain
+skinned characters and static maps, so the bit is orthogonal to the layout.
+
+## 27.3 Build id at `0x28`
+
+The 8-byte word at `0x28` is unique per file and, sorted across the corpus,
+produces a monotonic timeline of when each asset was exported (for example
+`map697 < chr905 < ... < map209`). It is almost certainly a build timestamp or
+content hash of the export.
+
+**Confidence: high for "per-file build/time id", low for the exact encoding.**
+Useful only for diagnostics; it must not gate a layout.
+
+## 27.4 There is *no* reliable header-level family discriminant
+
+An initial hypothesis that a header field (e.g. the word at `0x74`) separates
+skinned characters from static maps was **tested and rejected**. The whole
+0x00–0x80 header is byte-identical between a skinned character (`chr301`) and a
+static map (`map101`) apart from the build id at `0x28`:
+
+```text
+0x74  = 0 on every DDM      (not a discriminant)
+0x80  = per-file size word   skin 288..43824 (median 29184)
+                             stat 288..18624 (median 816)   -- ranges overlap
+0x90  = bounding-sphere radius float
+                             skin 28..4114    stat 5.6..22648  -- ranges overlap
+0xB0  = transform count on skinned DDMs, but OBB/other on maps
+```
+
+`0x80` and the radius at `0x90` correlate with *content*, not with the layout
+family, and both overlap across families. **Confidence: confirmed by exhausting
+the corpus (112 chara + 67 map DDMs).** The static/skinned decision therefore
+must remain **structural** — i.e. probe for the skinned geometry signature
+(`u32 == 8` at the group header, validated by the section bounds) and fall back
+to the map-section detector, exactly as `analyze_file` already does.
+
+The value at `0x80` is still worth documenting as a **sanity gate**: it is
+nonzero on every file and looks like a per-file block size (the two families
+with `0x80 == 0` were not observed).
+
+## 27.5 The word at `0xB0` is the transform count, at `0xB4` the stored bone-id table
+
+On **skinned** DDMs, `0xB0` is the bind-skeleton transform count (chr300 = 62,
+chr301 = 81, chr302 = 43, chr500 = 199). `0xB4` starts a byte-per-bone id table
+**stored as little-endian 32-bit words** — see section 28 for the confirmed
+storage order. The **raw first byte at `0xB4` is *not* the root bone id**: it is
+the fourth id of the first word (again, see section 28).
+Corrections to the table below:
+
+- the **real root id is always `0`** once the 4-byte words are un-reversed
+  (verified on every tested rig: chr300/301/302/303/500/100/200/320/900/350/380/940/722);
+- the raw first byte nevertheless remains a **byte-exact, reliable family
+  discriminant** (values `101`, `3`, `102`, `71`, `91`, `11`, `0`) — it names the
+  empirically observed rig family, not the root's identity.
+
+| Raw first byte at `0xB4` | Family | Examples |
+| ---: | --- | --- |
+| `101` (`0x65`) | humanoid v4 | chr300/301/302/303, chr200/2xx, chr500/510, chr800/810/820 |
+| `3` (`0x03`) | humanoid variant | chr320/321, chr340/341, chr360/361, chr520/530/540, chr550/560 |
+| `102` (`0x66`) | large boss | chr500 |
+| `11`, `91`, `71`, `0`, `2` | props/weapons/misc | chr940, chr380, chr350, chr7xx, chr910/930/990 |
+
+**Confidence: confirmed that `0xB0` is the transform count and that the raw
+first byte names a rig family; high that the *root id itself* is always `0`.
+This is the field to key motion binding on
+(matching `MOTION_ANALYSIS.md`, which proves chr300 fails the v4 triplet test).**
+
+A useful derived discriminant is `(transform_count - 8) % 3`:
+
+```text
+chr301 = 81  -> (81-8)%3  = 1   (humanoid v4, root scalars + triplets)
+chr300 = 62  -> (62-8)%3  = 0   — but MOTION_ANALYSIS shows chr300 is v3
+```
+
+The motion side still finds chr300's scalar count `245 % 3 = 2`, i.e. chr300's
+**animation** layout is an older one; this confirms the geometry/motion families
+are selected by different fields and must be probed independently.
+
+## 27.5b A distinct "2-bone prop" family exists
+
+34 character DDMs share an identical header signature that is **neither** the
+skinned-character signature **nor** the map signature. Verified list:
+
+```text
+chr700 chr705 chr710 chr715 chr720 chr721 chr723 chr724 chr725 chr726
+chr727 chr728 chr729 chr740 chr741 chr742 chr743 chr744 chr745 chr746
+chr747 chr748 chr749 chr905 chr910 chr911 chr912 chr920 chr930 chr970
+chr980 chr990 chr991 chr992
+```
+
+```text
+0x80 = 0x120 (288)          fixed size word
+0xB0 = 2                    two transforms
+0xB4 = 00 00 01 00          bone ids [0, 1]
+0xB8 = 00 00 00 ff          parents  [root=0xFF, id 0]
+```
+
+A closely related variant (`chr722`, `chr951`, `chr952`, `chr960`) also has
+`0xB0 = 2` but `0xB4 = 02 01 00 00`. Under the confirmed 4-byte-word storage
+order (section 28) this un-reverses to ids `[0, 0, 1, 2]` — i.e. the true
+3-node id list `[0, 1, 2]` plus one pad byte, *not* "ids `[2, 1, 0]`". The
+earlier reading simply saw the reversed words.
+
+`find_map_geometry_sections` returns nothing for them and the skinned search
+misses them, so they currently fall through to `static-or-other`. They are most
+likely **static props with a two-node attachment skeleton** (weapons, effect
+emitters), a family the current decoder does not yet handle. Note also that the
+standard character skeleton reader fails on some props because the transform
+block itself is laid out differently: for `chr950` the arrays read at the
+character offsets hold non-unit "quaternions" (`[0, 0, 0, 96.3]`) and garbage
+flags — so the prop family needs its own skeleton layout, not a reuse of the
+character reader (see `research/` prop probes, planned).
+
+**Confidence: confirmed that these files form a byte-identical-signature group
+(34 files + 4 near-variant); medium for the "2-node prop" interpretation.** This
+is the highest-value open case for generic coverage: `chr7xx`/`chr9xx` are
+common in maps, so a decoder that reports `static-or-other` for them leaves most
+placed props unexported.
+
+
+
+## 27.6 Byte-reversed 4CC containers in `KB/data`
+
+Every `KB/data/data_base` database file begins at `0x80` with a four-character
+code stored **byte-reversed**:
+
+| File | Stored bytes | Read as | Meaning |
+| --- | --- | --- | --- |
+| `BaseAction` | `TCAB` | `BACT` | Base Action |
+| `LinkCharaData` | `DHCL` | `LCHD` | Link Chara Data |
+| `LinkCharaDebug` | `BDCL` | `LCDB` | Link Chara Debug |
+| `ParamCharaData` | `DHCP` | `PCHD` | Param Chara Data |
+| `PathCharaModel` | `MHCP` | `PCHM` | Path Chara Model |
+| `PathCharaMotion` | `OMCP` | `PCMO` | Path Chara Motion |
+| `PathCharaEquip` | `EHCP` | `PCHE` | Path Chara Equip |
+
+**Confidence: confirmed by inspection of all 19 files.** The engine stores its
+4CC labels in reverse byte order. Any future container parser in this project
+should reverse the four bytes before comparing against ASCII labels.
+
+## 27.7 The `ENDIAN` path token and the PSX lineage
+
+`KB/data/data_base/PathCharaMotion` and `PathCharaEquip` embed literal
+placeholder paths:
+
+```text
+KB/motionPackage/<endian>/LittleEndian/      and       /BigEndian/
+chr100/ENDIAN/chr100
+chr051/ENDIAN/chr051
+chr052/ENDIAN/chr052
+```
+
+The `ENDIAN` token is substituted at load time with `LittleEndian` or
+`BigEndian`, and one of the two directories then provides the curves. On the
+shipped PS3 disc only `BigEndian/` exists, but the `LittleEndian` branch and the
+`chr051`/`chr052` entries are direct remnants of an earlier, little-endian
+platform build (PS2/PSP-era `chr0xx` numbering) that predates the `chr1xx..9xx`
+PS3 roster.
+
+**Confidence: high for the placeholder mechanism (the strings are literal and
+the substitution target directory exists); medium for the exact prior platform.**
+This is strong evidence that the animation format was **ported**, not authored
+for the PS3 — which is why the PSX-era interpretation below is worth testing.
+
+## 27.8 PSX-style payload-free angle constants
+
+The animation scalar stream (`motionPackage/<name>/BigEndian/<name>`) encodes
+each channel with a 3-bit descriptor. Modes `1..4` carry **no payload** and
+decode to a fixed set of quarter-turn angles:
+
+```text
+mode 1 -> 0
+mode 2 -> +pi/2
+mode 3 -> +pi
+mode 4 -> -pi/2
+```
+
+These are precisely the redundant Euler/quaternion constants a PSX-era (or
+PS2-era) quantised rotation encoder emits to avoid storing ±90°/180° values. The
+mode histogram confirms they are used heavily on **every** character:
+
+| Character | mode 1 | mode 2 | mode 3 | mode 4 |
+| --- | ---: | ---: | ---: | ---: |
+| chr300 | 22887 | 10 | 157 | 147 |
+| chr301 | 27378 | 138 | 142 | 265 |
+| chr302 | 13590 | 152 | 9 | 289 |
+| chr500 | 39836 | 70 | 4 | 112 |
+
+**Confidence: confirmed as an encoding fact; high as a ported-format signature.**
+Treating these as payload-free constants (already implemented in
+`decode_scalar_clip`) is therefore the correct generic interpretation and should
+be preserved for any future variant.
+
+## 27.9 `qstm_kind` is a state-semantics discriminant
+
+Each named `qstm` state record carries a kind word at `qstm+0x84`. Its observed
+value set differs per character family:
+
+```text
+chr301  kinds = {1:3, 2:30, 3:62, 4:14, 5:4, 6:5, 8:2}    (120 named states)
+chr500  kinds = {1:11, 2:8, 4:44, 5:12}                    ( 75 named states)
+chr560  kinds = {1:3}                                      (  3 named states)
+chr900  kinds = {}   (psmr is a 160-byte stub with 3 empty slots, no qstm)
+```
+
+**Confidence: confirmed that the sets differ; medium for their meaning.** The
+kind word is a good secondary discriminant: a decoder that only handles the
+chr30x kind set will silently mis-handle chr500/560 states. The chr900 case is
+different in kind — it is a minimal `psmr` with three empty state slots and no
+named `qstm` records at all, so a decoder must treat "no named states" as valid
+rather than as an error.
+
+## 27.10 Confidence summary for generic selection
+
+| Discriminant | Location | Reliability | Use it for layout selection? |
+| --- | --- | --- | --- |
+| Version word | `0x04` | Confirmed constant `3` | No — never varies |
+| Type word | `0x08` | Confirmed varies (`0x10000` bit) | No — orthogonal to layout |
+| Flags word | `0x0C` | Confirmed constant `0x23` | No |
+| Build id | `0x28` | Per-file time/hash | No — diagnostics only |
+| Header words (`0x74`,`0x80`,`0x90`) | 0x74..0x90 | Confirmed **not** discriminative | No — ranges overlap |
+| Transform count | `0xB0` | Confirmed (skinned only) | Yes — skeleton size gate |
+| Root bone id | `0xB4` | Confirmed | Yes — rig family |
+| Skinned signature | search `u32==8` | Confirmed | **Yes — primary split** |
+| 4CC containers | `KB/data` `0x80` | Confirmed (reversed) | Resolves resource paths |
+| `ENDIAN` token | `PathCharaMotion` | High | Selects the endian branch |
+| Angle modes `1..4` | clip payload | Confirmed | Fixed constant decoding |
+| `qstm_kind` | `qstm+0x84` | Confirmed varies | State-family handling |
+
+The recommended generic rule is: **split the family by probing the skinned
+geometry signature structurally (there is no header flag), then gate the
+skeleton and motion handling on `0xB0`/`0xB4` and the state handling on
+`qstm_kind`.** No step depends on the file name.
+
+**Negative results are findings too.** Three tempting discriminants were tested
+and rejected on the full corpus: the version word (constant `3`), the type word
+(orthogonal to layout), and the header size/radius words (overlapping ranges).
+Recording them prevents re-testing them.
+
+---
+
+# 28. Skeleton storage order and motion reference pose (confirmed 2026-10-09)
+
+This section records a cross-validation sweep (chr301, chr300, chr302, chr303,
+chr500, chr100, chr200, chr320, chr900, chr350, chr380, chr940, chr722) that
+settles three long-standing ambiguities.
+
+## 28.1 DDM bone-id/parent arrays are stored as little-endian 32-bit words
+
+The byte-sized id and parent arrays following `transform_count` are stored
+**reversed inside every aligned 4-byte block** (equivalently: little-endian u32
+words packing four ids each). Reading them byte-wise as if they were a plain id
+list — the previous reading — produces:
+
+- the *first* byte = the id of the fourth transform of the first word, which is
+  why the first byte (`101`, `3`, `102`, `71`, `91`, `11`, …) looked like a
+  "root id" while the real root id is always `0`;
+- "duplicate zero bytes before their final global ids" — those are the word
+  padding bytes surfacing at block starts after the reversal.
+
+Proof: un-reversing both arrays reproduces, **byte-exact and on every bundle
+tested**, (a) the motion-resource skeleton's bone-id order and (b) the
+motion-resource hierarchy's parent ids (5/5 bundles with motion: chr301,
+chr300, chr500, chr100, chr200 — and the parent ids additionally match the
+un-reversed DDM arrays on the no-motion bundles chr101/chr110/chr800).
+
+```text
+stored (word j, LE)      = [id(4j+3), id(4j+2), id(4j+1), id(4j)]
+true transform order     = ids un-reversed block-by-block
+parents                  = same storage rule; the array occupies
+                           padded_count bytes, NOT transform_count bytes
+```
+
+## 28.2 The DDM transform arrays are already in the true (motion) order
+
+The translation records (16 bytes each: 3 floats + pad) and the rotation
+records (4 floats) pair with the **un-reversed** id array (motion order), not
+with the stored byte order:
+
+| Bundle | translation match (un-reversed pairing) | translation match (stored-byte pairing) |
+| --- | ---: | ---: |
+| chr301 (81) | 81/81 | scrambled — the root id 0 reads `[15.9, 0, 0]` with 20° Z rotation instead of `[0, 98.6, 0.63]` identity |
+
+**Consequence for the current decoder:** `decode_skinned_skeleton`
+produces the correct local transforms + hierarchy only when the motion resource
+supplies `transform_bone_ids` (34 bundles). For the ~44 skinned bundles
+**without** motion resources the pairing is scrambled: every bone receives a
+neighbouring bone's local transform (mirrored within each 4-byte word). The
+existing skin validation (weight sums, index ranges) cannot see this; the GLB
+of such a bundle would show a distorted bind pose. chr101 and chr800 verified:
+un-reversed roots are `[0, 98.6, 0.63]` and `[0, 110, 0]` with identity
+rotation, exactly the convention of the motion-validated bundles
+(chr301 root `[0, 114.54, 0]`).
+
+## 28.3 The motion reference skeleton stores *global* rotations + *local* translations
+
+The 28-byte pose records of the motion package's first segment mix spaces, and
+this is now proven rather than assumed:
+
+- **Rotations are accumulated global (model-space) bind rotations.** Applying
+  them directly and composing children below them yields a textbook T-pose:
+  spine 0→128.9→170.3→182.8→~208 (cm, Y-up), arms straight along ±X at
+  shoulder height 160, hip/knee/foot on a vertical line x=±9.98
+  (foot y≈7.3, toe y≈1.3). Quaternion pairs match the accumulated DDM local
+  chain for 79/81 (chr301), 149/199 (chr500), 73/146 (chr100) joints up to the
+  q/−q hemisphere sign; the residual mismatches were artifacts of the old
+  truncated parent read (28.1) and they disappear with it.
+- **Translations are local** (bone offsets, e.g. chr301 id 2 = `[14.48, 0, 0]`
+  inside id 1's frame), and the child offset is rotated by the *parent's global
+  rotation*.
+
+The rig itself is **Y-up with bones extending along the parent's +X**: many
+bind locals carry the repeated quaternion pattern `(a, b, a, b)` (x=z, y=w)
+which composes as `Ry(90°)·Rz(θ)` — the 90° Y pre-rotation turning the limb's
+local +X into model +Y. Idle-pose scalar channels hold values ~`1.49–1.61`
+(85–92°) on those same joints, consistent with this pattern.
+
+The legacy assumption "*motion quaternions are the DDM joints' local
+rotations*" is therefore **retracted**: they are the accumulated globals.
+
+## 28.4 IK chains in the motion skeleton (confirmed)
+
+The hierarchy's flag byte defines explicit IK chains; the segment's second byte
+(`ik_chain_count`, chr301 = 4) agrees with the flags:
+
+| Flag bit | Meaning |
+| --- | --- |
+| `0x1` | chain start (also present on chr500's `0x9` effectors) |
+| `0x2` | chain member / end tail (chr301 toe bones, chr500 `0x2` tails) |
+| `0x4` | middle joint |
+| `0x8` | **effector** — its curve triplet is a model-space *position* |
+| `0x40` | class: hand/arm chains (`0x48` effectors) |
+| `0x80` | class: leg/foot chains (`0x88` effectors) |
+
+Observed sets: chr301 4 chains (11→13→15, 41→43→45 arms; 200→201→202→203,
+210→211→212→213 legs); **chr300 only 3 chains** (one arm lacks IK — plausibly
+the sword-holding arm of `chr300_c01`); chr500 4 chains with effectors flagged
+`0x9` instead of a class+effector pair. The flags separate the IK *position*
+curves from Euler *rotation* curve triplets — a magnitude heuristic cannot do
+this (verified: leg effectors reach only 15–35 while unwrapped FK rotations
+exceed them).
+
+## 28.5 Per-clip scalar layouts vary (the animation root cause)
+
+The motion package's scalar stream layout is **per-clip, not per-character**.
+Within chr301 alone four scalar counts occur (332/334/336/338 for 3/15/46/86
+clips; chr300 shows 247/249/251/253), and content positions shift:
+
+- two clips of the **same count** (chr301 clips 0 and 6, both 336) hold the
+  same hand-target channel at different scalar positions (+2 apart) and
+  different rig-control blocks, so the count word alone does not select a
+  layout;
+- the channel blocks move by small insertions/omissions at several points
+  (e.g. ±2 scalars near the stream head at 8–17, an inserted constant
+  `(13.5685, 0.8395, absent)` block, further insertions in the IK tail);
+- the value-continuity of adjacent clips (`turn` part A ends exactly where
+  part B starts) and the constant anchors (root Y ≈ 112.147, hand/foot IK
+  targets, `13.5685/0.8395/34.75/25.389/15.185/9.981`) locate the blocks
+  reliably.
+
+The humanoid binder (`infer_humanoid_joint_scalar_starts`) assumes **one
+contiguous arithmetic mapping** (`scalar_start = 8 + 3·triplet_k`) for a single
+canonical count, and `remap_humanoid_scalar_starts` only shifts whole
+positions for count differences 2/4/6. Neither handles mid-stream insertions:
+**the maintained decode places the left-hand IK target at scalar 184 (its
+cross-clip maximum is the documented 959.54), while the binder's arithmetic
+reads scalar 182.** Deriving per-clip binding from the structural anchors above
+— replacing the canonical-count heuristic — is the top open implementation
+item (`MOTION_ANALYSIS.md` "2026-10-09 findings" and `ROADMAP.md` step 5d).
+
+## 28.6 Root motion channels (confirmed)
+
+Root channels in every clip: `s0` = redundant Y heading projection (0 → ±π on
+turn clips, validated), `s1` reserved, `s2/s3/s4` = root position X/Y/Z in model space
+(validated by cross-clip continuity: `move_b` delta `(+1.466, +0.400,
+−101.310)` equals the `s2..s4` differences), `s5/s6/s7` = bone_000 XYZ Euler
+rotation (s6 repeats the heading delta on humanoid turn clips). `boredom`
+proves the distinction: s0 is static zero while s5..s7 animate the visible
+root lean/twist. A 2-bone prop
+(`chr950`, 11 scalars = 8 root channels + 1 child triplet) confirms the
+8-channel root block shape `[unknown, unknown, posXYZ, rotXYZ]`.
+
+## 28.7 FK controller axes use the DDM joint-local bind frame
+
+The head-axis defect provides a direct basis test, reproducible with
+`research/fk_rotation_probe.py chr301 chr302 chr303 --clip 2 --bone-id 110`.
+The first four post-root triplets bind to the shared `1/2/101/110` chain and
+are byte-identical across those three rigs. Bone 110 uses scalars `17..19`;
+its third component is the dominant animated component in `to_battle`.
+
+Independently, the DDM/motion bind quaternion maps bone 110 local Z to model
+`+X` (local X→model `+Z`, local Y→model `-Y`). A global-delta interpretation
+retains a large model-Z component `(0.147,-0.850,-0.506)`, reproducing the
+lateral head tilt. Applying the controller delta in the local bind frame, with
+bone_000's complete animated rotation included, produces
+`(0.716,-0.697,0.053)`: strong model-X flexion with almost no lateral Z.
+chr302 and chr303 produce the same figures; no character-dependent swizzle is
+required.
+
+Confirmed scope: controller components are joint-local, so the old global
+delta path is wrong for this chain. Still unresolved: this single-axis test
+cannot distinguish pre- from post-multiplication or the six multi-axis Euler
+orders. The maintained default is `bind_local * delta`, but it remains marked
+experimental until the leg FK slots can be checked against their independent
+foot targets.
+
+Large magnitude is not a semantic discriminator. The decoder now labels a
+triplet as `position` only when the motion skeleton declares an IK effector.
+Large undeclared triplets are preserved as `unknown_controller` and omitted
+from FK; unwrapped Euler angles are not silently converted into positions.
+
+---
+
 ## Experimental decoder status
 
 `tools/conversion/ddm_to_3d.py` now produces:
@@ -1279,11 +1746,12 @@ index count
 
 The vertex stream uses a 28-byte record containing position, color, half-float
 UVs, four local bone-palette indices and four normalized byte weights. A
-parallel 16-byte stream supplies normal, tangent and bitangent data. Compact
-bone ID, parent ID, translation and quaternion arrays near offset 0xB0 define
-the bind skeleton. The exporter maps each section's local palette to this
-global skeleton and writes glTF `JOINTS_0`, `WEIGHTS_0`, a node hierarchy and
-inverse bind matrices.
+parallel 16-byte stream supplies normal, tangent and bitangent data. The bind
+skeleton is defined by the compact arrays near offset 0xB0 **with the storage
+order rules of section 28** (ids/parents as little-endian 32-bit words padded
+to a 4-byte multiple, transform arrays already in the true/motion order). The
+exporter maps each section's local palette to this global skeleton and writes
+glTF `JOINTS_0`, `WEIGHTS_0`, a node hierarchy and inverse bind matrices.
 
 For `chr300`, this produces 2,357 source vertices and 62 joints. The `armor`
 and `armor_leader` surfaces contain the same 719 faces with alternate
@@ -1303,7 +1771,184 @@ they are deliberately not emitted as glTF animation channels yet.
 
 The initial 1,924-byte segment is now decoded independently. For `chr300` it
 contains a version-3 header, the 62 ordered bone IDs, hierarchy metadata and
-62 local reference transforms stored as `translation vec3 + quaternion vec4`.
+62 reference transforms stored as `translation vec3 + quaternion vec4`.
 That reference pose matches the DDM bind translations within `3.1e-5` source
-units. This proves the skeleton order used by the animation resource, but not
-yet how its variable 247–253 scalar descriptors map onto transform channels.
+units. Per section 28.3, its **quaternions are the accumulated global bind
+rotations** (its translations stay local), which is what validates the
+skeleton order used by the animation resource; how its variable 247–253
+per-clip scalar blocks map onto joints remains open (section 28.5), because
+the layout shifts between clips independently of the clip count.
+
+## Skinned group detection and vertex/skin validation
+
+The skinned group header is found by searching the file for the attribute-count
+word `u32 == 8`, but that word also appears **inside real vertex data**. Taking
+the first match is what made `chr500` fail (`Skinned vertex 0 weights sum to
+123`): its first `u32 == 8` is a false positive, not the real group.
+
+### The 28-byte vertex record (confirmed)
+
+```text
++0x00  float32 ×3     position (model space, centimeter-like scale)
++0x0C  uint32         vertex color (0xFFFFFFFF observed)
++0x10  float16 ×2     UV
++0x14  uint8  ×4      local bone-palette indices
++0x18  uint8  ×4      weights, normalized so the four bytes sum to 255
+```
+
+Validation over every decoded vertex of every decodable character:
+
+| Character | vertices | finite pos | UV ok | weight sum == 1 | joints resolve |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| chr300 | 2357 | 2357 | 2357 | 2357 | 2357 |
+| chr301 | 3491 | 3491 | 3491 | 3491 | 3491 |
+| chr100 | 2998 | 2998 | 2998 | 2998 | 2998 |
+| chr200 | 10511 | 10511 | 10511 | 10511 | 10511 |
+| chr500 | 22000 | 22000 | 22000 | 22000 | 22000 |
+| chr560 | 5693 | 5693 | 5693 | 5693 | 5693 |
+| chr370 | 1783 | 1783 | 1783 | 1783 | 1783 |
+
+**Confidence: confirmed.** The interpretation of position/color/UV/palette/weights
+is correct for 100% of the vertices: every position is finite, every UV is in
+range, every four-weight group sums to 255 (1.0 after normalization), and every
+palette index resolves inside the section palette which in turn resolves inside
+the skeleton. This is what proves the skin decode, not merely that it does not
+raise.
+
+### Section chaining and the 255-sum weight gate
+
+A group is a run of sections, each laid out as:
+
+```text
+section header (5 × uint32)   descriptor_count, attributes=8, vertices, palette, indices
+index buffer                  indices × uint16
+attribute stream              vertices × 16  (11/11/10 normal, tangent, bitangent, marker)
+vertex stream                 vertices × 28  (see above)
+bone palette                  palette × uint32 (global bone IDs)
+submesh descriptors           descriptor_count × (60 bytes + bone_count × uint32)
+```
+
+Two structural facts matter for detection:
+
+- The declared **section count is an upper bound, not exact**: `chr500` declares
+  10 sections but only 6 chain before the file ends; `chr370` declares 4 but
+  chains 3. The real group always chains until the file is filled to within a
+  small aligned padding (16 bytes observed).
+- Each descriptor's bone-list length is the **third trailing word** `words[14]`
+  (offset +0x38), not `words[12]`.
+
+The reliable, name-free detection is therefore: **the first candidate (in file
+order) whose first vertex weights sum to 255**. This rejects `chr500`'s false
+signature and every stray `u32 == 8`, while selecting the same head the decoder
+already used for `chr300/301/...`.
+
+**Confidence: confirmed.** The gate is now enforced in
+`find_skinned_geometry_header`; `chr500` changed from a hard failure to 22,000
+valid vertices / 23 parts with no change to any other character.
+
+### Multiple meshes per character file
+
+A character file can contain several groups (a main body plus weapons/props).
+`chr100` holds a 4-section group at `0x5d91` and a 14-section group at `0xe659`;
+`chr500` holds groups at `0x353e4`, `0x75a46` and more. All of them pass the
+weight gate and chain to the end (a later group's tail fills the file).
+
+The maintained decoder exports the group it finds first. Decoding **every**
+group (to include held weapons) is recorded as an open improvement in
+`ROADMAP.md`; it does not affect the skin correctness of the exported group.
+
+### Joint matrix resolution must tolerate cycles (revised 2026-10-09)
+
+`_joint_global_matrices` originally resolved each joint's parent by recursion
+and raised `RecursionError` on `chr500`; an iterative resolver with a cycle
+guard keeps export terminating. **The cycle itself was an artifact of the
+truncated parent read (section 28.1):** with parents read over `padded_count`
+bytes and un-reversed per 4-byte word, `chr500`'s corrected hierarchy contains
+**zero parent cycles** (re-verified sweep). The guard is now a safety net,
+not a workaround for a real rig property.
+
+### Prop-family limbs fail skeleton decode (revised 2026-10-09)
+
+Sweeping every `chara` file: **70 skinned groups decode cleanly** (358,623
+vertices validated), 37 files have no skinned group (the "2-bone prop" family),
+and 5 raise in `decode_skinned_skeleton` — `chr722`, `chr940`, `chr941`,
+`chr942`, `chr950`, all with *invalid quaternion norm* on a low bone index.
+
+The root cause is now identified: the prop family's skeleton block is not laid
+out like the character rig reader expects (for `chr950` the offsets read
+non-unit "quaternions" such as `[0, 0, 0, 96.3]` and garbage flags — section
+27.5b). Additionally the **stored-byte id/parent reading scrambles the bind
+pose of any skinned bundle** regardless of this failure (section 28.2), so the
+skinnable-but-no-motion bundles (chr101–156, 210–290, 800–830, …) require the
+28.1/28.2 storage-order fix even though they "decode cleanly" today.
+
+`research/skin_decode_probe.py` reproduces every check in this section
+(`--best`, `--validate`, `--dump`).
+
+### Per-clip scalar layout derives from invariant anchors (§28.6, 2026-10-09)
+
+The humanoid clip stream is not one channel order: whole optional blocks (a
+narrower root header, rig-control constant blocks including the known
+13.5685/0.8395 and 25.389/9.981 pairs) come and go per clip, and variants of
+the *same* scalar count parse different layouts. Value- and mode-signature
+based alignment cannot recover which channels moved (animated channels change
+value between clips by design), but the constant scalars alone do:
+
+- `collect_constant_anchors` names every constant scalar by
+  `(mode, value)`; zero carriers (modes 0/1) and any value key that occurs
+  more than once inside the same clip are discarded (ambiguous).
+- `build_canonical_anchor_map` stores that list from the canonical-count
+  clip; the anchor set survives in every variant, at the position each
+  block occupies there.
+- `derive_humanoid_scalar_starts` matches canonical anchors to the clip's
+  anchors monotonically (nearest position inside a +-10 window), turns the
+  position differences into a piecewise shift over canonical offsets, and
+  applies it to the verified humanoid binder. Derived starts must stay
+  strictly monotonic and inside the clip, otherwise the count-arithmetic
+  `remap_humanoid_scalar_starts` fallback serves
+  (`per_clip_scalar_layout.kind` records which path ran).
+
+Corpus proof (chr301/302/303, every clip): the sampled IK target triplets
+retain the verified effector semantics (feet sample near the ground plane,
+hands in the arm-reach range) for 140/140, 150/150 and 149/150 clips versus
+136/145/145 under the legacy count arithmetic. While deriving, the canonical
+scan also picked up a latent bug: the skeleton segment's leading little-endian
+bone count read as a huge big-endian clip count; chr302/303 silently lost the
+verified humanoid binder to the generic fallback. The scan now skips the
+skeleton segment.
+
+Open: rotation composition (Euler order, absolute vs delta from bind) and the
+exact effector offset inside the target block require the FK leg-chain
+experiment (plan step 4); the per-clip derivation currently serves the
+humanoid binder family only.
+
+### Humanoid leg segment: stride controllers and the effector sextet (§28.7, 2026-10-09)
+
+Decoding one clip's trailing humanoid region scalar by scalar exposes the real
+leg-block structure. Per side the segment alternates bound rotation triplets
+with whole **stride-controller triplets** whose values are the known invariant
+rig constants — observed as `(25.389, 0, -9.981)`, `(0, 15.185, 0)` and
+`(34.75, 0, 0)`; the right segment carries an extra stride-controller triplet,
+which is why the sinextet of the right foot opens four scalars into the bound
+bone-217 slot while the left foot one opens two scalars into bone 204.
+
+Each chain terminates in a contiguous sextet of animated scalars
+`[target xyz][orientation xyz]` both in model space (target frame-0 y=7.3 for
+the left foot, grounded). The former fixed +2/+3/+5 arithmetic ignored the
+interleaved controllers, so on layouts with one stride-controller more or less
+the baked "targets" read neighbouring channels (the verified left hand at
+scalar 184 was read at 182).
+
+`derive_humanoid_ik_targets(decoded, skeleton, scalar_starts)` implements the
+structural scan: it searches `[start, start+8]` for the first offset whose
+target triplet and following orientation triplet are both animated (modes
+6/7), position-valued and Euler-bounded. `apply_experimental_humanoid_ik`
+now uses it per clip with the historical fixed offsets as fallback. Corpus:
+the four sextets are found in every canonical-count chr3x clip.
+
+Consequence for the FK experiment: with bound joint triplets correctly
+aligned, the remaining FK-vs-foot-target discrepancy (bounded 47..142 cm over
+all chr3x clips in the sweep) is dominated by the stride-controller triplets
+that the binder reads as leg rotations — the per-bone rule for those slots is
+the remaining unknown of plan step 4 (Euler order/composition cannot be
+demonstrated until the rotation slot mapping is exact).

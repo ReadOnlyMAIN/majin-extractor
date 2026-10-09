@@ -53,6 +53,7 @@ class GodotExportTests(unittest.TestCase):
             self.assertEqual(
                 manifest["materials"][0]["material_type"], "StandardMaterial3D"
             )
+            self.assertEqual(manifest["model_scale"], 1.0)
             self.assertEqual(manifest["materials"][0]["switches"]["use_blend"], False)
             self.assertIsNone(manifest["materials"][0]["blend_map"])
             # Single-material path does not generate a blend map.
@@ -188,6 +189,23 @@ class GodotExportTests(unittest.TestCase):
             self.assertTrue(bindings[0]["switches"]["use_blend"])
             self.assertEqual(bindings[0]["uniforms"]["blend_base_texture_1"], "textures/b.png")
             self.assertIsNotNone(bindings[0]["blend_map"])
+
+    def test_manifest_scales_synthetic_ik_poles_like_the_glb(self):
+        with tempfile.TemporaryDirectory() as root:
+            out = Path(root)
+            result = write_godot_material_assets(
+                out,
+                [{"index": 0, "name": "character", "textures": []}],
+                {},
+                scale=0.01,
+            )
+            manifest = json.loads((out / result["manifest"]).read_text())
+
+            self.assertEqual(manifest["model_scale"], 0.01)
+            self.assertIn("chain[4] * _model_scale", GODOT_ASSIGN_SCRIPT)
+            self.assertIn(
+                'float(data.get("model_scale", 1.0))', GODOT_ASSIGN_SCRIPT,
+            )
 
     def test_write_godot_material_assets_skips_blend_without_geometry(self):
         with tempfile.TemporaryDirectory() as root:
@@ -436,17 +454,6 @@ class MultipassDetailFoldTests(unittest.TestCase):
 
 
 class GodotUtilityTests(unittest.TestCase):
-    def test_instance_importer_persists_materials_on_extracted_mesh(self):
-        script = (
-            Path(__file__).resolve().parent.parent
-            / "godot" / "utility" / "import_instance.gd"
-        ).read_text()
-        self.assertIn('extends EditorScenePostImport', script)
-        self.assertIn('mesh.surface_set_material(surface, assignments[material_name])', script)
-        self.assertIn('ResourceSaver.save(extracted, mesh_path)', script)
-        self.assertIn('get_source_file().get_file().get_basename()', script)
-        self.assertIn('res://terrain/foliage/meshes', script)
-
     def test_repository_utility_folder_matches_the_constants(self):
         # godot/utility/ is the versioned source of truth; the Python constants
         # must stay identical so an installed copy never drifts from the export.
@@ -477,6 +484,8 @@ class GodotUtilityTests(unittest.TestCase):
         self.assertIn('_assign_recursive(scene, assignments, missing)', universal_importer)
         self.assertIn('_asset_kind == "instance"', universal_importer)
         self.assertIn('ResourceSaver.save(extracted, mesh_path)', universal_importer)
+        self.assertIn('materials/material_bindings.json', universal_importer)
+        self.assertNotIn('_find_files(', universal_importer)
 
     def test_write_godot_utility_copies_shader_and_script(self):
         with tempfile.TemporaryDirectory() as root:
@@ -485,20 +494,18 @@ class GodotUtilityTests(unittest.TestCase):
             names = sorted(path.name for path in written)
             self.assertEqual(names, [
                 "assign_materials.gd",
-                "import_instance.gd",
                 "majin_foliage.gdshader",
                 "majin_material_common.gdshaderinc",
                 "majin_multitexture.gdshader",
             ])
             shader = (destination / "majin_multitexture.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()
-            instance_script = (destination / "import_instance.gd").read_text()
             self.assertIn("shader_type spatial;", shader)
             self.assertIn("extends EditorScenePostImport", script)
             self.assertIn("material_bindings.json", script)
             self.assertIn("model_base.path_join(tres)", script)
             self.assertNotIn("path.get_base_dir().path_join(tres)", script)
-            self.assertIn("ResourceSaver.save(extracted, mesh_path)", instance_script)
+            self.assertIn("ResourceSaver.save(extracted, mesh_path)", script)
 
     def test_write_godot_utility_does_not_overwrite_by_default(self):
         with tempfile.TemporaryDirectory() as root:

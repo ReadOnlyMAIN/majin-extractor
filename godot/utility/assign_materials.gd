@@ -23,12 +23,14 @@ const IK_CHAINS := [
 	[&"bone_210", &"bone_211", &"bone_212", &"ik_foot_r_target", Vector3(0, 0, 50)],
 ]
 const INSTANCE_MESHES_PATH := "res://terrain/foliage/meshes"
+const BINDINGS_RELATIVE_PATH := "materials/material_bindings.json"
 
 var _asset_kind := "model"
 var _ik_target_orientation := "none"
+var _model_scale := 1.0
 
 func _post_import(scene: Node) -> Object:
-	var assignments := _load_bindings(scene)
+	var assignments := _load_bindings()
 	if not assignments.is_empty():
 		var missing := {}
 		var applied := _assign_recursive(scene, assignments, missing)
@@ -68,7 +70,7 @@ func _setup_humanoid_ik(scene: Node) -> bool:
 		return false
 
 	var targets: Array[Node] = []
-	var poles: Array[Node3D] = []
+	var poles: Array[Node] = []
 	for chain in IK_CHAINS:
 		var target := ClassDB.instantiate(&"ModifierBoneTarget3D") as Node
 		target.name = "%s_node" % chain[3]
@@ -77,10 +79,24 @@ func _setup_humanoid_ik(scene: Node) -> bool:
 		target.owner = scene
 		targets.append(target)
 
-		var pole := Node3D.new()
-		pole.name = "%s_pole" % chain[3]
-		var middle := skeleton.find_bone(chain[1])
-		pole.position = skeleton.get_bone_global_rest(middle).origin + chain[4]
+		var pole_bone := StringName(String(chain[3]).replace("_target", "_pole"))
+		var pole: Node
+		if skeleton.find_bone(pole_bone) >= 0:
+			pole = ClassDB.instantiate(&"ModifierBoneTarget3D") as Node
+			pole.set("bone_name", pole_bone)
+		else:
+			var fallback := Node3D.new()
+			var middle := skeleton.find_bone(chain[1])
+			# IK_CHAINS offsets use the source DDM centimetre-like units. The
+			# imported skeleton and animation translations have already been
+			# multiplied by the GLB export scale (normally 0.01), so apply the
+			# same factor to the synthetic pole offset.
+			fallback.position = (
+				skeleton.get_bone_global_rest(middle).origin
+				+ chain[4] * _model_scale
+			)
+			pole = fallback
+		pole.name = "%s_node" % pole_bone
 		skeleton.add_child(pole)
 		pole.owner = scene
 		poles.append(pole)
@@ -127,32 +143,37 @@ func _setup_humanoid_ik(scene: Node) -> bool:
 	print("majin_import: connected humanoid IK and target orientations for %s." % scene.name)
 	return true
 
-func _load_bindings(scene: Node) -> Dictionary:
-	# ~{material_name: Material}: built from every manifest found next to
-	# the imported scene. Manifest resource paths are relative to the model
-	# directory, not to the ``materials/`` directory containing the manifest.
+func _load_bindings() -> Dictionary:
+	# Load only this GLB's manifest. Searching child folders recursively can
+	# accidentally pick up an instance manifest and extract an ordinary model.
+	# Resource paths are relative to the model directory, not to ``materials/``.
 	var result := {}
 	var model_base := get_source_file().get_base_dir()
-	for path in _find_files(model_base, "material_bindings.json"):
-		var text := FileAccess.get_file_as_string(path)
-		var data = JSON.parse_string(text)
-		if typeof(data) != TYPE_DICTIONARY:
+	var manifest_path := model_base.path_join(BINDINGS_RELATIVE_PATH)
+	if not FileAccess.file_exists(manifest_path):
+		push_warning("majin_import: no manifest found at %s" % manifest_path)
+		return result
+	var data = JSON.parse_string(FileAccess.get_file_as_string(manifest_path))
+	if typeof(data) != TYPE_DICTIONARY:
+		push_warning("majin_import: invalid manifest at %s" % manifest_path)
+		return result
+	_asset_kind = data.get("asset_kind", "model")
+	_model_scale = float(data.get("model_scale", 1.0))
+	if not is_finite(_model_scale) or _model_scale <= 0.0:
+		push_warning("majin_import: invalid model_scale; using 1.0")
+		_model_scale = 1.0
+	_ik_target_orientation = data.get("ik_target_orientation", "none")
+	for entry in data.get("materials", []):
+		var name: String = entry.get("material_name", "")
+		# ``shader_material`` is the legacy manifest key used before native
+		# StandardMaterial3D resources were emitted.
+		var tres: String = entry.get("material_resource", entry.get("shader_material", ""))
+		if name == "" or tres == "":
 			continue
-		_asset_kind = data.get("asset_kind", _asset_kind)
-		_ik_target_orientation = data.get(
-			"ik_target_orientation", _ik_target_orientation
-		)
-		for entry in data.get("materials", []):
-			var name: String = entry.get("material_name", "")
-			# ``shader_material`` is the legacy manifest key used before native
-			# StandardMaterial3D resources were emitted.
-			var tres: String = entry.get("material_resource", entry.get("shader_material", ""))
-			if name == "" or tres == "":
-				continue
-			var resource_path := tres if tres.is_absolute_path() else model_base.path_join(tres)
-			var resource := load(resource_path)
-			if resource is Material:
-				result[name] = resource
+		var resource_path := tres if tres.is_absolute_path() else model_base.path_join(tres)
+		var resource := load(resource_path)
+		if resource is Material:
+			result[name] = resource
 	return result
 
 func _extract_instance_mesh(scene: Node, assignments: Dictionary) -> bool:
@@ -228,19 +249,3 @@ func _assign_recursive(node: Node, assignments: Dictionary, missing: Dictionary)
 	for child in node.get_children():
 		count += _assign_recursive(child, assignments, missing)
 	return count
-
-func _find_files(dir_path: String, file_name: String) -> PackedStringArray:
-	var found := PackedStringArray()
-	var dir := DirAccess.open(dir_path)
-	if dir == null:
-		return found
-	dir.list_dir_begin()
-	var entry := dir.get_next()
-	while entry != "":
-		if dir.current_is_dir() and not entry.begins_with("."):
-			found.append_array(_find_files(dir_path.path_join(entry), file_name))
-		elif entry == file_name:
-			found.append(dir_path.path_join(entry))
-		entry = dir.get_next()
-	dir.list_dir_end()
-	return found

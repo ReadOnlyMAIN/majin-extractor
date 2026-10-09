@@ -398,33 +398,58 @@ def write_glb(path, vertices, mesh_parts, materials, object_name, scale,
 
 def _joint_global_matrices(joints, scale):
     """Build row-major global bind matrices from glTF-order XYZW quaternions."""
-    globals_ = [None] * len(joints)
+    count = len(joints)
+    globals_ = [None] * count
+    in_progress = [False] * count
 
-    def matrix_for(index):
-        if globals_[index] is not None:
-            return globals_[index]
-        joint = joints[index]
+    def local_matrix(joint):
         x, y, z, w = joint['rotation']
         tx, ty, tz = (value * scale for value in joint['translation'])
-        local = [
+        return [
             1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w), tx,
             2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w), ty,
             2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y), tz,
             0.0, 0.0, 0.0, 1.0,
         ]
-        parent = joint['parent']
-        if parent is None:
-            result = local
-        else:
-            a, b = matrix_for(parent), local
-            result = [
-                sum(a[row*4+k] * b[k*4+column] for k in range(4))
-                for row in range(4) for column in range(4)
-            ]
-        globals_[index] = result
-        return result
 
-    return [matrix_for(index) for index in range(len(joints))]
+    def multiply(a, b):
+        return [
+            sum(a[row*4+k] * b[k*4+column] for k in range(4))
+            for row in range(4) for column in range(4)
+        ]
+
+    for start in range(count):
+        if globals_[start] is not None:
+            continue
+        # Walk up to the nearest resolved ancestor, guarding against cycles:
+        # a joint whose parent chain loops (or references a later joint by
+        # mistake) is treated as a root so export never recurses forever.
+        chain = []
+        index = start
+        while index is not None and globals_[index] is None:
+            if in_progress[index]:
+                # Cycle detected: break it by rooting this joint.
+                globals_[index] = local_matrix(joints[index])
+                break
+            in_progress[index] = True
+            chain.append(index)
+            parent = joints[index]['parent']
+            if parent is None or not 0 <= parent < count:
+                globals_[index] = local_matrix(joints[index])
+                in_progress[index] = False
+                break
+            index = parent
+        for node in reversed(chain):
+            if globals_[node] is not None:
+                in_progress[node] = False
+                continue
+            local = local_matrix(joints[node])
+            parent = joints[node]['parent']
+            parent_matrix = globals_[parent] if parent is not None and 0 <= parent < count else None
+            globals_[node] = multiply(parent_matrix, local) if parent_matrix is not None else local
+            in_progress[node] = False
+
+    return globals_
 
 
 def _inverse_rigid_matrix_column_major(matrix):

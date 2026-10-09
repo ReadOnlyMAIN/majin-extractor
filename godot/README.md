@@ -10,7 +10,6 @@ resources can reference a stable path.
 | `majin_foliage.gdshader` | Albedo-only double-sided cutout foliage with corrected back-face normals. |
 | `majin_material_common.gdshaderinc` | Shared reconstructed lighting, normal and detail-layer implementation. |
 | `assign_materials.gd` | Universal `EditorScenePostImport` script: assigns generated materials on every model and reconnects IK when character target bones are present. |
-| `import_instance.gd` | Deprecated compatibility script; `assign_materials.gd` now also handles explicitly tagged reusable instances. |
 
 The ordinary opaque and alpha-blend families are emitted as native
 `StandardMaterial3D` resources. The decoded double-sided alpha-scissor foliage
@@ -91,14 +90,32 @@ bones named `ik_hand_l_target`, `ik_hand_r_target`,
 `ik_foot_l_target`, and `ik_foot_r_target`. Select the GLB in Godot's Import
 tab, set the same `res://majin_utility/assign_materials.gd` as its Import
 Script, and reimport it. The script assigns the character materials, then
-creates `ModifierBoneTarget3D` adapters, four pole
-nodes, and one `TwoBoneIK3D` modifier after the animation system. Because that
+creates `ModifierBoneTarget3D` adapters for four targets plus one `TwoBoneIK3D`
+modifier after the animation system. Because that
 solver ignores target rotation, a following `CopyTransformModifier3D` copies
 only the target rotations onto the four end bones; their IK-solved positions
 remain intact.
 
-The pole positions are anatomical defaults, not yet decoded animation data.
-They remain editable in the imported scene for knee/elbow alignment tests.
+The maintained folder exporter enables all structurally bound rotations with
+`local_delta_post`, radians, and bone_000's complete slots 5–7 rotation. These choices are
+made while building the GLB; the Godot import script preserves them and does
+not reinterpret FK axes. Large undeclared controller triplets remain omitted
+instead of being treated as rotations or IK positions.
+
+The `godot` IK mode does not run the offline two-bone solver and does not mark
+any limb channel as `ik_baked`. It exports the original decoded FK channels
+plus the four animated targets; `TwoBoneIK3D` is therefore the only IK solve.
+Use the separate `bake` mode only when a portable GLB with no runtime solver is
+required.
+
+The four fallback pole offsets are expressed in the original DDM units. The
+export manifest records `model_scale`, and the import script applies that same
+factor before adding an offset to the scaled skeleton rest pose. With the
+standard `--scale 0.01`, `(0,-50,25)` therefore becomes `(0,-0.5,0.25)` in
+Godot units. Pole bones, if a future decoder exports them explicitly, continue
+to take precedence over these synthetic fallbacks.
+
+Elbows and knees use the same editable anatomical fallback poles.
 By default, target orientations use the source engine's row-vector convention,
 transposed into Godot space and made relative to the selected reference pose.
 Use `--experimental-ik-target-orientation none` for the position-only control
@@ -120,7 +137,8 @@ python tools/conversion/ddm_to_3d.py game_files/decompressed/KB/instance output/
 ```
 
 Use the same `assign_materials.gd` Import Script for those GLBs. The converter
-tags their manifest with `asset_kind: instance`; the universal script then
+tags their own `materials/material_bindings.json` manifest with
+`asset_kind: instance`; the universal script then
 expects exactly one `MeshInstance3D`, puts the matching generated materials
 directly on its surfaces, and saves the result using the GLB filename. For
 example, importing `ins107.glb` creates

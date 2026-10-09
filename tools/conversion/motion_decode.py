@@ -22,23 +22,91 @@ def _be_u32(data: bytes, offset: int) -> int:
     return struct.unpack_from(">I", data, offset)[0]
 
 
+def compare_motion_skeleton_to_ddm(model_path: Path):
+    """Return the max local-translation mismatch DDM vs motion reference.
+
+    The DDM bind skeleton and the motion reference skeleton store the same
+    rig: the DDM translation records (u32-aligned, 16-byte stride) must match
+    the motion pose records (28-byte stride) record-for-record; chr100-590
+    measure within 1.2e-4 source units (`REVERSE_DDM.md` §28). Purely
+    diagnostic; callers must not gate exports on it.
+    """
+    data = model_path.read_bytes()
+    if data[:4] != b"\0ddm":
+        return None
+    transform_count = _be_u32(data, 0xB0)
+    if not 1 <= transform_count <= 1024:
+        return None
+    padded_count = (transform_count + 3) & ~3
+    parent_offset = 0xB4 + padded_count
+    translation_offset = parent_offset + padded_count
+    rotation_offset = translation_offset + transform_count * 16
+    if rotation_offset + transform_count * 16 > len(data):
+        return None
+    # motionPackage sits beside chara/ under the shared KB root:
+    # <KB>/chara/<name>/<name> -> <KB>/motionPackage/<name>/BigEndian/<name>
+    payload = (
+        model_path.parent.parent.parent
+        / "motionPackage" / model_path.parent.name
+        / "BigEndian" / model_path.name
+    )
+    try:
+        buffer = payload.read_bytes()
+    except OSError:
+        return None
+    boundary_count = _be_u32(buffer, 0x80)
+    if not 2 <= boundary_count <= 4096:
+        return None
+    if 0x84 + 4 * boundary_count > len(buffer):
+        return None
+    boundaries = [
+        0x80 + offset
+        for offset in struct.unpack_from(f">{boundary_count}I", buffer, 0x84)
+    ]
+    try:
+        segment = decode_motion_skeleton(buffer[boundaries[0]:boundaries[1]])
+    except UnsupportedMotion:
+        return None
+    ddm_translations = [
+        struct.unpack_from(">3f", data, translation_offset + index * 16)
+        for index in range(transform_count)
+    ]
+    worst = 0.0
+    for record in segment["joints"][:min(
+        transform_count, segment["bone_count"]
+    )]:
+        mismatch = max(
+            abs(source - target)
+            for source, target in zip(record["translation"], ddm_translations[
+                record["index"]
+            ])
+        )
+        worst = max(worst, mismatch)
+    return worst
+
+
 def decode_character_rig_graph(data: bytes):
     """Decode the fixed-size records in a character ``.crg`` rig graph.
 
     Field semantics are still under investigation, so integer selectors,
     referenced bone IDs, float parameters, and trailing flags are kept
-    separate without assigning constraint names.  chr300 stores eight
-    128-byte records after its 136-byte header.
+    separate without assigning constraint names. The word at 0x08 is an
+    invariant header value (9), while 0x80 is the real record count: observed
+    files range from 3 records on chr700 to 31 on chr200.
     """
     if len(data) < 0x88 or data[:4] != b"\0crg":
         raise UnsupportedMotion("Invalid character rig graph")
-    boundary_count = _be_u32(data, 8)
+    # This header word is 9 on every observed CRG, independently of the
+    # number of following records (3 on chr700, 8 on chr30x, 26 on chr500,
+    # 31 on chr200).  It is therefore a format/header field, not a boundary
+    # count.  The record count is the word at 0x80.
+    header_field_08 = _be_u32(data, 8)
     record_count = _be_u32(data, 0x80)
     expected_size = 0x88 + record_count * 0x80
-    if boundary_count != record_count + 1 or expected_size != len(data):
+    if expected_size != len(data):
         raise UnsupportedMotion(
             f"Unexpected character rig graph size/counts: "
-            f"{len(data)}, {boundary_count}, {record_count}"
+            f"{len(data)}, {header_field_08}, {record_count}"
         )
     records = []
     for index in range(record_count):
@@ -57,7 +125,7 @@ def decode_character_rig_graph(data: bytes):
             "flags": list(words[23:]),
         })
     return {
-        "boundary_count": boundary_count,
+        "header_field_08": header_field_08,
         "record_count": record_count,
         "record_size": 0x80,
         "records": records,
@@ -99,6 +167,109 @@ def decode_motion_metadata(segment: bytes):
     return {"record_count": count, "records": records}
 
 
+def decode_motion_state_records(data: bytes):
+    """Decode the named qstm records embedded in a psmr state resource.
+
+    The 150-word table at 0x84 is a logical state-slot table, not a physical
+    motionPackage segment-name table.  The named records themselves occur in
+    physical animation order.  Every qstm stores its inclusive last-frame
+    index at qstm+0x80, so the corresponding scalar clip has one more frame.
+    """
+    if len(data) < 0x84 or data[:4] != b"psmr":
+        raise UnsupportedMotion("Invalid motion state resource")
+    matches = list(re.finditer(
+        rb"KB/motionSequence/[^/\x00]+/([A-Za-z0-9_]+)", data,
+    ))
+    records = []
+    for index, match in enumerate(matches):
+        limit = matches[index + 1].start() if index + 1 < len(matches) else len(data)
+        marker = data.find(b"qstm", match.end(), limit)
+        if marker < 0 or marker + 0x88 > limit:
+            raise UnsupportedMotion(
+                f"Named motion state {index} has no complete qstm record"
+            )
+        last_frame = _be_u32(data, marker + 0x80)
+        if last_frame > 0xFFFF:
+            raise UnsupportedMotion("Implausible qstm last-frame index")
+        records.append({
+            "record_index": index,
+            "name": match.group(1).decode("ascii"),
+            "path_offset": match.start(),
+            "qstm_offset": marker,
+            "last_frame": last_frame,
+            "frame_count": last_frame + 1,
+            "qstm_kind": _be_u32(data, marker + 0x84),
+        })
+    return records
+
+
+def associate_motion_state_records(records, frame_counts):
+    """Associate ordered qstm names with physical scalar-clip slots.
+
+    Physical streams contain anonymous helper clips between named animations.
+    chr301 also has nine named pose states whose physical slots are empty.  A
+    valid association therefore preserves record order and accepts either an
+    exact qstm/curve frame-count match or an empty physical slot.  Dynamic
+    programming maximizes exact matches before using empty-slot fallbacks.
+    Non-empty duration mismatches are never named speculatively.
+    """
+    record_count = len(records)
+    clip_count = len(frame_counts)
+    impossible = -10**9
+    exact_score = clip_count + 1
+    scores = [[impossible] * (clip_count + 1)
+              for _ in range(record_count + 1)]
+    choices = [[None] * (clip_count + 1)
+               for _ in range(record_count + 1)]
+    for clip in range(clip_count + 1):
+        scores[record_count][clip] = 0
+
+    for record in range(record_count - 1, -1, -1):
+        expected = records[record]["frame_count"]
+        for clip in range(clip_count - 1, -1, -1):
+            best = scores[record][clip + 1]
+            choice = ("skip", record, clip + 1)
+            confidence = None
+            reward = impossible
+            if frame_counts[clip] == expected:
+                reward = exact_score
+                confidence = "exact_frame_count"
+            elif frame_counts[clip] is None:
+                reward = 1
+                confidence = "empty_state_slot"
+            candidate = reward + scores[record + 1][clip + 1]
+            if reward > impossible and candidate > best:
+                best = candidate
+                choice = ("map", record + 1, clip + 1, confidence)
+            scores[record][clip] = best
+            choices[record][clip] = choice
+
+    if record_count and scores[0][0] < 0:
+        raise UnsupportedMotion("Cannot associate qstm records with scalar clips")
+    names = [None] * clip_count
+    associations = []
+    record = clip = 0
+    while record < record_count:
+        choice = choices[record][clip]
+        if choice is None:
+            raise UnsupportedMotion("Incomplete qstm/scalar association")
+        if choice[0] == "skip":
+            clip = choice[2]
+            continue
+        confidence = choice[3]
+        names[clip] = records[record]["name"]
+        associations.append({
+            "record_index": record,
+            "clip_index": clip,
+            "name": records[record]["name"],
+            "qstm_frame_count": records[record]["frame_count"],
+            "clip_frame_count": frame_counts[clip],
+            "confidence": confidence,
+        })
+        record, clip = choice[1], choice[2]
+    return names, associations
+
+
 def decode_motion_skeleton(segment: bytes):
     """Decode the animation resource's ordered reference skeleton.
 
@@ -108,7 +279,7 @@ def decode_motion_skeleton(segment: bytes):
     """
     if len(segment) < 4:
         raise UnsupportedMotion("Truncated motion skeleton")
-    bone_count, version = segment[0], segment[1]
+    bone_count, ik_chain_count = segment[0], segment[1]
     if not 1 <= bone_count <= 255:
         raise UnsupportedMotion("Invalid motion skeleton bone count")
     ids_offset = 2 + (bone_count - 1) * 2
@@ -134,20 +305,148 @@ def decode_motion_skeleton(segment: bytes):
         norm = math.sqrt(sum(value * value for value in rotation))
         if not 0.99 <= norm <= 1.01:
             raise UnsupportedMotion("Invalid motion reference quaternion")
+        constraint_flags = 0 if index == 0 else hierarchy[index - 1][1]
+        ik_role = (
+            "chain_start" if constraint_flags == 0x03 else
+            "chain_middle" if constraint_flags == 0x04 else
+            "effector" if constraint_flags & 0x08 else
+            "continuation" if constraint_flags in (0x01, 0x02) else
+            None
+        )
         joints.append({
             "index": index,
             "bone_id": bone_id,
             "parent_index": None if index == 0 else hierarchy[index - 1][0],
-            "hierarchy_flags": 0 if index == 0 else hierarchy[index - 1][1],
+            "hierarchy_flags": constraint_flags,
+            "constraint_flags": constraint_flags,
+            "ik_role": ik_role,
+            "ik_class_bits": constraint_flags & 0xF0,
             "translation": translation,
             "rotation": tuple(value / norm for value in rotation),
         })
+    children = [[] for _ in joints]
+    for joint in joints:
+        parent = joint["parent_index"]
+        if parent is not None:
+            children[parent].append(joint["index"])
+
+    ik_chains = []
+    for start in (joint for joint in joints
+                  if joint["constraint_flags"] == 0x03):
+        middles = [
+            index for index in children[start["index"]]
+            if joints[index]["constraint_flags"] == 0x04
+        ]
+        if len(middles) != 1:
+            continue
+        middle = joints[middles[0]]
+        effectors = [
+            index for index in children[middle["index"]]
+            if joints[index]["constraint_flags"] & 0x08
+        ]
+        if len(effectors) != 1:
+            continue
+        effector = joints[effectors[0]]
+        continuation = []
+        current = effector["index"]
+        while True:
+            flagged = [
+                index for index in children[current]
+                if joints[index]["constraint_flags"] in (0x01, 0x02)
+            ]
+            if len(flagged) != 1:
+                break
+            current = flagged[0]
+            continuation.append(current)
+        indices = [start["index"], middle["index"], effector["index"]]
+        ik_chains.append({
+            "index": len(ik_chains),
+            "joint_indices": indices,
+            "bone_ids": [bone_ids[index] for index in indices],
+            "start_joint": start["index"],
+            "middle_joint": middle["index"],
+            "effector_joint": effector["index"],
+            "effector_flags": effector["constraint_flags"],
+            "effector_class_bits": effector["constraint_flags"] & 0xF0,
+            "continuation_joint_indices": continuation,
+            "continuation_bone_ids": [bone_ids[index] for index in continuation],
+        })
+
     return {
-        "version": version,
+        # Formerly exposed as "version". Cross-family comparison proves that
+        # byte 1 is the number of flagged IK chains (0, 2, 3, 4, 6 or 8), not
+        # a format revision. Keep the alias for compatibility with reports.
+        "version": ik_chain_count,
+        "ik_chain_count": ik_chain_count,
+        "ik_chain_layout_valid": len(ik_chains) == ik_chain_count,
+        "ik_chains": ik_chains,
         "bone_count": bone_count,
         "bone_ids": bone_ids,
         "hierarchy": hierarchy,
         "joints": joints,
+    }
+
+
+def classify_reference_roles(reference):
+    """Derive a generic FK/IK joint classification from a motion skeleton.
+
+    The engine encodes the rig semantics directly in the reference skeleton:
+    each hierarchy entry carries a ``constraint_flags`` byte whose low nibble
+    marks a joint as part of an IK chain (`0x03` start, `0x04` middle, `0x08`
+    effector) and whose high nibble carries a class. This function turns that
+    declaration into a per-joint role, independently of any character name.
+
+    It is the generic replacement for the "this joint id is a position target"
+    style rules: an IK effector is a model-space *position* target, every other
+    joint is a *rotation* (FK Euler/controller). Verified against chr300/301/
+    500/560 where ``ik_chain_layout_valid`` is true.
+
+    Returns a dict with:
+      ``roles``        : joint_index -> "rotation" | "position"
+      ``ik_effectors`` : sorted joint indices flagged as effectors
+      ``ik_starts``    : sorted joint indices flagged as chain starts
+      ``ik_middles``   : sorted joint indices flagged as chain middles
+      ``fk_joints``    : sorted joint indices with no IK flag
+      ``continuation`` : sorted joint indices flagged as chain continuations
+      ``effector_class_bits`` : joint_index -> high-nibble class of effectors
+    """
+    joints = reference.get("joints", [])
+    roles = {}
+    ik_effectors, ik_starts, ik_middles, fk_joints, continuation = [], [], [], [], []
+    effector_class_bits = {}
+    for position, joint in enumerate(joints):
+        index = joint.get("index", position)
+        flags = joint.get("constraint_flags", 0)
+        marked = False
+        if flags & 0x08:
+            ik_effectors.append(index)
+            effector_class_bits[index] = flags & 0xF0
+            marked = True
+        elif flags == 0x03:
+            ik_starts.append(index)
+            marked = True
+        elif flags == 0x04:
+            ik_middles.append(index)
+            marked = True
+        elif flags in (0x01, 0x02):
+            continuation.append(index)
+            marked = True
+        if not marked:
+            fk_joints.append(index)
+        # An effector drives a model-space position target; everything else is
+        # a rotation. A chain start/middle are rotational FK bones whose result
+        # is refined by the effector's IK solve.
+        roles[index] = "position" if (flags & 0x08) else "rotation"
+    return {
+        "roles": roles,
+        "ik_effectors": ik_effectors,
+        "ik_starts": ik_starts,
+        "ik_middles": ik_middles,
+        "fk_joints": fk_joints,
+        "continuation": continuation,
+        "effector_class_bits": effector_class_bits,
+        "ik_chain_count": reference.get("ik_chain_count"),
+        "ik_chain_layout_valid": reference.get("ik_chain_layout_valid"),
     }
 
 
@@ -180,6 +479,7 @@ def discover_character_motion(model_path: Path):
         "decoded": False,
         "state_sequence_path": str(state_sequence_path) if state_sequence_path.is_file() else None,
     }
+    state_records = []
 
     if state_sequence_path.is_file():
         state_data = state_sequence_path.read_bytes()
@@ -197,13 +497,19 @@ def discover_character_motion(model_path: Path):
                 indices = struct.unpack_from(f">{slot_count}I", state_data, 0x84)
                 if all(index == 0xFFFFFFFF or index < len(name_table)
                        for index in indices):
-                    result["clip_name_slots"] = [
+                    result["logical_state_name_slots"] = [
                         None if index == 0xFFFFFFFF else name_table[index]
                         for index in indices
                     ]
-                    result["named_clip_count"] = sum(
+                    result["named_logical_state_count"] = sum(
                         index != 0xFFFFFFFF for index in indices
                     )
+            try:
+                state_records = decode_motion_state_records(state_data)
+                result["state_record_count"] = len(state_records)
+                result["state_records"] = state_records
+            except UnsupportedMotion as exc:
+                result["state_records_error"] = str(exc)
 
     if sequence_path.is_file():
         motion = sequence_path.read_bytes()
@@ -242,6 +548,29 @@ def discover_character_motion(model_path: Path):
                             result["last_clip_offset"] = boundaries[-3]
                             result["metadata_segment_offset"] = metadata_offset
                             result["animation_boundaries"] = boundaries[1:-1]
+                            if state_records:
+                                frame_counts = [
+                                    (struct.unpack_from(">H", motion, start + 2)[0]
+                                     if end - start >= 4 else None)
+                                    for start, end in zip(
+                                        result["animation_boundaries"],
+                                        result["animation_boundaries"][1:],
+                                    )
+                                ]
+                                try:
+                                    names, associations = (
+                                        associate_motion_state_records(
+                                            state_records, frame_counts,
+                                        )
+                                    )
+                                    result["clip_name_slots"] = names
+                                    result["clip_name_associations"] = associations
+                                    result["named_clip_count"] = len(associations)
+                                    result["anonymous_clip_count"] = (
+                                        declared_animations - len(associations)
+                                    )
+                                except UnsupportedMotion as exc:
+                                    result["clip_name_association_error"] = str(exc)
                             try:
                                 metadata = decode_motion_metadata(
                                     motion[metadata_offset:boundaries[-1]]
@@ -270,17 +599,32 @@ def discover_character_motion(model_path: Path):
                                 motion[boundaries[0]:boundaries[1]]
                             )
                             result["motion_skeleton_version"] = reference["version"]
+                            result["motion_ik_chain_count"] = reference[
+                                "ik_chain_count"
+                            ]
+                            result["motion_ik_chain_layout_valid"] = reference[
+                                "ik_chain_layout_valid"
+                            ]
+                            result["motion_ik_chains"] = reference["ik_chains"]
                             result["motion_skeleton_bone_count"] = reference["bone_count"]
                             result["skeleton_bone_ids"] = reference["bone_ids"]
                         except UnsupportedMotion as exc:
                             result["motion_skeleton_error"] = str(exc)
+
+    if result.get("motion_skeleton_bone_count") and model_path.is_file():
+        try:
+            result["motion_translation_error"] = (
+                compare_motion_skeleton_to_ddm(model_path)
+            )
+        except Exception:  # diagnostics only; never fail an export for this
+            pass
 
     if package_path.is_file():
         package = package_path.read_bytes()
         if len(package) >= 12 and package[:4] == b"\x00crg":
             try:
                 rig_graph = decode_character_rig_graph(package)
-                result["package_boundary_count"] = rig_graph["boundary_count"]
+                result["package_header_field_08"] = rig_graph["header_field_08"]
                 result["package_entry_count"] = rig_graph["record_count"]
                 result["rig_graph"] = rig_graph
             except UnsupportedMotion as exc:
@@ -301,8 +645,10 @@ def decode_scalar_clip(clip: bytes):
     The header counts scalar descriptors, not bones. Eight 3-bit descriptors
     are packed into a big-endian 24-bit word, least significant descriptor
     first. Mode 5 is constant, 6 has linear samples, and 7 value/tangent pairs.
-    Codes 0..4 are retained symbolically until their rig-specific meaning is
-    established. No magnitude filters, made-up quaternions or bind offsets.
+    Codes 1..4 are payload-free constants: 0, +pi/2, +pi and -pi/2. Code 0
+    means use the semantic channel default (zero for Euler deltas, bind value
+    for an omitted translation component). No magnitude filters, made-up
+    quaternions or bind offsets are applied by the storage decoder.
     """
     if len(clip) < 4:
         raise UnsupportedMotion("Truncated clip header")
@@ -321,19 +667,29 @@ def decode_scalar_clip(clip: bytes):
     modes = modes[:count]
     cursor = descriptor_end
     key_frames = {}
-    if frame_count > 256:
-        raise UnsupportedMotion("Wide key-time encoding is not implemented")
+    wide_key_times = frame_count > 256
     for index, mode in enumerate(modes):
         if mode not in (6, 7):
             continue
-        if cursor >= len(clip):
+        count_size = 2 if wide_key_times else 1
+        if cursor + count_size > len(clip):
             raise UnsupportedMotion("Truncated key table")
-        interior_count = clip[cursor]
-        cursor += 1
-        if cursor + interior_count > len(clip):
+        interior_count = (
+            struct.unpack_from(">H", clip, cursor)[0]
+            if wide_key_times else clip[cursor]
+        )
+        cursor += count_size
+        time_size = 2 if wide_key_times else 1
+        byte_count = interior_count * time_size
+        if cursor + byte_count > len(clip):
             raise UnsupportedMotion("Truncated key times")
-        interior = list(clip[cursor:cursor + interior_count])
-        cursor += interior_count
+        interior = (
+            list(struct.unpack_from(
+                f">{interior_count}H", clip, cursor,
+            )) if wide_key_times and interior_count else
+            list(clip[cursor:cursor + interior_count])
+        )
+        cursor += byte_count
         if interior != sorted(set(interior)) or any(
             not 0 < frame < frame_count - 1 for frame in interior
         ):
@@ -369,21 +725,57 @@ def decode_scalar_clip(clip: bytes):
         raise UnsupportedMotion(f"Unaccounted curve bytes: {len(clip) - cursor}")
     return {"scalar_count": count, "frame_count": frame_count,
             "payload_offset": payload_start, "bytes_consumed": cursor,
+            "wide_key_times": wide_key_times,
             "key_table_padding": key_table_padding,
             "tracks": tracks}
 
 
-def _sample_linear(track, frame, fallback):
+def _sample_linear(track, frame, fallback, fps=30.0):
+    """Sample one scalar curve at an integer or fractional source frame.
+
+    The historical name is kept for callers in the research tools.  Mode 6 is
+    linear.  Mode 7 stores a value and a first derivative at every key and is
+    cubic Hermite: its tangents are expressed per second, while key times are
+    source frames (the observed chr30x streams run at 30 Hz).
+    """
+    implicit = {
+        1: 0.0,
+        2: math.pi / 2.0,
+        3: math.pi,
+        4: -math.pi / 2.0,
+    }
+    if track["mode"] in implicit:
+        return implicit[track["mode"]]
     if track["mode"] == 5:
         return track["values"][0]
-    if track["mode"] not in (6, 7):
+    if track["mode"] == 0:
         return fallback
+    if track["mode"] not in (6, 7):
+        raise UnsupportedMotion(f"Unsupported scalar mode {track['mode']}")
     frames, values = track["frames"], track["values"]
     for right in range(1, len(frames)):
         if frame <= frames[right]:
             left = right - 1
             span = frames[right] - frames[left]
             alpha = (frame - frames[left]) / span
+            if track["mode"] == 7:
+                # Cubic Hermite basis.  A one-frame interval in the source
+                # data repeatedly has (v1-v0) == tangent/30, establishing
+                # that the stored derivative uses seconds rather than frames.
+                alpha2 = alpha * alpha
+                alpha3 = alpha2 * alpha
+                h00 = 2 * alpha3 - 3 * alpha2 + 1
+                h10 = alpha3 - 2 * alpha2 + alpha
+                h01 = -2 * alpha3 + 3 * alpha2
+                h11 = alpha3 - alpha2
+                seconds = span / fps
+                tangents = track["tangents"]
+                return (
+                    h00 * values[left]
+                    + h10 * seconds * tangents[left]
+                    + h01 * values[right]
+                    + h11 * seconds * tangents[right]
+                )
             return values[left] * (1 - alpha) + values[right] * alpha
     return values[-1]
 
@@ -395,11 +787,13 @@ def decode_experimental_joint_rotations(decoded, skeleton, joint_indices,
                                         reference_skeleton=None,
                                         deforming_joint_indices=None,
                                         axis_map="xyz", axis_signs="+++",
-                                        rotation_model="global_delta",
+                                        rotation_model="local_delta_post",
                                         reference_decoded=None,
                                         reference_frame=None,
                                         active_joint_indices=None,
-                                        reference_scalar_starts=None):
+                                        reference_scalar_starts=None,
+                                        rotation_bases=None,
+                                        position_triplet_joints=None):
     """Decode selected Euler triplets into local joint rotations.
 
     Motion layouts end in three Euler scalars per reference-skeleton joint,
@@ -555,6 +949,23 @@ def decode_experimental_joint_rotations(decoded, skeleton, joint_indices,
             for joint_index, tracks in enumerate(reference_tracks_by_joint)
         ]
 
+    basis_by_joint = {}
+    for joint_index, angles in (rotation_bases or {}).items():
+        basis_tracks = [
+            {"mode": 5, "values": [angle]} for angle in angles
+        ]
+        basis_by_joint[joint_index] = source_quaternion(
+            basis_tracks, joint_index, 0,
+        )
+
+    # Some structurally interleaved transform triplets are model-space
+    # positions or still-unclassified controller data, not Euler angles.
+    # Their classification must come from the reference skeleton flags or a
+    # separately proven stream binding. Do not infer it from magnitude here:
+    # valid Euler curves can unwrap past one turn, while leg targets can remain
+    # well below it (REVERSE_DDM.md section 28.4).
+    position_triplet_joints = set(position_triplet_joints or ())
+
     driver_by_joint = {}
     deforming = set(deforming_joint_indices or ())
     if deforming and reference_joints and scalar_starts is None:
@@ -595,12 +1006,20 @@ def decode_experimental_joint_rotations(decoded, skeleton, joint_indices,
         track_joint = driver_by_joint.get(joint_index, joint_index)
         tracks = tracks_by_joint[track_joint]
         # Modes 1 and 2 are implicit zero offsets in the observed rigs.
-        if all(track["mode"] in (1, 2) for track in tracks):
+        if (track_joint in position_triplet_joints
+                or all(track["mode"] in (1, 2) for track in tracks)):
             quaternion = global_bind[joint_index]
         else:
             source_rotation = source_quaternion(tracks, joint_index, frame)
             source_delta = source_rotation
-            if reference_by_joint is not None:
+            if track_joint in basis_by_joint:
+                # Stable cardinal pre-rotations belong to the controller's
+                # coordinate basis, not to the animation.  Cancel them before
+                # composing the actual motion around the DDM bind rotation.
+                source_delta = multiply(
+                    inverse(basis_by_joint[track_joint]), source_delta,
+                )
+            elif reference_by_joint is not None:
                 # Interpret stored orientations around a known neutral pose.
                 # This cancels a constant per-joint basis while preserving all
                 # relative motion in the curve.
@@ -707,17 +1126,146 @@ def decode_experimental_joint_rotations(decoded, skeleton, joint_indices,
             "rotation_reference_frame": (
                 reference_frame if reference_by_joint is not None else None
             ),
+            "rotation_basis": rotation_bases.get(
+                driver_by_joint.get(joint_index, joint_index)
+            ) if rotation_bases else None,
         })
     return channels
+
+
+def root_chain_length(reference):
+    """Length of the contiguous root/spine chain in a motion skeleton.
+
+    Every observed rig stores its root and spine as the leading joints whose
+    ``parent_index == index - 1``. The first index that breaks that rule starts
+    the first branch. This is the generic, name-free prefix that the scalar
+    transform list follows in order (verified 0->joint1, 1->joint2, ...).
+
+    The chain includes the root joint (index 0), so the number of *non-root*
+    chain joints is ``root_chain_length - 1``.
+    """
+    joints = reference.get("joints", [])
+    length = 1
+    for index in range(1, len(joints)):
+        parent = joints[index].get("parent_index")
+        if parent is None:
+            parent = joints[index].get("parent")
+        if parent == index - 1:
+            length += 1
+        else:
+            break
+    return length
+
+
+def infer_generic_root_prefix(canonical_scalar_count):
+    """Report the generic eight-scalar root prefix of a motion clip.
+
+    Cross-family comparison shows every rig (humanoid, boss, prop) starts a
+    clip with the same eight root scalars: slot 0 is an implicit-zero heading
+    carrier, slots 2..4 are the model-space root translation, and a later slot
+    carries the Y heading. It is the fallback that lets the decoder export root
+    motion for rigs whose full joint binding is not proven yet.
+    """
+    if canonical_scalar_count < 8:
+        raise UnsupportedMotion("Clip is too short for the root prefix")
+    return {
+        "root_scalar_count": 8,
+        "translation_slots": (2, 3, 4),
+        "heading_slot": 0,
+        "reserved_slot": 1,
+        "verified": True,
+    }
+
+
+def select_canonical_scalar_count(scalar_counts):
+    """Choose the transform-rich scalar count for a character.
+
+    A character stores the same clips with a few scalar-count variants that
+    differ by whole triplets (or the six-root header): chr300 has
+    ``247/249/251/253``, chr301 ``332/334/336/338``. The richest layout is
+    *not* always the largest value: for chr300 the maximum (253) leaves
+    ``(253 - 8) % 3 == 2`` and is not triplet aligned, while 251 is. The engine
+    iterates the variant list and uses the aligned one, so the decoder must do
+    the same instead of taking ``max``.
+
+    Returns ``(canonical, root_scalar_count)`` where ``root_scalar_count`` is
+    the leading prefix width (8, or a shorter six-root header) that makes the
+    layout triplet aligned. Raises when no variant is aligned.
+    """
+    counts = sorted(set(scalar_counts))
+    # Prefer the largest count that is triplet aligned with an eight-scalar
+    # root prefix; fall back to a six-root header, matching chr300's older
+    # scalar layout.
+    for root in (8, 6):
+        aligned = [count for count in counts if count >= root + 3
+                   and (count - root) % 3 == 0]
+        if aligned:
+            return max(aligned), root
+    raise UnsupportedMotion("No triplet-aligned scalar layout variant")
+
+
+def infer_generic_joint_scalar_starts(skeleton, canonical_scalar_count, reference,
+                                      root_scalar_count=8):
+    """Bind scalar triplets to joints without any humanoid-specific IDs.
+
+    The rule is structural and rig-independent:
+
+    * the leading ``root_scalar_count`` scalars are the root prefix (see
+      ``infer_generic_root_prefix``; 8 normally, 6 for chr300's older layout);
+    * the remaining scalars are ordered triplets;
+    * the first ``root_chain_length - 1`` triplets bind in order to the
+      contiguous root/spine chain, which is verified consistent across every
+      rig;
+    * IK effectors among the bound joints are reported as model-space
+      positions, not Euler rotations.
+
+    Raises ``UnsupportedMotion`` when the list is not triplet aligned so the
+    caller can fall back to a root-only export.
+    """
+    joints = skeleton.get("joints", [])
+    if canonical_scalar_count < root_scalar_count + 3 or (
+            (canonical_scalar_count - root_scalar_count) % 3):
+        raise UnsupportedMotion("Transform list is not triplet aligned")
+    if not joints:
+        raise UnsupportedMotion("Skeleton has no joints")
+    # The contiguous root/spine chain is a property of the target skeleton,
+    # which carries parent_index/parent; the IK roles come from the motion
+    # reference skeleton's constraint flags.
+    chain = root_chain_length(skeleton)
+    triplet_count = (canonical_scalar_count - root_scalar_count) // 3
+    chain_triplets = min(chain - 1, triplet_count)
+    if chain_triplets <= 0:
+        raise UnsupportedMotion("Skeleton has no root/spine chain to bind")
+
+    scalar_starts = {}
+    for step in range(chain_triplets):
+        scalar_starts[step + 1] = root_scalar_count + 3 * step
+    positions = set()
+    if isinstance(reference, dict):
+        roles = classify_reference_roles(reference)
+        bound = set(scalar_starts)
+        positions = {joint for joint in roles["ik_effectors"] if joint in bound}
+    return scalar_starts, {
+        "kind": "generic_root_chain",
+        "root_scalar_count": root_scalar_count,
+        "triplet_count": triplet_count,
+        "root_chain_length": chain,
+        "joint_triplet_count": len(scalar_starts),
+        "position_joints": sorted(positions),
+    }
 
 
 def infer_humanoid_joint_scalar_starts(skeleton, canonical_scalar_count):
     """Bind the observed humanoid transform-list segments to skeleton joints.
 
-    chr301/302/303 share an exact segment layout. Within a segment, one
-    transform triplet is stored for each skeleton joint in skeleton order,
-    followed by a fixed number of auxiliary rig-control triplets. Accessory
-    joints remain in skeleton order; chr301 adds six accessory controls.
+    chr301/302/303 share an exact segment layout. Most anatomical segments use
+    skeleton order, but each arm has a verified functional permutation (FK
+    branches followed by IK controls). Fixed auxiliary rig-control triplets are
+    interleaved between segments.  The character-specific block between the
+    head and left arm is deliberately left unbound: on chr301 none of its 135
+    scalars is animated in any clip, its non-zero values are invariant rig
+    setup/controller data, and sequentially assigning them to hair joints
+    produces impossible rotations (up to 13.47 radians).
     """
     joints = skeleton.get("joints", [])
     bone_ids = [joint.get("global_id") for joint in joints]
@@ -767,12 +1315,25 @@ def infer_humanoid_joint_scalar_starts(skeleton, canonical_scalar_count):
 
     bind(range(1, 5))
     group += 3
-    bind(range(5, left_arm_start))
-    group += accessory_auxiliary_count
-    bind(range(left_arm_start, left_arm_start + 9))
-    group += 3
-    bind(range(right_arm_start, right_arm_start + 9))
-    group += 3
+    accessory_joint_count = left_arm_start - 5
+    accessory_block_triplet_count = (
+        accessory_joint_count + accessory_auxiliary_count
+    )
+    group += accessory_block_triplet_count
+    # Arm controller order is functional, not motion-skeleton order.  The
+    # first triplet drives the forearm branch and the fourth the shoulder root;
+    # binding these sequentially put the forearm's large absolute orientation
+    # on bone 10/40 and folded both shoulders over the chest.  Left and right
+    # blocks have the same role ordering.
+    left_arm_scalar_order = [13, 35, 11, 10, 36, 251, 15, 37, 34]
+    bind([bone_ids.index(bone_id) for bone_id in left_arm_scalar_order])
+    # Four controller triplets separate the left and right arm joint blocks.
+    # Treating this as three shifts every right-arm curve onto the preceding
+    # bone (40 gets an empty control, 41 gets bone 40's curve, etc.).
+    group += 4
+    right_arm_scalar_order = [43, 65, 41, 40, 66, 250, 45, 67, 64]
+    bind([bone_ids.index(bone_id) for bone_id in right_arm_scalar_order])
+    group += 2
     bind(range(right_arm_start + 9, pelvis_start))
     bind([pelvis_start])
     group += 1
@@ -785,12 +1346,225 @@ def infer_humanoid_joint_scalar_starts(skeleton, canonical_scalar_count):
             f"Humanoid transform binding consumed {group}/{triplet_count} triplets"
         )
     return scalar_starts, {
+        "kind": "humanoid_v4_segments",
         "root_scalar_count": 8,
         "triplet_count": triplet_count,
         "joint_triplet_count": len(scalar_starts),
         "auxiliary_triplet_count": auxiliary_count,
         "accessory_auxiliary_triplet_count": accessory_auxiliary_count,
+        "unbound_accessory_joint_count": accessory_joint_count,
+        "unbound_accessory_triplet_count": accessory_block_triplet_count,
     }
+
+
+def infer_humanoid_rotation_bases(motion, boundaries, skeleton,
+                                  scalar_starts, canonical_scalar_count,
+                                  canonical_anchors=None,
+                                  reference_skeleton=None):
+    """Classify bound triplets and find stable controller pre-rotations.
+
+    The humanoid stream interleaves Euler controllers, declared model-space
+    effectors, and unknown rig controls. Position semantics come only from the
+    reference skeleton flags. Sequence-wide magnitude can quarantine an
+    unsafe unknown slot, but never promotes it to a position. A controller
+    basis is accepted only inside the structurally proven leading chain when
+    a non-zero cardinal angle recurs at clip boundaries with low dispersion.
+    """
+    samples = {joint: [[], [], []] for joint in scalar_starts}
+    declared_positions = set()
+    if reference_skeleton is not None:
+        declared_positions.update(
+            classify_reference_roles(reference_skeleton)["ik_effectors"]
+        )
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end <= start:
+            continue
+        decoded = decode_scalar_clip(motion[start:end])
+        try:
+            starts, _ = derive_humanoid_scalar_starts(
+                decoded, scalar_starts, canonical_anchors,
+            )
+        except UnsupportedMotion:
+            starts = remap_humanoid_scalar_starts(
+                skeleton, scalar_starts, decoded["scalar_count"],
+                canonical_scalar_count,
+            )
+        for joint_index, scalar_start in starts.items():
+            tracks = decoded["tracks"][scalar_start:scalar_start + 3]
+            if len(tracks) != 3:
+                continue
+            for axis, track in enumerate(tracks):
+                fallback = (
+                    1.0 if track["mode"] == 3 else
+                    -1.0 if track["mode"] == 4 else 0.0
+                )
+                samples[joint_index][axis].extend((
+                    _sample_linear(track, 0, fallback),
+                    _sample_linear(
+                        track, decoded["frame_count"] - 1, fallback,
+                    ),
+                ))
+
+    non_rotation_joints = set(declared_positions)
+    bases = {}
+    diagnostics = []
+    quarter_turn = math.pi / 2.0
+    proven_prefix_length = root_chain_length(skeleton)
+    for joint_index, axes in samples.items():
+        # Positions have a persistent component outside the rotational range.
+        # Use a median over every clip so an isolated unwrapped Euler turn does
+        # not cause the whole joint to disappear.
+        magnitude_signal = any(
+            values and sorted(abs(value) for value in values)[len(values) // 2]
+            > 2.0 * math.pi + 0.01
+            for values in axes
+        )
+        # Magnitude only proves that this bound slot is unsafe to export as an
+        # Euler rotation. It does not prove a position semantic. Preserve it
+        # as an unknown controller and omit it from FK reconstruction.
+        if magnitude_signal:
+            non_rotation_joints.add(joint_index)
+        position = joint_index in declared_positions
+
+        global_id = skeleton["joints"][joint_index].get("global_id")
+        basis = [0.0, 0.0, 0.0]
+        axis_report = []
+        for axis, values in enumerate(axes):
+            if not values:
+                axis_report.append(None)
+                continue
+            wrapped = [math.atan2(math.sin(value), math.cos(value))
+                       for value in values]
+            counts = Counter(round(value, 2) for value in wrapped)
+            mode, count = counts.most_common(1)[0]
+            deviations = sorted(abs(math.atan2(
+                math.sin(value - mode), math.cos(value - mode),
+            )) for value in wrapped)
+            median_deviation = deviations[len(deviations) // 2]
+            nearest = round(mode / quarter_turn) * quarter_turn
+            support = count / len(wrapped)
+            bind_rotation = skeleton["joints"][joint_index].get(
+                "rotation", (0.0, 0.0, 0.0, 1.0),
+            )
+            repeated_quarter_frame = (
+                abs(bind_rotation[0] - bind_rotation[2]) <= 1e-4
+                and abs(bind_rotation[1] - bind_rotation[3]) <= 1e-4
+            )
+            relaxed_bind_evidence = (
+                joint_index < proven_prefix_length
+                and repeated_quarter_frame
+            )
+            cardinal = (
+                joint_index not in non_rotation_joints
+                # Outside the structurally proven root/spine prefix a stable
+                # cardinal value may belong to an interleaved controller. Do
+                # not turn it into a bone basis until that block is mapped.
+                and joint_index < proven_prefix_length
+                and abs(nearest) > 1e-6
+                and abs(math.atan2(
+                    math.sin(mode - nearest), math.cos(mode - nearest),
+                )) <= (0.25 if relaxed_bind_evidence else 0.12)
+                and median_deviation <= (
+                    0.13 if relaxed_bind_evidence else 0.06
+                )
+                and support >= 0.25
+            )
+            if cardinal and abs(basis[axis]) <= 1e-6:
+                basis[axis] = nearest
+            axis_report.append({
+                "mode_radians": mode,
+                "mode_support": support,
+                "median_deviation_radians": median_deviation,
+                "cardinal_basis_radians": basis[axis],
+            })
+        if any(abs(value) > 1e-6 for value in basis):
+            bases[joint_index] = tuple(basis)
+        diagnostics.append({
+            "joint": joint_index,
+            "global_id": global_id,
+            "source_scalar_indices": list(range(
+                scalar_starts[joint_index], scalar_starts[joint_index] + 3,
+            )),
+            "kind": (
+                "position" if position else
+                "unknown_controller" if magnitude_signal else
+                "rotation"
+            ),
+            "axes": axis_report,
+        })
+    return bases, non_rotation_joints, diagnostics
+
+
+def derive_humanoid_ik_targets(decoded, skeleton, scalar_starts):
+    """Locate the humanoid effector target/orientation sextets per clip.
+
+    Each IK chain ends in a contiguous sextet of animated scalars
+    ``[target x/y/z][orientation x/y/z]`` in model space. The sextet does not
+    sit at a fixed offset relative to the bound joint triplet: the leg
+    segment interleaves whole stride-controller triplets (the invariant
+    constants 25.389/9.981, 15.185 and 34.75 seen only in some clips), so
+    the left foot sextet starts two scalars after the bound bone-204 slot
+    and the right foot one four scalars after bone 217. The former fixed
+    +2/+3/+5 arithmetic baked the wrong channel pairs (the published
+    verified-left-hand example is 184, not the binder's 182), which produced
+    axis-swizzled targets.
+
+    The scan is structural, per clip: inside the window
+    ``[start, start+8]`` it accepts the first offset whose target triplet
+    (three consecutive animated scalars, model-space position values) is
+    followed by an equally animated orientation triplet with Euler-range
+    values. Raises ``UnsupportedMotion`` when the sextet is absent, so the
+    caller can fall back to the historical fixed offsets.
+    """
+    joints = skeleton.get("joints", [])
+    by_id = {joint.get("global_id"): joint["index"] for joint in joints}
+    window = 9
+    target_specs = []
+    for chain, bone_id in (
+        ((11, 13, 15), 15),
+        ((41, 43, 45), 45),
+        ((200, 201, 202), 204),
+        ((210, 211, 212), 217),
+    ):
+        if by_id.get(bone_id) not in scalar_starts:
+            continue
+        joint_index = by_id[bone_id]
+        start = scalar_starts[joint_index]
+        tracks = decoded["tracks"]
+        accepted = None
+        for offset in range(start, min(start + window,
+                                       decoded["scalar_count"] - 6)):
+            target_tracks = tracks[offset:offset + 3]
+            orientation_tracks = tracks[offset + 3:offset + 6]
+            if any(track["mode"] not in (6, 7) for track in target_tracks):
+                continue
+            if any(track["mode"] not in (6, 7)
+                   for track in orientation_tracks):
+                continue
+            position = tuple(_sample_linear(track, 0, 0.0)
+                             for track in target_tracks)
+            orientation = tuple(_sample_linear(track, 0, 0.0)
+                                for track in orientation_tracks)
+            if any(abs(value) > 12.0 for value in orientation):
+                continue
+            if abs(position[1]) > 200.0 or any(
+                    abs(value) > 1200.0 for value in position):
+                continue
+            accepted = (offset, position, orientation)
+            break
+        if accepted is None:
+            raise UnsupportedMotion(
+                f"No effector sextet for humanoid chain {chain}"
+            )
+        target_specs.append({
+            "chain": chain,
+            "joint_index": joint_index,
+            "target_start": accepted[0],
+            "orientation_start": accepted[0] + 3,
+            "frame0_target": accepted[1],
+            "frame0_orientation": accepted[2],
+        })
+    return target_specs
 
 
 def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
@@ -813,8 +1587,8 @@ def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
     """
     joints = skeleton.get("joints", [])
     by_id = {joint.get("global_id"): joint["index"] for joint in joints}
-    required = (11, 13, 15, 41, 43, 45, 200, 201, 202, 210, 211, 212,
-                251, 66, 204, 217)
+    required = (11, 13, 15, 37, 41, 43, 45, 67,
+                200, 201, 202, 210, 211, 212, 204, 217)
     if any(bone_id not in by_id for bone_id in required):
         raise UnsupportedMotion("Humanoid IK bones/controllers are missing")
 
@@ -934,15 +1708,40 @@ def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
             f"Unknown IK target orientation mode: {target_orientation_mode}"
         )
     target_specs = [
-        ((11, 13, 15), scalar_starts[by_id[251]] + 2,
-         scalar_starts[by_id[251]] + 5),
-        ((41, 43, 45), scalar_starts[by_id[66]] + 2,
-         scalar_starts[by_id[66]] + 5),
-        ((200, 201, 202), scalar_starts[by_id[204]] + 2,
-         scalar_starts[by_id[204]] + 5),
-        ((210, 211, 212), scalar_starts[by_id[217]] + 4,
-         scalar_starts[by_id[217]] + 7),
+        # These are complete XYZ triplets.  The former +2 offsets spliced the
+        # last scalar of one controller to the first two of the next, which
+        # made both target positions and orientations appear axis-swizzled.
+        ((11, 13, 15), scalar_starts[by_id[15]],
+         scalar_starts[by_id[37]]),
+        ((41, 43, 45), scalar_starts[by_id[45]],
+         scalar_starts[by_id[67]]),
+        ((200, 201, 202), scalar_starts[by_id[204]],
+         scalar_starts[by_id[204]] + 3),
+        # The right-foot block begins two scalars into the nominal bone-217
+        # group, but position and orientation are each contiguous thereafter.
+        ((210, 211, 212), scalar_starts[by_id[217]] + 2,
+         scalar_starts[by_id[217]] + 5),
     ]
+    # Prefer the structural, per-clip effector scan (derive_humanoid_ik_
+    # targets): the interleaved stride controllers shift the sextets, so the
+    # fixed offsets above only matched the rare layout variants by chance.
+    target_scan = None
+    try:
+        target_scan = derive_humanoid_ik_targets(decoded, skeleton,
+                                                 scalar_starts)
+    except UnsupportedMotion:
+        target_scan = None
+    if target_scan is not None:
+        by_chain = {tuple(spec["chain"]): spec for spec in target_scan}
+        rebuilt = []
+        for chain in ((11, 13, 15), (41, 43, 45),
+                      (200, 201, 202), (210, 211, 212)):
+            spec = by_chain.get(tuple(chain))
+            if spec is None:
+                continue
+            rebuilt.append((chain, spec["target_start"],
+                            spec["orientation_start"]))
+        target_specs = rebuilt
     if any(
         (orientation_start if target_orientation_mode == "source-row"
          else target_start) + 2 >= decoded["scalar_count"]
@@ -1015,10 +1814,10 @@ def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
         if reference_frame is None:
             reference_frame = reference_decoded["frame_count"] - 1
         reference_specs = {
-            15: reference_scalar_starts[by_id[251]] + 5,
-            45: reference_scalar_starts[by_id[66]] + 5,
-            202: reference_scalar_starts[by_id[204]] + 5,
-            212: reference_scalar_starts[by_id[217]] + 7,
+            15: reference_scalar_starts[by_id[37]],
+            45: reference_scalar_starts[by_id[67]],
+            202: reference_scalar_starts[by_id[204]] + 3,
+            212: reference_scalar_starts[by_id[217]] + 5,
         }
         reference_orientations = {
             by_id[bone_id]: source_row_orientation(
@@ -1035,8 +1834,12 @@ def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
             orientation = multiply(
                 orientation, inverse(reference_orientations[end]),
             )
-            orientation = multiply(orientation, bind_rotations[end])
-        return normalize(orientation)
+        # The stored orientation is a source-space offset, not a standalone
+        # Godot global basis. Compose it with the end effector's global bind
+        # orientation even when no explicit reference clip was requested;
+        # otherwise a near-identity hand value points along the skeleton's
+        # lateral X axis instead of preserving the hand's downward bind pose.
+        return normalize(multiply(orientation, bind_rotations[end]))
 
     solved_joints = set()
     if bake_ik:
@@ -1173,39 +1976,176 @@ def apply_experimental_humanoid_ik(decoded, skeleton, channels, scalar_starts,
                         "orientation converted to glTF/Godot"
                     ),
                 })
+
     return channels
+
+
+def collect_constant_anchors(decoded_clip):
+    """Collect the clip's constant scalars as named anchor candidates.
+
+    Every constant scalar (explicit mode 5 payload or the implicit
+    +/-pi/2 and pi carriers) can serve as a structural landmark: rig setup
+    constants are invariant across clips, so the same value re-appears in
+    every variant at the position its block occupies there. Only constants
+    are unambiguous landmarks; animated scalars change value between clips
+    and can never be matched. Mode 0 and the zero-valued mode 1 emit the
+    pervasive zero carrier and stay excluded: matching inert zero slots
+    creates false positional snapshots (mode 0 means "channel absent").
+    """
+    implicit = {
+        2: math.pi / 2.0, 3: math.pi, 4: -math.pi / 2.0,
+    }
+    anchors = []
+    for index, track in enumerate(decoded_clip["tracks"]):
+        mode = track["mode"]
+        if mode in implicit:
+            anchors.append((index, (mode, round(implicit[mode], 4))))
+        elif mode == 5:
+            anchors.append((index, (5, round(track["values"][0], 4))))
+    # Drop keys that occur more than once: an ambiguous value key cannot
+    # identify a specific block position.
+    key_counts = Counter(key for _, key in anchors)
+    return [a for a in anchors if key_counts[a[1]] == 1]
+
+
+def build_canonical_anchor_map(motion, boundaries, canonical_scalar_count,
+                               anchor_positions):
+    """Build the canonical (position, value-key) anchor list of one clip.
+
+    ``anchor_positions`` restricts the stored anchors to the positions that
+    surround the bound joints (dense anchor coverage makes the piecewise
+    shift below exact). Scans clip segments until one decodes with the
+    canonical scalar count, preferring the segment with the most constant
+    scalars (the richest invariant layout).
+    """
+    best = None
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end - start < 4:
+            continue
+        try:
+            decoded = decode_scalar_clip(motion[start:end])
+        except UnsupportedMotion:
+            continue
+        if decoded["scalar_count"] != canonical_scalar_count:
+            continue
+        anchors = collect_constant_anchors(decoded)
+        if best is None or len(anchors) > len(best[1]):
+            best = (decoded, anchors)
+    if best is None:
+        raise UnsupportedMotion(
+            "No canonical scalar-count clip available for anchor alignment"
+        )
+    if anchor_positions is not None:
+        wanted = set(anchor_positions)
+        best = (best[0], [a for a in best[1] if a[0] in wanted])
+    return best[1]
+
+
+def derive_humanoid_scalar_starts(decoded, scalar_starts, canonical_anchors):
+    """Bind joint triplets to one clip's scalars using invariant constants.
+
+    The humanoid stream stores whole optional blocks (root-header variants,
+    rig-control constant blocks) whose presence differs per clip, so a
+    single canonical binding mis-reads every variant. Scalar-to-joint
+    offsets do however only shift at block boundaries, and the invariant
+    rig constants around each boundary survive in every clip. This
+    structs per clip:
+
+    * match the canonical clip's constant anchors to this clip's constant
+      anchors monotonically (same value key, nearest position within +-8);
+    * the offset of a matched pair anchors the shift of every bound joint
+      whose canonical start lies after that anchor and before the next
+      matched one; scalars before the first matched anchor keep offset 0;
+    * the resulting starts must stay in range and climb triplet-wise.
+
+    Raises ``UnsupportedMotion`` when this clip provides too few anchors,
+    leaving the caller the legacy count-arithmetic fallback.
+    """
+    if not canonical_anchors or not scalar_starts:
+        raise UnsupportedMotion("No anchors for per-clip alignment")
+    implicit = {0: 0.0, 1: 0.0, 2: math.pi / 2.0, 3: math.pi,
+                4: -math.pi / 2.0}
+    available = []
+    for index, track in enumerate(decoded["tracks"]):
+        mode = track["mode"]
+        if mode in implicit:
+            available.append((index, (mode, round(implicit[mode], 4))))
+        elif mode == 5:
+            available.append((index, (5, round(track["values"][0], 4))))
+    matched = []
+    cursor = 0
+    for canonical_index, key in canonical_anchors:
+        candidates = [
+            (abs(index - canonical_index), index)
+            for index, candidate_key in available[cursor:]
+            if candidate_key == key
+            and canonical_index - 10 <= index <= canonical_index + 10
+        ]
+        if not candidates:
+            continue
+        candidate = min(candidates)[1]
+        matched.append((canonical_index, candidate))
+        cursor = candidate + 1
+    if len(matched) < 2:
+        raise UnsupportedMotion("Clip offers too few invariant anchors")
+    derived = {}
+    previous_bound = -1
+    previous_shift = 0
+    for joint_index, canonical_start in sorted(
+            scalar_starts.items(), key=lambda item: item[1]):
+        shift = previous_shift
+        for boundary, boundary_shift in matched:
+            if boundary <= canonical_start:
+                shift = boundary_shift - boundary
+            else:
+                break
+        start = canonical_start + shift
+        if (start <= previous_bound
+                or start + 2 >= decoded["scalar_count"]):
+            raise UnsupportedMotion(
+                f"Derived joint start leaves the clip: {start}"
+            )
+        derived[joint_index] = start
+        previous_bound, previous_shift = start, shift
+    return derived, {
+        "kind": "per_clip_anchors",
+        "matched_anchors": [
+            [canonical_index, clip_index]
+            for canonical_index, clip_index in matched
+        ],
+    }
+
 
 
 def remap_humanoid_scalar_starts(skeleton, scalar_starts, scalar_count,
                                  canonical_scalar_count):
-    """Account for the observed optional two-scalar humanoid sections.
+    """Account for the observed scalar-count variants of the humanoid stream.
 
-    The four layouts differ by an early two-scalar controller, a second pair
-    immediately before the right-leg block, and an unused two-scalar suffix.
-    Descriptor indices after an omitted section must be shifted; treating all
-    clips as the maximum layout assigns arm/leg curves to the wrong controls.
+    Four variants share one binding: the canonical layout and three shorter
+    ones (two, four or six scalars fewer). Verified against chr301/302/303 by
+    cross-checking every bound joint against the contiguous-clip continuity of
+    the animated root translation:
+
+    - ``difference in (2, 4)``: the missing scalars live in the *trailing*
+      rig-control suffix, so every bound joint keeps its canonical offset.
+    - ``difference == 6``: the clip also drops the two scalars that sit between
+      the three fixed root auxiliaries and the first joint triplet (a six-root
+      header instead of eight), so the whole transform list shifts by two.
+
+    The earlier heuristic shifted joints after ``start >= 26`` for the two/four
+    cases; that mis-aligned every curve by two scalars and produced the wrong
+    frame-0 orientations. Only the six-scalar variant is genuinely offset.
     """
     difference = canonical_scalar_count - scalar_count
     if difference not in (0, 2, 4, 6):
         raise UnsupportedMotion(
             f"Unsupported humanoid scalar layout difference: {difference}"
         )
-    by_id = {
-        joint.get("global_id"): joint.get("index", index)
-        for index, joint in enumerate(skeleton.get("joints", []))
+    shift = 2 if difference == 6 else 0
+    return {
+        joint_index: canonical_start - shift
+        for joint_index, canonical_start in scalar_starts.items()
     }
-    right_leg_start = scalar_starts[by_id[214]]
-    omit_early = difference in (2, 6)
-    omit_before_right_leg = difference in (4, 6)
-    remapped = {}
-    for joint_index, canonical_start in scalar_starts.items():
-        shift = 0
-        if omit_early and canonical_start >= 26:
-            shift += 2
-        if omit_before_right_leg and canonical_start >= right_leg_start:
-            shift += 2
-        remapped[joint_index] = canonical_start - shift
-    return remapped
 
 
 def infer_rotation_group_start(motion: bytes, boundaries, joint_count):
@@ -1247,7 +2187,7 @@ def decode_experimental_root_translation(decoded, skeleton, fps=30.0):
     if decoded["scalar_count"] < 5 or not skeleton.get("joints"):
         raise UnsupportedMotion("Clip has no root translation layout")
     tracks = decoded["tracks"][2:5]
-    if any(track["mode"] not in (1, 5, 6, 7) for track in tracks):
+    if any(track["mode"] not in (0, 1, 5, 6, 7) for track in tracks):
         raise UnsupportedMotion("Unsupported root translation storage mode")
     frames = sorted({
         frame for track in tracks for frame in track.get("frames", [0])
@@ -1301,8 +2241,19 @@ def decode_root_yaw(decoded, fps=30.0):
     }
 
 
-def decode_root_rotation(decoded, skeleton, fps=30.0, source="combined"):
-    """Decode root rotation, optionally excluding the duplicated heading."""
+def decode_root_rotation(decoded, skeleton, fps=30.0, source="local"):
+    """Decode the root rotation channel.
+
+    ``local`` (default): export the complete XYZ Euler rotation in slots 5..7.
+    The animated ``boredom`` clip proves these are bone_000 rotation channels,
+    while every chr301 turn clip proves that slot 6 carries the same heading
+    *delta* as slot 0. Thus the local triplet preserves root lean/twist and the
+    correct 90/180-degree turns without adding the heading twice.
+
+    ``heading`` retains scalar 0's verified Y heading as a diagnostic-only
+    projection. ``combined`` is the rejected comparison probe: multiplying
+    heading by slots 5..7 doubles turn clips.
+    """
     if decoded["scalar_count"] < 8 or not skeleton.get("joints"):
         raise UnsupportedMotion("Clip has no complete root rotation layout")
     heading = decoded["tracks"][0]
@@ -1361,7 +2312,11 @@ def decode_root_rotation(decoded, skeleton, fps=30.0, source="combined"):
         "interpolation": "LINEAR",
         "source_scalar_indices": [0, 5, 6, 7],
         "source_representation": (
-            f"{source} root rotation from extracted heading and local XYZ Euler radians"
+            "root bone local XYZ Euler radians (scalars 5..7)"
+            if source == "local" else
+            "absolute Y-axis heading in radians (scalar 0)"
+            if source == "heading" else
+            "rejected combined heading and local XYZ Euler probe"
         ),
     }
 
@@ -1376,7 +2331,7 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                                 experimental_rotation_model="local_delta_post",
                                 experimental_rotation_reference_clip=None,
                                 experimental_rotation_reference_frame="end",
-                                experimental_root_rotation_source="combined",
+                                experimental_root_rotation_source="local",
                                 experimental_deforming_rotations_only=False,
                                 experimental_humanoid_ik=False,
                                 experimental_export_ik_targets=False,
@@ -1412,18 +2367,99 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
     boundaries = motion_info["animation_boundaries"]
     rotation_group_start = None
     rotation_scalar_starts = None
+    rotation_bases = None
+    position_triplet_joints = None
+    complete_humanoid_layout = False
+    humanoid_anchors = None
     canonical_scalar_count = None
     if experimental_rotation_joints:
         scalar_counts = [
             struct.unpack_from(">H", motion, start)[0]
             for start, end in zip(boundaries, boundaries[1:])
             if end - start >= 2
+            # The skeleton segment is not a scalar clip; its leading bytes
+            # (little-endian bone count) read as a huge big-endian count that
+            # can be triplet-aligned and would hijack the canonical choice
+            # (confirmed on chr302/chr303, whose binder silently fell back to
+            # the generic root chain).
+            if start != motion_info.get("skeleton_segment_offset")
         ]
-        canonical_scalar_count = max(scalar_counts)
-        rotation_scalar_starts, layout = infer_humanoid_joint_scalar_starts(
-            skeleton, canonical_scalar_count,
-        )
+        # The richest layout is not always the numerically largest value:
+        # chr300 (247/249/251/253) is only triplet aligned at 251. Selecting the
+        # canonical count structurally also fixes chr300's older six-root
+        # layout; see select_canonical_scalar_count.
+        try:
+            canonical_scalar_count, root_scalar_count = (
+                select_canonical_scalar_count(scalar_counts)
+            )
+        except UnsupportedMotion:
+            canonical_scalar_count = max(scalar_counts)
+            root_scalar_count = 8
+        try:
+            rotation_scalar_starts, layout = infer_humanoid_joint_scalar_starts(
+                skeleton, canonical_scalar_count,
+            )
+            humanoid_anchors = build_canonical_anchor_map(
+                motion, boundaries, canonical_scalar_count, None,
+            )
+            (rotation_bases, position_triplet_joints,
+             transform_group_diagnostics) = infer_humanoid_rotation_bases(
+                motion, boundaries, skeleton, rotation_scalar_starts,
+                canonical_scalar_count, canonical_anchors=humanoid_anchors,
+                reference_skeleton=reference,
+            )
+            complete_humanoid_layout = True
+        except UnsupportedMotion as exc:
+            # The humanoid binder is verified for chr301/302/303 only. Every
+            # other rig (chr200, chr500, chr560, prop rigs, ...) is bound by the
+            # generic root/spine rule, which uses the motion skeleton's own
+            # structure (contiguous root chain + IK effector flags) instead of
+            # hard-coded bone IDs. This is what makes the export generic.
+            reference = None
+            if motion_info.get("skeleton_segment_offset") is not None:
+                reference = decode_motion_skeleton(
+                    motion[motion_info["skeleton_segment_offset"]:
+                           motion_info["first_clip_offset"]]
+                )
+            try:
+                rotation_scalar_starts, layout = (
+                    infer_generic_joint_scalar_starts(
+                        skeleton, canonical_scalar_count, reference,
+                        root_scalar_count,
+                    )
+                )
+                position_triplet_joints = set(layout["position_joints"])
+                rotation_bases = {}
+                transform_group_diagnostics = []
+                layout["full_body_decoded"] = False
+                layout["fallback_reason"] = str(exc)
+                layout["roles"] = {
+                    str(skeleton["joints"][joint]["global_id"]):
+                        ("position" if joint in position_triplet_joints
+                         else "rotation")
+                    for joint in rotation_scalar_starts
+                }
+                motion_info["generic_rig_binding"] = True
+            except UnsupportedMotion:
+                # Last resort: export only the verified eight-scalar root
+                # prefix (root translation + heading) for any rig.
+                rotation_scalar_starts = {}
+                rotation_bases = {}
+                position_triplet_joints = set()
+                transform_group_diagnostics = []
+                layout = {
+                    "kind": "root_prefix_only",
+                    "joint_triplet_count": 0,
+                    "full_body_decoded": False,
+                    "fallback_reason": str(exc),
+                }
+                motion_info["generic_rig_binding"] = False
         motion_info["humanoid_transform_layout"] = layout
+        motion_info["humanoid_transform_groups"] = transform_group_diagnostics
+        motion_info["humanoid_rotation_bases"] = {
+            str(skeleton["joints"][joint]["global_id"]): list(basis)
+            for joint, basis in rotation_bases.items()
+        }
     rotation_reference = None
     rotation_reference_frame = None
     rotation_reference_scalar_starts = None
@@ -1450,8 +2486,10 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
             "frame": rotation_reference_frame,
             "endpoint": experimental_rotation_reference_frame,
         }
-    selected = list(dict.fromkeys(clip_indices)) if clip_indices is not None else list(
-        range(min(3, len(boundaries) - 1))
+    selected = (
+        list(dict.fromkeys(clip_indices))
+        if clip_indices is not None
+        else list(range(len(boundaries) - 1))
     )
     diagnostics = []
     animations = []
@@ -1505,6 +2543,7 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                     ),
                 }
             if experimental_root_motion:
+                clip_layout_diagnostics = None
                 channels = [
                     decode_experimental_root_translation(decoded, skeleton),
                     decode_root_rotation(
@@ -1513,16 +2552,34 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                     ),
                 ]
                 if experimental_rotation_joints:
-                    clip_rotation_scalar_starts = remap_humanoid_scalar_starts(
-                        skeleton, rotation_scalar_starts,
-                        decoded["scalar_count"], canonical_scalar_count,
-                    )
+                    clip_rotation_scalar_starts = rotation_scalar_starts
+                    if complete_humanoid_layout:
+                        try:
+                            (clip_rotation_scalar_starts,
+                             clip_layout_diagnostics) = (
+                                derive_humanoid_scalar_starts(
+                                    decoded, rotation_scalar_starts,
+                                    humanoid_anchors,
+                                )
+                            )
+                        except UnsupportedMotion:
+                            clip_rotation_scalar_starts = (
+                                remap_humanoid_scalar_starts(
+                                    skeleton, rotation_scalar_starts,
+                                    decoded["scalar_count"],
+                                    canonical_scalar_count,
+                                )
+                            )
+                            clip_layout_diagnostics = {
+                                "kind": "canonical_count_arithmetic",
+                            }
                     selected_rotation_joints = [
                         joint for joint in experimental_rotation_joints
-                        if joint != 0 and (
+                        if (joint != 0
+                            and joint in clip_rotation_scalar_starts and (
                             not experimental_deforming_rotations_only
                             or joint in set(deforming_joint_indices or ())
-                        )
+                        ))
                     ]
                     channels.extend(decode_experimental_joint_rotations(
                         decoded, skeleton, selected_rotation_joints,
@@ -1541,8 +2598,12 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                             set(selected_rotation_joints)
                             if experimental_deforming_rotations_only else None
                         ),
+                        rotation_bases=rotation_bases,
+                        position_triplet_joints=position_triplet_joints,
                     ))
-                    if experimental_humanoid_ik or experimental_export_ik_targets:
+                    if ((experimental_humanoid_ik
+                         or experimental_export_ik_targets)
+                            and complete_humanoid_layout):
                         apply_experimental_humanoid_ik(
                             decoded, skeleton, channels,
                             clip_rotation_scalar_starts,
@@ -1572,11 +2633,13 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                 entry["experimental_ik_target_orientation"] = (
                     experimental_ik_target_orientation
                 )
+                if clip_layout_diagnostics is not None:
+                    entry["per_clip_scalar_layout"] = clip_layout_diagnostics
         except UnsupportedMotion as exc:
             entry.update(scalar_storage_decoded=False, error=str(exc))
         diagnostics.append(entry)
     limitation = (
-        "Root translation and Y-axis heading are verified. Structurally bound humanoid "
+        "Root translation and complete bone_000 XYZ rotation are verified. Structurally bound humanoid "
         "joint rotations use experimental XYZ Euler deltas in local bind space."
         if animations else
         "Scalar-to-joint binding and transform conventions are unresolved; no guessed channels exported."
