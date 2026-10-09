@@ -71,6 +71,30 @@ Paquet : `tools/conversion/motion/` (`resource.py`, `sequence.py`,
   `[segment_count+1 bornes u32 en frames]` `[count × (u32 valeur,
   0xFFFFFFFF)]`. `segment_count == nombre de blocs de courbes` (vérifié
   chr300/chr370/gim103/chr100). Timeline **optionnelle** (paquets
+  placeholders minuscules sans timeline).
+- Dernier bloc : footer ~16 octets (`e7 19 01 … 05 ff 00`).
+- Offsets dupliqués dans la table = clips partageant les mêmes données
+  (variantes miroir).
+
+### Validation corpus (rejouable)
+
+Les motionSequence (157) + motionPackage (193) se parsent sans exception :
+chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
+
+## Base de connaissances corpus (résumé de l'analyse binaire)
+
+- Magic u32 BE par format : `\x00ddm` (DDM), `psmr` (motionSequence),
+  `\x00\x00\x00\x00` (motionPackage), `\x00crg`, `\x00CSR` — tous
+  version u32 = 2 à +0x04.
+- `.crg` = configuration physique du personnage (capsules, vitesses f32).
+- `.resource_*` (CSR) = ressorts / physique secondaire (paires d'ids de
+  bones + longueurs).
+- `demo/<d>/motionPackage` existe aussi (cutscenes) — extension
+  naturelle du décodeur.
+- `type_id` des records : 208 partout pour chr370/gim103 ; varie pour
+  chr100 (236×118, 272×52, 208×62…) — probablement un code de catégorie,
+  pas un lien.
+- Chr100 : 457 segments de timeline pour 460 blocs ; chr300 : 150/153.
 
 ## Phase 2 — Recherche format des courbes (EN COURS)
 
@@ -144,9 +168,8 @@ candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
 
 ## CLI (FAIT)
 
-`python -m tools.conversion.motion <noms...| --all | --inspect>
- [--curve-stats] [--kb-root Chemin]` — imprime records/squelette/
- timeline/blocs par asset.
+`python -m tools.conversion.motion <noms...> [--all] [--curve-stats]
+[--kb-root Chemin]` — imprime records/squelette/timeline/blocs par asset.
 
 ### Mise à jour Phase 2.3 — ORACLE TABULÉ (FAIT)
 
@@ -196,13 +219,6 @@ candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
   (STEP/LINEAR) — **approximation explicite**, jamais silencieuse.
 - FPS non prédéterminée → paramètre éditable, détection par cohérence
   durée/bornes documentée.
-
-  placeholders minuscules sans timeline).
-- Dernier bloc : footer ~16 octets.
-- Offsets dupliqués dans la table = clips partageant les mêmes données
-  (variantes miroir).
-
-### Validation corpus (rejouable)
-
-Les motionSequence (157) + motionPackage (193) se parsent sans exception :
-chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
+- IK : option solveur 2-bone pilotée par `chain_count`, désactivée par
+  défaut (flag `--ik-solve`), seulement après preuve que les canaux
+  non-FK sont des positions d'effecteurs.
