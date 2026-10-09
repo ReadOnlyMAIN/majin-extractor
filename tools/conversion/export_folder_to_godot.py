@@ -76,6 +76,20 @@ def main(argv: list[str] | None = None) -> int:
         "--recursive", "--final", "--material-mode", "godot",
         "--object-mode", "auto", "--scale", "0.01",
         "--texture-root", str(kb_root),
+        "--experimental-root-motion",
+        # Export the complete FK pose first; Godot's runtime IK modifiers then
+        # solve the four limbs on top of those animated joint rotations.
+        "--experimental-rotation-joints", "all",
+        # Controller Euler axes live in each joint's DDM bind frame. Compose
+        # there so, for example, the chr30x head's local Z curve becomes its
+        # model-space X flexion instead of the old sideways model-Z tilt.
+        "--experimental-rotation-model", "local_delta_post",
+        "--experimental-root-rotation-source", "local",
+        "--experimental-humanoid-ik-mode", "godot",
+        # Positions are established, but these orientation triplets have not
+        # been proven to share the HSC instance row-vector convention. Keep
+        # the terminal FK rotations instead of overriding them in Godot.
+        "--experimental-ik-target-orientation", "none",
     ], dry_run=args.dry_run)
 
     if foliage_source is None:

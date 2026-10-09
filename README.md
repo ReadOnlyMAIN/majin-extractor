@@ -132,10 +132,15 @@ python tools/research/shader_inspect.py game_files/decompressed/KB/shader/KbBase
 DDM conversion remains experimental. It exports GLB scenes with geometry,
 UVs, normals, vertex colors, material estimates and embedded XET textures for
 supported DDM v3 layouts. Character DDMs also export their skeleton, skinning
-weights and bone hierarchy. Their animations live in separate proprietary
+weights and bone hierarchy. **Known ordering bug (2026-10-09):** without a
+motion resource the bind-skeleton arrays are read with a 4-byte-block-reversed
+id order (`REVERSE_DDM.md` §28.2), so the ~44 skinned characters that carry no
+`motionPackage` currently export a scrambled bind pose; bundles with a motion
+resource (34 characters) are validated and unaffected. Character animations
+live in separate proprietary
 `motionSequence`/`motionPackage` resources; the converter detects and reports
 those clips and validates their constant, linear and tangent scalar curves.
-The root translation and Y-axis heading bindings are established. Joint rotation
+The root translation and complete bone_000 rotation bindings are established. Joint rotation
 research is available behind explicit experimental options; it is not enabled by
 default. Those options are diagnostic and do not yet produce a correctly posed
 full character animation. Recursive scans skip non-DDM files and report
@@ -162,9 +167,15 @@ python tools/conversion/motion_decode.py \
   --clips 0,1,2 --dump-tracks output/chr300-motion-tracks.json
 ```
 
-Scalar positions can also be compared across several named motions. This is
-useful because the smaller 247/249/251 descriptor tables are prefix-coded
-variants of the 253-position `chr300` table rather than independent layouts:
+Scalar positions can also be compared across several named motions. The
+4-scalar-count variants (chr300: 247/249/251/253; chr301: 332/334/336/338) are
+**not** a simple prefix-coded scale-down of one table: per-clip probes show
+channel blocks inserted or omitted at several points of the stream, two clips
+of the same total count can place the same channel at different positions, and
+the verified IK effector channel sits mid-stream (chr301 left-hand target at
+scalar 184, not at the binder's arithmetic 182). See
+[`REVERSE_DDM.md` §28.5](REVERSE_DDM.md) and
+[`research/MOTION_ANALYSIS.md`](research/MOTION_ANALYSIS.md):
 
 ```bash
 python tools/conversion/motion_decode.py \
@@ -179,10 +190,10 @@ accounting for this writer behavior, every `chr300` scalar segment decodes to
 its exact boundary.
 
 An opt-in first animation milestone exports the validated root translation and
-rotation of selected `chr300` clips. Scalar 0 contains an extracted Y heading
-in radians, scalar 1 is reserved zero, scalars 2–4 contain translation XYZ,
-and scalars 5–7 contain the root's local XYZ Euler rotation. The exporter
-composes the extracted heading with that local rotation into one glTF channel:
+rotation of selected clips. Scalar 0 contains a redundant Y-heading projection,
+scalar 1 is reserved zero, scalars 2–4 contain translation XYZ, and scalars
+5–7 contain bone_000's complete XYZ Euler rotation. Unwrapped values beyond one
+turn are valid continuous Euler data, not a reason to discard the channel:
 
 ```bash
 python tools/conversion/ddm_to_3d.py \
@@ -190,13 +201,16 @@ python tools/conversion/ddm_to_3d.py \
   --animation-clips 0 --experimental-root-motion
 ```
 
-This composition reconstructs the full ±180-degree change in the
-`turn_180_*_a` clips: extracted and local Y rotations each contribute roughly
-90 degrees. The `turn_90_*` clips do not contain a persistent 90-degree root
-change. Their names describe the gameplay action, while entity orientation is
-apparently supplied by state/gameplay logic outside the scalar clip. Per-clip
-initial/final root transforms are recorded in `analysis.json` so such
-non-standalone motions can be identified without relying on their names.
+The `boredom` clip proves that slots 5–7 are essential: scalar 0 stays zero
+while bone_000 leans and twists throughout the clip. On every chr301
+`turn_90/180` clip, slot 6 carries the same signed delta as scalar 0. Therefore
+slots 5–7 alone preserve the complete root pose and the correct turn exactly
+once. Multiplying scalar 0 into that triplet doubles the turn and is retained
+as `--experimental-root-rotation-source combined` for comparison only;
+`heading` is a diagnostic Y-only projection.
+Per-clip initial/final root transforms are recorded in `analysis.json`.
+The full verification, including the cross-character byte comparison, is in
+[`research/MOTION_ANALYSIS.md`](research/MOTION_ANALYSIS.md).
 
 Cross-character comparison invalidated the former contiguous joint-suffix
 interpretation. After the eight verified root scalars, related humanoid rigs
@@ -204,22 +218,27 @@ store ordered three-scalar transform groups for both skeleton joints and
 auxiliary rig controls. `chr302` has 66 groups for 42 non-root joints, leaving
 24 auxiliary groups; `chr303` inserts exactly 20 groups when its 20 additional
 bones appear; `chr301` has 30 auxiliary groups. The controls are interleaved by
-anatomical segment, not collected in a prefix or suffix. Within each observed
-humanoid segment, joint triplets follow skeleton order and are followed by a
-fixed control block: 3 controls after the trunk and each arm, 1 after the
-pelvis, and 7 after each leg. `chr301` additionally has 6 controls after its
-accessory chain. The experimental humanoid export now uses this structural
-binding and emits rotations for every skeleton joint needed by the hierarchy;
-only auxiliary rig-control triplets outside the skeleton are omitted. The Euler space/order interpretation remains
-experimental, while root motion remains independently available.
-The 332/334/336/338 layouts (and their chr302/303 equivalents) also contain
-optional two-scalar controller sections rather than a simple truncated suffix;
-their indices are remapped before binding. Cross-character equality identifies
+anatomical segment, not collected in a prefix or suffix. The two arm blocks
+were previously described as using a "verified functional FK/IK permutation
+rather than skeleton order"; the 2026-10-09 probes supersede that: channel
+blocks shift between clips (`REVERSE_DDM.md` §28.5), so arm/leg binding must
+first be derived per clip. `chr301`'s
+45-triplet head-accessory block has the width of 39 joints plus 6 controls, but
+contains no mode-6/7 animation in any clip and its constant controller values
+cannot be assigned sequentially to hair bones. It is therefore left unbound;
+the hair/tentacles remain in their DDM bind pose. The Euler space/order
+interpretation remains experimental, while root motion remains independently
+available. The count variants are handled by `remap_humanoid_scalar_starts`
+(difference 2/4: no shift; 6: shift −2), but per-clip probes
+(`REVERSE_DDM.md` §28.5) show further mid-stream shifts the remap does not
+cover, so this path remains partly inaccurate until step 5d lands.
+Cross-character equality identifies
 model-space IK targets for both wrists and ankles. The opt-in
 `--experimental-humanoid-ik-mode bake` probe bakes those targets through
 two-bone chains instead of interpreting their position values as Euler angles.
 Use `--experimental-humanoid-ik-mode godot` to preserve the decoded FK curves
-and export four controls for a Godot runtime solver. The triplet following each
+and export four targets for a Godot runtime solver. Elbows and knees use the
+same anatomical fallback poles. The triplet following each
 target can be disabled with `--experimental-ik-target-orientation none`. Its
 default `source-row` interpretation treats it as an absolute Euler orientation
 using the same row-vector-to-Godot transpose established for HSC instances,
@@ -243,7 +262,8 @@ The earlier `--experimental-controller-bake` probe is retained only for code
 comparison. It cannot repair the newly established interleaved layout and is
 not reached by automatic joint export.
 
-The command writes a separately named `_motion_experimental.glb`:
+The command writes the animated character as `<name>/<name>.glb`, replacing
+the non-animated export in that output folder:
 
 ```bash
 python tools/conversion/ddm_to_3d.py \
@@ -260,13 +280,13 @@ spelling out every joint index:
 python tools/conversion/ddm_to_3d.py \
   game_files/decompressed/KB/chara/chr301/chr301 output \
   --animation-clips 0 --experimental-root-motion \
-  --experimental-rotation-joints all \
-  --experimental-rotation-units degrees
+  --experimental-rotation-joints all
 ```
 
 For reference-pose diagnostics, a clip endpoint can be cancelled before the
-Euler curves are composed with the local bind pose. The root heading can also
-be excluded when it duplicates the root joint's local Y rotation:
+Euler curves are composed with the local bind pose. Root rotation defaults to
+the complete slots 5–7 triplet; `heading` selects the diagnostic scalar-0
+Y-only projection and `combined` selects the rejected double-turn probe:
 
 ```bash
 python tools/conversion/ddm_to_3d.py \
@@ -394,7 +414,7 @@ identical exported local meshes share mesh data between nodes.
 Reusable models below `KB/instance` are the exception: their source origin is
 preserved in the mesh because HSC placement transforms are authored relative
 to that pivot. Their GLB node therefore has zero translation. This also allows
-`import_instance.gd` to extract the mesh without losing a vertical or lateral
+`assign_materials.gd` to extract the mesh without losing a vertical or lateral
 pivot offset.
 
 This reconstructs editable objects from baked geometry; it does **not** recover
@@ -471,8 +491,9 @@ res://terrain/foliage/meshes/{model}.res
 The resulting map101 resource contains 332 entries referencing `ins107.res`
 through `ins111.res`. Those five DDMs are exported as one GLB mesh each
 automatically because the default `auto` mode recognizes `KB/instance`. Use
-`godot/utility/import_instance.gd` as their Godot Import Script: it assigns the
-generated materials to the mesh surfaces and saves them as `ins107.res`, etc.
+`godot/utility/assign_materials.gd` as their Godot Import Script: it assigns
+the generated materials to every model, but saves a reusable `.res` mesh only
+when that model's manifest declares `asset_kind: instance`.
 For a different naming convention, pass `--mesh-path-template`, which must
 contain `{model}`. Script paths, Euler order, position scale and coordinate
 conversion also have explicit CLI overrides; see `--help`.

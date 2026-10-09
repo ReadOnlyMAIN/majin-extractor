@@ -33,12 +33,31 @@ except ImportError:
     )
 
 
+def _skinned_first_vertex_weight_sum(data, offset, vertices, indices, palette_size):
+    """Return the 4-byte weight sum of the first vertex of a candidate group.
+
+    Returns ``None`` when the group header does not fit. A real skinned group
+    always stores four normalized bytes whose sum is 255; a coincidental
+    ``u32 == 8`` inside vertex data almost never does, which is exactly the
+    case that made chr500 pick a false group.
+    """
+    cursor = offset + 24  # group header (count + 5 section-0 words)
+    cursor += indices * 2
+    cursor += vertices * 16
+    if cursor + 28 > len(data):
+        return None
+    return sum(data[cursor + 24:cursor + 28])
+
+
 def find_skinned_geometry_header(data: bytes):
     """Identify the observed eight-attribute character layout.
 
     Unlike the supported static layout, this header begins with the buffer
     count and includes an explicit vertex stride. Detection is deliberately
-    strict so arbitrary metadata is never mislabeled as skinned geometry.
+    strict so arbitrary metadata is never mislabeled as skinned geometry. The
+    attribute-count word also appears inside real vertex data, so a candidate is
+    only accepted when its first vertex keeps the 255-sum weight invariant; this
+    rejects false positives such as chr500's first ``u32 == 8``.
     """
     signature = struct.pack(">I", 8)
     search = 8
@@ -62,6 +81,11 @@ def find_skinned_geometry_header(data: bytes):
             and 3 <= indices <= 10_000_000
             and offset + 24 + indices * 2 + vertices * 44 <= len(data)
         ):
+            weight_sum = _skinned_first_vertex_weight_sum(
+                data, offset, vertices, indices, palette_size,
+            )
+            if weight_sum != 255:
+                continue
             return {
                 "offset": offset,
                 "section_count": sections,
@@ -72,6 +96,21 @@ def find_skinned_geometry_header(data: bytes):
                 "vertex_stride": 28,
                 "index_count": indices,
             }
+
+
+def _unreverse_word_blocks(raw: bytes) -> list:
+    """Undo the little-endian u32 word packing of byte-per-entry arrays.
+
+    The id and parent tables store one byte per entry inside little-endian
+    32-bit words, so every aligned 4-byte block appears byte-reversed when the
+    file is read linearly (REVERSE_DDM.md §28.1). Verified byte-exact against
+    the motion-resource skeleton order/hierarchy on every tested bundle
+    (chr300/301/302/303/500/100/200 with motion; chr101/110/800 without).
+    """
+    out = []
+    for block_start in range(0, len(raw), 4):
+        out.extend(reversed(raw[block_start:block_start + 4]))
+    return out
 
 
 def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
@@ -90,39 +129,42 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
     if flags_offset + transform_count * 4 > len(data):
         raise RuntimeError("Skeleton arrays exceed the DDM file.")
 
-    raw_ids = list(data[id_offset:id_offset + padded_count])
-    raw_parents = list(data[parent_offset:parent_offset + transform_count])
-    # Some files insert duplicate zero bytes before their final global ids.
-    # Reading the padded id area and preserving unique values reconstructs the
-    # declared transform count across chr300/302/310/314/330 variants.
-    bone_ids = []
-    seen = set()
-    for bone_id in raw_ids:
-        if bone_id in seen:
-            continue
-        seen.add(bone_id)
-        bone_ids.append(bone_id)
-    if len(bone_ids) != transform_count:
+    raw_ids = data[id_offset:id_offset + padded_count]
+    raw_parents = data[parent_offset:parent_offset + padded_count]
+    # Both byte-per-entry tables keep their word padding, and every aligned
+    # 4-byte block is byte-reversed (little-endian u32 words). Un-reversing
+    # them reproduces the true transform order; the word padding then lands at
+    # the tail where it is stripped by the declared count.
+    bone_ids = _unreverse_word_blocks(raw_ids)[:transform_count]
+    parent_ids = _unreverse_word_blocks(raw_parents)[:transform_count]
+    if len(bone_ids) != transform_count or len(set(bone_ids)) != transform_count:
         raise RuntimeError(
             f"Skeleton declares {transform_count} transforms but exposes "
-            f"{len(bone_ids)} unique bone ids."
+            f"{len(set(bone_ids))} unique bone ids."
         )
     parent_by_id = {
-        bone_id: raw_parents[index]
-        for index, bone_id in enumerate(bone_ids)
+        bone_ids[index]: parent_ids[index]
+        for index in range(transform_count)
     }
-    if transform_bone_ids is None:
-        transform_bone_ids = bone_ids
-    else:
+    if transform_bone_ids is not None:
         transform_bone_ids = list(transform_bone_ids)
-        if (
-            len(transform_bone_ids) != transform_count
-            or len(set(transform_bone_ids)) != transform_count
-            or set(transform_bone_ids) != set(bone_ids)
-        ):
+        # Allowed: the full motion order, or a unique-order prefix of it (for
+        # example chr900's DDM carries an extra attachment node 4 that the
+        # motion resource does not animate).
+        exact = transform_bone_ids == bone_ids
+        prefix = (
+            len(transform_bone_ids) < transform_count
+            and len(set(transform_bone_ids)) == len(transform_bone_ids)
+            and bone_ids[:len(transform_bone_ids)] == transform_bone_ids
+        )
+        if not (exact or prefix):
             raise RuntimeError(
                 "Motion skeleton order does not match the DDM bone identifiers."
             )
+    else:
+        # The un-reversed DDM order is self-contained (REVERSE_DDM.md §28.1):
+        # no motion resource is required to decode a correct bind pose.
+        transform_bone_ids = bone_ids
     id_to_joint = {
         bone_id: index for index, bone_id in enumerate(transform_bone_ids)
     }
@@ -335,7 +377,7 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         getattr(args, "experimental_rotation_model", "local_delta_post"),
         getattr(args, "experimental_rotation_reference_clip", None),
         getattr(args, "experimental_rotation_reference_frame", "end"),
-        getattr(args, "experimental_root_rotation_source", "combined"),
+        getattr(args, "experimental_root_rotation_source", "local"),
         getattr(args, "experimental_deforming_rotations_only", False),
         getattr(args, "experimental_humanoid_ik", False),
         getattr(args, "experimental_export_ik_targets", False),
@@ -402,48 +444,7 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             material["textures"] = []
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = ""
-    if rotation_joints:
-        suffix = "_motion_experimental"
-        units = getattr(args, "experimental_rotation_units", "radians")
-        if units != "degrees":
-            suffix += f"_{units}"
-        axes = getattr(args, "experimental_rotation_axes", "xyz")
-        if axes != "xyz":
-            suffix += f"_axes_{axes}"
-        signs = getattr(args, "experimental_rotation_signs", "+++")
-        if signs != "+++":
-            suffix += "_signs_" + signs.replace("+", "p").replace("-", "m")
-        model = getattr(args, "experimental_rotation_model", "local_delta_post")
-        suffix += f"_{model}"
-        reference_clip = getattr(
-            args, "experimental_rotation_reference_clip", None,
-        )
-        if reference_clip is not None:
-            reference_frame = getattr(
-                args, "experimental_rotation_reference_frame", "end",
-            )
-            suffix += f"_ref_{reference_clip}_{reference_frame}"
-        if getattr(args, "experimental_controller_bake", False):
-            suffix += "_controllers"
-        if getattr(args, "experimental_deforming_rotations_only", False):
-            suffix += "_deforming_only"
-        if getattr(args, "experimental_humanoid_ik", False):
-            suffix += "_ik_baked"
-        if getattr(args, "experimental_export_ik_targets", False):
-            suffix += "_ik_godot_targets"
-        if (getattr(args, "experimental_humanoid_ik", False)
-                or getattr(args, "experimental_export_ik_targets", False)):
-            orientation = getattr(
-                args, "experimental_ik_target_orientation", "source-row",
-            )
-            suffix += f"_orientation_{orientation.replace('-', '_')}"
-        root_source = getattr(
-            args, "experimental_root_rotation_source", "combined",
-        )
-        if root_source != "combined":
-            suffix += f"_root_{root_source}"
-    mesh_path = out_dir / f"{path.stem}{suffix}.glb"
+    mesh_path = out_dir / f"{path.stem}.glb"
     result = write_skinned_glb(
         mesh_path,
         vertices,
@@ -500,7 +501,7 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             + ("; matching unskinned duplicate controllers are baked onto deforming joints."
                if getattr(args, "experimental_controller_bake", False) else ".")
             if animations and rotation_joints else
-            "Only the selected clips' verified root translation and heading are exported; "
+            "Only the selected clips' verified root translation and complete bone_000 rotation are exported; "
             "joint rotations remain unresolved and omitted."
             if animations else
             "External scalar curves are decoded and validated, but their association "

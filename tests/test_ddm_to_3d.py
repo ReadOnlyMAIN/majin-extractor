@@ -415,6 +415,10 @@ class MapGeometryTests(unittest.TestCase):
         offset = len(data)
         data.extend(struct.pack('>6I', 2, 1, 8, 891, 32, 2204))
         data.extend(b'\0' * (2204 * 2 + 891 * 44))
+        # The detector validates the 255-sum weight invariant of the first
+        # vertex, so give it a real normalized weight (1,0,0,0 -> 255 total).
+        first_vertex = offset + 24 + 2204 * 2 + 891 * 16
+        data[first_vertex + 24:first_vertex + 28] = bytes((255, 0, 0, 0))
         header = ddm.find_skinned_geometry_header(data)
         self.assertEqual(header, {
             'offset': offset,
@@ -438,6 +442,37 @@ class MapGeometryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'skeleton transform count'):
                 ddm.analyze_file(source, output, args)
             self.assertFalse((output / 'skinned').exists())
+    def test_skinned_detection_rejects_false_attribute_signature(self):
+        # A stray u32 == 8 inside content that has no valid weight bytes must be
+        # skipped in favour of the real skinned group (this is chr500's bug: its
+        # first signature is a false positive that summed to 123, not 255).
+        def build_group(vertices, index_count, placeholder):
+            blob = bytearray(ddm.MAGIC + struct.pack('>I', 3))
+            blob.extend(b'\0' * 24)
+            offset = len(blob)
+            blob.extend(struct.pack('>6I', 1, 1, 8, vertices, 8, index_count))
+            blob.extend(b'\0' * (index_count * 2 + vertices * 16))
+            first_vertex = offset + 24 + index_count * 2 + vertices * 16
+            blob.extend(b'\0' * (vertices * 28))
+            blob[first_vertex + 24:first_vertex + 28] = placeholder
+            blob.extend(b'\0' * 64)
+            return blob, offset
+
+        # False group first: weights sum to 123 (invalid).
+        false_group, _ = build_group(5, 10, bytes((40, 40, 40, 3)))
+        # Real group second: weights sum to 255 (valid). Its absolute offset in
+        # the concatenated file accounts for the false group's length.
+        real_group, real_offset_local = build_group(891, 2204, bytes((255, 0, 0, 0)))
+        data = bytes(false_group) + bytes(real_group)
+        real_offset = len(false_group) + real_offset_local
+
+        header = ddm.find_skinned_geometry_header(data)
+
+        self.assertIsNotNone(header)
+        self.assertEqual(header['offset'], real_offset)
+        self.assertEqual(header['vertex_count'], 891)
+
+
 
     def test_empty_output_cleanup_never_removes_nonempty_parent(self):
         with tempfile.TemporaryDirectory() as root:
@@ -487,10 +522,11 @@ class MapGeometryTests(unittest.TestCase):
             motion[0xA6:0xA9] = bytes((7, 3, 9))
             sequence.write_bytes(motion)
             # A valid character rig graph: 0x88-byte header + 9 * 0x80 records.
-            # boundary_count lives at offset 8, record_count at offset 0x80.
+            # The invariant header word 9 lives at offset 8; the independent
+            # record_count lives at offset 0x80.
             rig = bytearray(0x88 + 9 * 0x80)
             rig[:4] = b'\0crg'
-            struct.pack_into('>I', rig, 8, 10)
+            struct.pack_into('>I', rig, 8, 9)
             struct.pack_into('>I', rig, 0x80, 9)
             package.write_bytes(bytes(rig))
             result = motion_decode.discover_character_motion(model)

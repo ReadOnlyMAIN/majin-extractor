@@ -1,6 +1,7 @@
 """Coverage for unsupported DDM variant detection and reporting."""
 import contextlib
 import io
+import math
 from pathlib import Path
 import struct
 import tempfile
@@ -14,6 +15,7 @@ from tools.conversion.ddm.binary import (
     UnsupportedDDMVariant,
     ddm_variant_name,
 )
+from tools.conversion.ddm.skinned import decode_skinned_skeleton
 
 
 def args(**overrides):
@@ -93,6 +95,86 @@ class CliVariantReportingTests(unittest.TestCase):
         self.assertIn('version=3', text)
         self.assertIn('1 unsupported', text)
         self.assertIn('0 decoded', text)
+
+
+class SkeletonStorageOrderTests(unittest.TestCase):
+    """REVERSE_DDM.md §28: DDM skeleton arrays and motion agreement."""
+
+    CHARA_ROOT = Path('game_files/decompressed/KB/chara')
+    # The "2-bone prop" family uses a different skeleton layout (§27.5b).
+    PROP_FAMILY = {
+        'chr700', 'chr705', 'chr710', 'chr715', 'chr720', 'chr721', 'chr722',
+        'chr723', 'chr724', 'chr725', 'chr726', 'chr727', 'chr728', 'chr729',
+        'chr740', 'chr741', 'chr742', 'chr743', 'chr744', 'chr745', 'chr746',
+        'chr747', 'chr748', 'chr749', 'chr905', 'chr910', 'chr911', 'chr912',
+        'chr920', 'chr930', 'chr970', 'chr980', 'chr990', 'chr991', 'chr992',
+        'chr940', 'chr941', 'chr942', 'chr950', 'chr951', 'chr952', 'chr960',
+    }
+
+    def _bundles(self):
+        for directory in sorted(self.CHARA_ROOT.iterdir()):
+            main = directory / directory.name
+            if main.is_file():
+                yield main
+
+    def test_every_rigged_bundle_decodes_a_sane_root(self):
+        decoded = 0
+        for main in self._bundles():
+            data = main.read_bytes()
+            if len(data) < 0x100 or data[:4] != b'\x00ddm':
+                continue
+            if main.stem in self.PROP_FAMILY:
+                continue
+            skeleton = decode_skinned_skeleton(data)
+            root = skeleton['joints'][0]
+            self.assertAlmostEqual(
+                sum(x * x for x in root['rotation']), 1.0, places=5,
+                msg=f'{main.name} root quaternion must be unit',
+            )
+            self.assertAlmostEqual(
+                root['rotation'][0], 0.0, places=6,
+                msg=f'{main.name} root must not rotate around X',
+            )
+            self.assertTrue(
+                -1e-6 <= root['translation'][0] <= 1e-6,
+                msg=f'{main.name} root x must be 0',
+            )
+            self.assertTrue(
+                0.0 <= root['translation'][1] <= 1000.0,
+                msg=f'{main.name} root height out of range',
+            )
+            decoded += 1
+        self.assertGreaterEqual(decoded, 60, 'expected most bundles rigged')
+
+    def test_chr900_extras_node_beyond_motion_scope(self):
+        data = (
+            self.CHARA_ROOT / 'chr900/chr900'
+        ).read_bytes()
+        skeleton = decode_skinned_skeleton(data)
+        self.assertEqual(skeleton['transform_count'], 5)
+        self.assertEqual(
+            [j['global_id'] for j in skeleton['joints']], [0, 1, 2, 3, 4],
+        )
+
+    def test_chr500_corrected_hierarchy_has_no_parent_cycles(self):
+        data = (self.CHARA_ROOT / 'chr500/chr500').read_bytes()
+        skeleton = decode_skinned_skeleton(data)
+        global_ids = [joint['global_id'] for joint in skeleton['joints']]
+        parents = [
+            None if joint['parent'] is None else global_ids[joint['parent']]
+            for joint in skeleton['joints']
+        ]
+        loops = 0
+        for start in range(len(global_ids)):
+            seen = set()
+            index = start
+            while parents[index] is not None:
+                if index in seen:
+                    loops += 1
+                    break
+                seen.add(index)
+                index = global_ids.index(parents[index])
+        self.assertEqual(loops, 0, 'corrected chr500 hierarchy must be a tree')
 
 
 if __name__ == '__main__':

@@ -213,7 +213,6 @@ CUSTOM_SHADER_FILE_NAME = "majin_multitexture.gdshader"
 FOLIAGE_SHADER_FILE_NAME = "majin_foliage.gdshader"
 SHADER_COMMON_FILE_NAME = "majin_material_common.gdshaderinc"
 ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
-IMPORT_INSTANCE_SCRIPT_FILE_NAME = "import_instance.gd"
 
 
 def write_godot_utility(destination, overwrite=True):
@@ -227,21 +226,11 @@ def write_godot_utility(destination, overwrite=True):
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     written = []
-    instance_script_path = (
-        Path(__file__).resolve().parents[2]
-        / "godot" / "utility" / IMPORT_INSTANCE_SCRIPT_FILE_NAME
-    )
-    if not instance_script_path.is_file():
-        raise FileNotFoundError(
-            f"Missing Godot utility source: {instance_script_path}"
-        )
     for name, content in (
         (CUSTOM_SHADER_FILE_NAME, GODOT_CUSTOM_SHADER),
         (FOLIAGE_SHADER_FILE_NAME, GODOT_FOLIAGE_SHADER),
         (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
-        (IMPORT_INSTANCE_SCRIPT_FILE_NAME,
-         instance_script_path.read_text(encoding="utf-8")),
     ):
         path = destination / name
         if overwrite or not path.exists():
@@ -876,6 +865,7 @@ def write_godot_material_assets(
     manifest_path.write_text(
         json.dumps({
             "asset_kind": asset_kind,
+            "model_scale": scale,
             "ik_target_orientation": ik_target_orientation,
             "materials": bindings,
             "detail_folds": detail_folds,

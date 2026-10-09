@@ -57,8 +57,21 @@ asks for one extracted folder below `KB`. For example, selecting
 `game_files/decompressed/KB/map/map101` mirrors it to
 `output/decoded/map/map101`, runs the DDM conversion in Godot/final mode, then
 converts `map101_ins` to `map101_foliage.tres`. Folders without an `*_ins` table
-still export their DDM files and simply skip foliage generation. The PAK
-extractor asks for a worker count and defaults to `4`.
+still export their DDM files and simply skip foliage generation. For folders
+under `KB/chara`, the same pipeline exports every discovered animation clip,
+including root motion and the four runtime IK targets consumed by the Godot
+import script. The complete animated FK pose is exported first, then Godot's
+runtime IK modifiers solve the arm and leg positions over it. Hand and foot
+rotations remain driven by FK because the adjacent source orientation triplets
+have not been proven to use the HSC instance rotation convention. Joint
+rotations use the reference skeleton embedded in the motion resource; no
+animation clip is treated as an artificial bind pose. Animation triplets are
+composed as `bind_local * delta` in each joint's DDM bind frame. This maps the
+chr30x head's stored local-Z controller to its model-X flexion axis instead of
+the old model-Z sideways tilt. Root rotation uses bone_000's complete verified
+slots 5–7 triplet, rotation units default to radians, and the animation launch defaults
+to all structurally bound joints. The PAK extractor asks for a worker count
+and defaults to `4`.
 
 ## Tasks
 

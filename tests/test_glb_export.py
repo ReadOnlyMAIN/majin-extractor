@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from tools.conversion.glb_export import (
+    _joint_global_matrices,
     remove_redundant_surface_passes,
     split_objects,
     tangent_frame,
@@ -56,6 +57,26 @@ def values(doc, blob, index):
 
 
 class GlbExportTests(unittest.TestCase):
+    def test_joint_global_matrices_tolerate_parent_cycles(self):
+        # Some rigs (chr500, 199 bones) contain a parent chain that loops; the
+        # resolver must root the cyclic joint instead of recursing forever.
+        identity = (0.0, 0.0, 0.0, 1.0)
+        joints = [
+            {'translation': (1.0, 0.0, 0.0), 'rotation': identity, 'parent': None},
+            {'translation': (0.0, 2.0, 0.0), 'rotation': identity, 'parent': 0},
+            # Cyclic: joint 2 -> parent 3, joint 3 -> parent 2.
+            {'translation': (0.0, 0.0, 3.0), 'rotation': identity, 'parent': 3},
+            {'translation': (0.0, 0.0, 4.0), 'rotation': identity, 'parent': 2},
+        ]
+
+        matrices = _joint_global_matrices(joints, scale=1.0)
+
+        self.assertEqual(len(matrices), 4)
+        self.assertTrue(all(matrix is not None for matrix in matrices))
+        # Root translation is preserved in its own matrix.
+        self.assertEqual(matrices[0][3], 1.0)
+
+
     def test_skinned_export_contains_bind_matrices_weights_and_material_variant(self):
         vertices = [vertex(p) for p in (
             (0, 0, 0), (1, 0, 0), (0, 1, 0),
