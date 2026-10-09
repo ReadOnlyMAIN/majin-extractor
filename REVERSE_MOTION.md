@@ -207,6 +207,19 @@ candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
   sémantique encore ouverte, la sonde `research/curve_header_probe.py`
   (→ `research/CURVE_HEADER_FINDINGS.md`) sert de réexécution.
 
+### Mise à jour Phase 2.4 — liaison timeline (PARTIEL/FACTE)
+
+- **FAIT (3 familles)** : nombre de paires `(value, sentinel)` de la
+  timeline = **span / 8** — chr370 328/8=41 ✓ ; chr550 504/8=63 ✓ ;
+  gim103 64/8=8 ✓. La timeline est donc *une entrée par tick de 8
+  frames*, pas une table par clip.
+- Hypothèse « valeur = offset de bit cumulatif » INVALIDÉE : les valeurs
+  oscillent (289→288→289, 1024→0x171FF0FF→retour). Hypothèse A du plan
+  (valeur= bitpack bloc index | flags) non retenue telle quelle ;
+  paire (état, flag) par tick probable.
+- Records : aucun lien 1-1 avec les ticks (3 records / 38-41 ticks) ;
+  la permutation records↔clips reste à élucider (Phase 2.5/3).
+
 ## Phases 3 à 6 (À FAIRE)
 
 - **Phase 3** `curves.py` + `export.py`: decode_clip → dicts clips glTF
