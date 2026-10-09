@@ -149,3 +149,27 @@ def constant_curve_value(block: CurveBlock) -> float | None:
     if not (kind == 0 and second == 2 and len(block.body) == 20):
         return None
     return struct.unpack('>f', block.body[-4:])[0]
+
+
+CHANNEL_TABLE_LANDMARK = (
+    "001001001001001001"            # "value 9" run under 3-bit grouping
+    "000000001001"                  # zero-run marker
+    "000000111"
+    "001001001"
+)
+
+
+def _body_bits(body: bytes, count: int) -> str:
+    return ''.join(format(byte, '08b') for byte in body[:count])
+
+
+def has_channel_table_landmark(body: bytes) -> bool:
+    """True when the body opens with the shared bit-packed prologue.
+
+    Verified on all 8 gim103 curve blocks (b0..b7) and NOT corpus-wide:
+    only ~6/4474 of the shipped blocks open with it byte 0. It is the
+    prologue of the gim103 family/slot-0 stream: under 3-bit MSB grouping
+    it reads ``1,1,1,1,1,1,0,0,1,1,0,0,7,1,1`` (the ``24 92 49`` bytes).
+    """
+    prefix = CHANNEL_TABLE_LANDMARK
+    return _body_bits(body, len(prefix) // 8 + 1).startswith(prefix)
