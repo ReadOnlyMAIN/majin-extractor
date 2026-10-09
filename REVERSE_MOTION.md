@@ -198,6 +198,15 @@ candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
   8 frames existe au moins pour ces familles ; chr300 est variable.
 - FPS : toujours non déterminée (grille 8 frames compatible 30 et 60).
 
+### Résultats 2.1 (probe corpus — research/curve_header_probe.py)
+
+- Sur 206 assets : `A` et `B` varient tous les deux par bloc ET par
+  asset (ex. chr300 A=247..253 vs chr100 A=0..251 ; B min..max propre
+  à chaque famille). Le nombre de paires `(value,0)` n'est fonction ni
+  de A ni de B. → **ni A ni B ne sont un compteur simple** ;
+  sémantique encore ouverte, la sonde `research/curve_header_probe.py`
+  (→ `research/CURVE_HEADER_FINDINGS.md`) sert de réexécution.
+
 ## Phases 3 à 6 (À FAIRE)
 
 - **Phase 3** `curves.py` + `export.py`: decode_clip → dicts clips glTF
