@@ -109,6 +109,16 @@ class CurveHeaderTests(unittest.TestCase):
         package = parse_motion_package(CORPUS / "motionPackage/chr540/BigEndian/chr540")
         phases = {curves.block_curve_header(block)[2]
                   for block in package.curve_blocks}
+    def test_gim103_channel_landmark(self):
+        package = parse_motion_package(CORPUS / "motionPackage/gim103/BigEndian/gim103")
+        animated = [
+            block for block in package.curve_blocks
+            if not curves.is_constant_curve(block)
+        ]
+        self.assertGreaterEqual(len(animated), 6)
+        for block in animated:
+            self.assertTrue(curves.has_channel_table_landmark(block.body))
+
     def test_chr100_bind_pose_oracle(self):
         package = parse_motion_package(CORPUS / "motionPackage/chr100/BigEndian/chr100")
         hits, total = curves.bind_pose_hits(package)

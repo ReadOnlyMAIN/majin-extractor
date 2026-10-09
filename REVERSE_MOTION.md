@@ -162,6 +162,19 @@ candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
 - Byte 2 du header de bloc = **phase** : 0 sur 4415/4474 blocs, 1 sur
   59 — gardé brut, plus d'hypothèse « doit être 0 ».
 
+### Mise à jour Phase 2.4 — corrélations (PARTIEL)
+
+- `qstm+128` **décimal** varie par clip et s'accorde à l'ordre de grandeur
+  des clips (chr300 : 1..142 ; chr540 : 66..266 ; chr590 : 11..45 ;
+  gim103 : **92, 39, 92, 39**) → reste le meilleur candidat des durées en
+  frames par clip, mais pas encore démontré.
+- Paires miroirs de gim103 : les deux blocs d'une paire partagent la MÊME
+  durée candidate (92/92, 39/39) → cohérent avec des variantes miroir.
+- chr540 et gim103 : bornes timeline **uniformes avec un pas de 8 frames**
+  (chr540 360,368,…,1064 ; gim103 40,48,…,104) → une grille de résolution
+  8 frames existe au moins pour ces familles ; chr300 est variable.
+- FPS : toujours non déterminée (grille 8 frames compatible 30 et 60).
+
 ## Phases 3 à 6 (À FAIRE)
 
 - **Phase 3** `curves.py` + `export.py`: decode_clip → dicts clips glTF
