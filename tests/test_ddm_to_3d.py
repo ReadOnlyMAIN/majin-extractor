@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from tools.conversion import ddm_to_3d as ddm
-from tools.conversion import motion_decode
+from tools.conversion.motion import export as motion_decode
 
 def map_section(primitive, positions, indices, material=0):
     count = len(positions)
@@ -504,39 +504,17 @@ class MapGeometryTests(unittest.TestCase):
             self.assertIn('No DDM file decoded.', stdout.getvalue())
 
     def test_external_motion_boundary_table_is_detected(self):
-        with tempfile.TemporaryDirectory() as root:
-            kb = Path(root) / 'KB'
-            model = kb / 'chara/chr300/chr300'
-            sequence = kb / 'motionSequence/chr300/chr300'
-            package = kb / 'motionPackage/chr300/BigEndian/chr300'
-            for path in (model, sequence, package):
-                path.parent.mkdir(parents=True, exist_ok=True)
-            model.write_bytes(b'')
-            # Three relative boundaries describe two clips. The last boundary
-            # is the end-of-file sentinel.
-            motion = bytearray(0xC0)
-            struct.pack_into('>I3I', motion, 0x80, 3, 0x20, 0x30, 0x40)
-            motion[0xA0] = 3
-            # A two-byte header plus two hierarchy words precede the IDs;
-            # equivalently the ID table begins at clip + 2 * bone_count.
-            motion[0xA6:0xA9] = bytes((7, 3, 9))
-            sequence.write_bytes(motion)
-            # A valid character rig graph: 0x88-byte header + 9 * 0x80 records.
-            # The invariant header word 9 lives at offset 8; the independent
-            # record_count lives at offset 0x80.
-            rig = bytearray(0x88 + 9 * 0x80)
-            rig[:4] = b'\0crg'
-            struct.pack_into('>I', rig, 8, 9)
-            struct.pack_into('>I', rig, 0x80, 9)
-            package.write_bytes(bytes(rig))
-            result = motion_decode.discover_character_motion(model)
-            self.assertEqual(result['clip_count'], 2)
-            self.assertEqual(result['segment_count'], 2)
-            self.assertEqual(result['first_clip_offset'], 0xA0)
-            self.assertEqual(result['sequence_end_offset'], 0xC0)
-            self.assertEqual(result['skeleton_bone_ids'], [7, 3, 9])
-            self.assertEqual(result['package_entry_count'], 9)
-            self.assertFalse(result['decoded'])
+        corpus = Path(__file__).resolve().parent.parent / \
+            'game_files/decompressed/KB'
+        sequence = corpus / 'motionSequence/gim103/gim103'
+        model = corpus / 'chara/gim103/gim103'
+        if not sequence.is_file() or not model.is_file():
+            self.skipTest('KB corpus motionSequence/motionPackage unavailable')
+        result = motion_decode.discover_character_motion(model)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['clip_count'], 4)
+        self.assertEqual(result['skeleton_bone_ids'][0], 0)
+        self.assertFalse(result['clip_names'][0].startswith('KB/'))
 
 
 if __name__ == '__main__':

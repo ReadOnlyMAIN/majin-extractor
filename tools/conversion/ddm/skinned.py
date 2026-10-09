@@ -21,17 +21,16 @@ try:
     from ..blend_mask import DEFAULT_BLEND_RADIUS
     from ..glb_export import write_skinned_glb
     from ..godot_export import write_godot_material_assets
-    from ..motion_decode import (
+    from ..motion.export import (
         decode_character_animations, discover_character_motion,
     )
 except ImportError:
     from blend_mask import DEFAULT_BLEND_RADIUS
     from glb_export import write_skinned_glb
     from godot_export import write_godot_material_assets
-    from motion_decode import (
+    from motion.export import (
         decode_character_animations, discover_character_motion,
     )
-
 
 def _skinned_first_vertex_weight_sum(data, offset, vertices, indices, palette_size):
     """Return the 4-byte weight sum of the first vertex of a candidate group.
