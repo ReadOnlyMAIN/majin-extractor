@@ -13,12 +13,12 @@
 | 1 | Parsers structurels (`resource.py`, `sequence.py`, `package.py`) validés corpus | ✅ |
 | 2.1 | En-tête des blocs de courbes (`u16 descriptor_count, u16 sample_count` + fil 3-bit) | ✅ |
 | 2.2 | Table de canaux bit-packed → mapping blocs→(bone, composant) | 🔶 en cours |
-| 2.3 | Décodage des keyframes (oracle bind pose FAIT ; clés quantifiées ouvertes) | 🔶 en cours |
+| 2.3 | Décodage des keyframes (extraction lossless FAIT corpus entier ; oracles de pose humanoïde ouverts) | 🔶 en cours |
 | 2.4 | Liaison records ↔ slots ↔ blocs + FPS | 🔶 en cours |
 | 2.5 | IK : journalisation puis exclusion des canaux non-FK | ⬜ |
 | 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips / chr540 53 clips décódés**, humanoïdes en garde no-ghost) | 🔶 en cours |
 | 4 | Intégration pipeline / Godot (pont `export.py` partiellement FAIT) | 🔶 en cours |
-| 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 128 tests OK) | 🔶 en cours |
+| 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 133 tests OK) | 🔶 en cours |
 | 6 | Documentation finale (README/ROADMAP) + nettoyage legacy | ⬜ |
 
 Légende : ✅ fait · 🔶 en cours · ⬜ à faire.
@@ -46,7 +46,7 @@ Godot 4 via le pipeline GLB existant.
 | `sequence.py` | Parser `psmr` (records nommés, `parse_qstm`, `duration_frames_of`) | 1, 2.4 |
 | `package.py` | Parser `motionPackage` (table de blocs, `parse_skeleton`, index de slots `CurveIndexBlock`, `CurveBlock` / footer) | 1, 2.1 |
 | `curves.py` | Décodage des blocs de courbes (descripteurs 3-bit, `ScalarTrack`, `decode_curve_block`, oracles bind pose) — prototype de recherche | 2.x |
-| `export.py` | Pont pipeline : `discover_character_motion`, `decode_character_animations` (retourne `[]` tant que les courbes ne sont pas décodées) | 4 |
+| `export.py` | Pont pipeline : `discover_character_motion`, `decode_character_animations` (export réel des clips quand la bijectivité record↔bloc tient : gim103 4 / chr540 53 ; no-ghost sinon) | 3, 4 |
 | `cli.py`, `__main__.py`, `__init__.py` | CLI d'inspection `python -m tools.conversion.motion` | 1, 5 |
 
 ### Intégration pipeline (touchée)
@@ -245,8 +245,6 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   = 0.8415768146514893, 1 octet de différence dans le flux
   post-descripteurs → discriminateur idéal pour ce flux (probablement un
   index/id, pas une valeur numérique).
-- Oracles à venir : pose à t0 ≈ bind pose, |quat|≈1, blocs à 2 clés =
-  canaux constants.
 
 ### Mise à jour 2.4b — mots u32 internes de l'index (FAITS, sémantique ouverte)
 
@@ -348,8 +346,8 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 ## Phase 4 — Intégration pipeline + Godot (PARTIELLEMENT FAIT)
 
 - FAIT : `tools/conversion/motion/export.py` (pont
-  `discover_character_motion`, `decode_character_animations` — retourne
-  `[]` tant que les courbes ne sont pas décodées, aucun guess) ;
+  `discover_character_motion`, `decode_character_animations` exportant
+  les clips vérifiés — Phase 3 — et refusant tout pose fantôme sinon) ;
   `ddm/skinned.py` rewiré vers `tools.conversion.motion.export`, plus
   aucune référence active à l'ancien module.
 - À FAIRE : `export_folder_to_godot.py`, `.vscode/launch.json` (tâche
@@ -361,7 +359,8 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 - FAIT : `tests/test_motion_sequence_package.py` (goldens corpus :
   chr100=414 records, skin 146 bones / ids distincts, |quat|≈1 bind,
   index gim103=8 & chr370=38 slots) ; `test_ddm_to_3d.py::…boundary…`
-  réécrit sur le nouveau contrat. Suite complète : **128 tests OK** (1 skip).
+  réécrit sur le nouveau contrat. Suite complète : **133 tests OK** (1 skip,
+  dont les 3 goldens `test_motion_curves.py` gim103 ajoutés en Phase 3).
 - À FAIRE : goldens chr100, gim103, chr980, chr370, chr550 ; test
   bout-en-bout GLB (animation_count, noms, durées) ; CLI de masse pour cas
   limites (gim129 2 vs 6 bones, gim227 15 vs 14, chr200 8 Mo / 409 blocs) ;
