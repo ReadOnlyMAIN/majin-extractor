@@ -248,6 +248,25 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 - Oracles à venir : pose à t0 ≈ bind pose, |quat|≈1, blocs à 2 clés =
   canaux constants.
 
+### Mise à jour 2.4b — mots u32 internes de l'index (FAITS, sémantique ouverte)
+
+- **Longueurs variables de groupes** : la plupart des slots = 2 mots
+  `(valeur, 0xFFFFFFFF)` ; certains (chr300 slots 23/17/116/131/143,
+  chr370 slots 26/27/37) portent 3–5 mots u32 supplémentaires dont
+  `0x1010000`, `0x171dffff`, `0x1ffffff` (octets 0xFF de padding →
+  candidates de listes d'ids de canaux/états, pas des valeurs numériques).
+- **Aucune corrélation** de la valeur de tête avec `descriptor_count` ni
+  `sample_count` (chr300 slots 97..115 : valeur 0x800 constante tandis que
+  sc varie de 15 à 111) → la valeur n'est PAS un compteur de payload.
+- Motifs bit observés : bit7 (0x80… 0x800 → 0x8800, 0x802/0x8802/0x9002 :
+  bits 11/13/15 qui saturent indépendamment), 0x21/0x121/0x321
+  (0x0100/0x0200 qui s'empilient) → candidate (état, flags) probable.
+  Conservés RAW : **l'interprétation « état par slot » reste non démontrée**.
+- gim103 : tous les mots internes valent 0 → l'actif ne contraint rien.
+- Correction de vue : le slot 0 est parfois SANS bloc physique
+  (offsets dupliqués, paires miroir) ; l'association slot→bloc passe par
+  la table de offsets du paquet, pas par les groupes de mots.
+
 ### 2.4 — Liaison records ↔ slots ↔ blocs + durées (PARTIEL)
 
 - Champ **qstm+128** (décimal) varie par clip et s'accorde à l'ordre de
