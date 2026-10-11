@@ -195,21 +195,29 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 - Filtre descripteur : histogramme corpus écrasé par le code 1
   (ex. chr300 : 1×22887, 0×3322, 7×7107) — distribution asset-spécifique.
   C'est LE bitstream de canaux candidat.
+- **FAIT (gim103) — layout 7 scalaires par bone** : chaque bone occupe 7
+  indices scalaires consécutifs `(T.x,T.y,T.z,R.x,R.y,R.z,R.w)` ;
+  `bone = (scalar + base) // 7`, `comp = (scalar + base) % 7` avec
+  **base = 21** et permutation identité (ancres 21↔(6,T.x)/22/T.y/23/T.z,
+  28↔(7,T.x)… vérifiées à travers TOUS les blocs ; sonde
+  `channel_base_probe.py` → `CHANNEL_BASE_FINDINGS.md`). Le stride de 7
+  entre bones consécutifs est attesté par les triplets de translation
+  (21..23 vs 28..30).
 - **INVALIDÉ** : « les sections (f32, 0) suivent immédiatement le fil de
   descripteurs » (alignement mesuré : 1/150 chr300, 0 ailleurs) → une table
   de frames quantifiées s'intercale ; désormais décodée (cf. 2.3), mais
   l'offset exact de la section de valeurs reste ouvert. Candidats restants :
   canaux indexés dans une carte globale type bloc (0x12,0x0e) de chr100.
-- **Mapping scalar→(bone, comp) — EN COURS (sonde
-  research/scalar_channel_probe.py → SCALAR_CHANNEL_FINDINGS.md)** :
-  les mappings naïfs `scalar_index//4` (quaternion par bone) et
-  `//7` (T+R par bone) sont invalidés (0 hits sur gim103/chr300/chr370) ;
-  chr540 b0 obtient 23/25 hits en //7, asset-spécifique. Ancrages stables
-  documentés : gim103 scalar 21↔(6, T.x) et 28↔(7, T.x) constants à
-  travers les blocs ; chr370 scalar 127–134↔(25, T.x/T.y) ; chr300
-  scalars 201–215↔(44/53, T.y/T.z). Les valeurs constantes 0.0 sont
-  exclues des oracles (trivialement ambigües). La règle d'affectation
-  par bloc (base de canal variable) n'est pas résolue.
+- **Mapping humanoïdes — EN COURS** : les mappings naïfs
+  `scalar_index//4` (quaternion par bone) et `//7` (T+R par bone) sont
+  invalidés (0 hits sur gim103/chr300/chr370 ; chr540 b0 : 23/25 hits en
+  //7, asset-spécifique). Balayage exhaustif base × permutation (7!) sur
+  les ancres constantes : gim103 seule se sature (2/2, base 21) ; chr300/chr370
+  plafonnent à ~12/24-29 ancres → les clips humanoïdes ne démarrent PAS sur
+  la bind pose et les constantes seules ne suffisent pas à poser la base
+  (oracles supplémentaires requis : mots u32 internes de l'index de slots,
+  flags de bones, tangentes mode 7). Les constantes 0.0 sont exclues des
+  oracles (trivialement ambigües).
 
 
 ### 2.3 — Keyframes (EXTRACTION FAIT corpus entier ; oracles de pose PARTIELS)
