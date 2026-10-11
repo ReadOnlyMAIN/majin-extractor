@@ -197,16 +197,35 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   C'est LE bitstream de canaux candidat.
 - **INVALIDÉ** : « les sections (f32, 0) suivent immédiatement le fil de
   descripteurs » (alignement mesuré : 1/150 chr300, 0 ailleurs) → une table
-  de frames quantifiées s'intercale ; l'offset exact de la section de
-  valeurs reste ouvert. Candidats restants : canaux indexés dans une carte
-  globale type bloc (0x12,0x0e) de chr100.
-- **État décodeur** : `decode_curve_block` parse les 4370+ blocs sans
-  exception (compteurs cohérents) mais les `ScalarTrack` restent vides
-  (frames=[], mode 0) → l'extraction des clés quantifiées est la
-  **prochaine étape cran** ; le mapping blocs→(bone, composant) est bloqué
-  derrière elle.
+  de frames quantifiées s'intercale ; désormais décodée (cf. 2.3), mais
+  l'offset exact de la section de valeurs reste ouvert. Candidats restants :
+  canaux indexés dans une carte globale type bloc (0x12,0x0e) de chr100.
+- **Mapping scalar→(bone, comp) — EN COURS (sonde
+  research/scalar_channel_probe.py → SCALAR_CHANNEL_FINDINGS.md)** :
+  les mappings naïfs `scalar_index//4` (quaternion par bone) et
+  `//7` (T+R par bone) sont invalidés (0 hits sur gim103/chr300/chr370) ;
+  chr540 b0 obtient 23/25 hits en //7, asset-spécifique. Ancrages stables
+  documentés : gim103 scalar 21↔(6, T.x) et 28↔(7, T.x) constants à
+  travers les blocs ; chr370 scalar 127–134↔(25, T.x/T.y) ; chr300
+  scalars 201–215↔(44/53, T.y/T.z). Les valeurs constantes 0.0 sont
+  exclues des oracles (trivialement ambigües). La règle d'affectation
+  par bloc (base de canal variable) n'est pas résolue.
 
-### 2.3 — Keyframes / oracle bind pose (PARTIEL)
+
+### 2.3 — Keyframes (EXTRACTION FAIT corpus entier ; oracles de pose PARTIELS)
+
+- **FAIT** : `curves.decode_curve_block` décode les 4 370+ blocs du corpus
+  sans exception et avec consommation exacte du payload. Stockage scalaire
+  lossless : mode 5 = constante (1 f32), mode 6 = clés intérieures datées
+  (comptes/temps u8 ≤256 échantillons et u16 au-delà ; frames ∈ ]0,
+  sample_count−1[, strictement croissantes), mode 7 = clés + auxiliaires
+  (2×f32 par clé, paires (valeur, auxi)). Les modes 0–4 ne stockent rien
+  dans le payload du bloc.
+- Les valeurs de mode 5/6/7 contiennent des **composantes de bind pose
+  exactes** (0.8415768… quat, 229.172 translation gim103), mais les tests
+  de quartet |q|≈1 échouent sur des indices scalaires consécutifs → un
+  canal = UN scalaire (une seule composante), pas un bone entier.
+- Oracles restants : bijection scalar_index ↔ (bone, composant).
 
 - Les valeurs « constantes » des blocs de courbes = **valeurs de pose des
   canaux figés**, vérifiées contre la bind pose du bloc squelette :
