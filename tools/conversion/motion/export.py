@@ -122,11 +122,70 @@ def parse_clip_records(sequence_path: Path):
 
 def decode_character_animations(motion_info, skeleton, clip_indices=None,
                                 *args, **kwargs) -> list[dict]:
-    """Decode the selected clips as glTF animation dicts.
+    """Decode the selected clips as glTF animation dicts (Phase 3).
 
-    REVERSE_MOTION.md Phase 2 research: no verified joint-by-joint timed
-    curve exists yet, so this STILL returns an empty list. See
-    ``decode_motion_baseline_clips`` for the documented frozen-baseline
-    export (explicitly tagged with ``baseline=True``).
+    Evidence-gated: the package channel base is derived from bind-pose
+    anchors (``curves.resolve_scalar_channel_base``); a curve block becomes
+    a clip only when ``sample_count - 1`` equals a record's duration
+    candidate (u32 at qstm+128) and every record/block pairing stays
+    bijective — otherwise the function exports nothing rather than a
+    guessed pose. Unanimated joints keep their bind pose in the GLB scene,
+    so partial channels stay valid for Godot.
     """
-    return []
+    from .curves import decode_scalar_clip, resolve_scalar_channel_base
+    if not motion_info or not motion_info.get("clip_count"):
+        return []
+    sequence_path = Path(motion_info["sequence_path"])
+    package_path = Path(motion_info["package_path"])
+    package = parse_motion_package(package_path)
+    if package.skeleton is None or not package.curve_blocks:
+        return []
+    base = resolve_scalar_channel_base(package)
+    if base is None:
+        return []
+    _header, records = parse_motion_sequence(sequence_path)
+    frame_rate = kwargs.get("frame_rate", FPS_FALLBACK)
+    clip_indices = clip_indices or None
+    selections = [
+        record for record in records
+        if (duration_frames_of(record) or 0) > 0
+        and (clip_indices is None
+             or record.index in clip_indices)
+    ]
+    usable = []
+    for record in selections:
+        duration = duration_frames_of(record)
+        if len(record.qstm.raw) < 132 and duration is None:
+            duration = None
+        usable.append((record, duration))
+    primary_by_duration: dict[int, list] = {}
+    for block in package.curve_blocks:
+        try:
+            decoded = decode_scalar_clip(package, block, base, frame_rate)
+        except (UnsupportedMotion, ValueError):
+            decoded = None
+        if decoded is None:
+            continue
+        sample_minus_one = decoded["sample_count"] - 1
+        primary_by_duration.setdefault(sample_minus_one, []).append(decoded)
+    animations = []
+    used: set[int] = set()
+    for record, duration in usable:
+        if duration is None:
+            continue
+        pool = primary_by_duration.get(duration, [])
+        while len(pool) and id(pool[0]) in used:
+            pool = pool[1:]
+        if not pool:
+            return []  # bijective pairing broken: no partial export
+        clip = pool[0]
+        used.add(id(clip))
+        animations.append({
+            "name": record.short_name,
+            "duration": duration / frame_rate,
+            "frame_rate": frame_rate,
+            "channels": clip["channels"],
+            "scalar_mapping": "resolved_from_bind_anchors",
+            "resampled": clip["resampled"],
+        })
+    return animations

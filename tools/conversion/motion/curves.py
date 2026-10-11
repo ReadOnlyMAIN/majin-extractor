@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import struct
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 
 from .package import CurveBlock
@@ -239,6 +240,123 @@ def decode_curve_block(block: CurveBlock) -> DecodedCurveBlock:
         except (UnsupportedMotion, struct.error) as exc:
             errors.append(str(exc))
     raise UnsupportedMotion("; ".join(errors))
+
+
+def resolve_scalar_channel_base(package) -> int | None:
+    """Derive the per-package 7-scalar-per-bone channel base from evidence.
+
+    Proven layout (REVERSE_MOTION.md 2.2): every bone owns 7 consecutive
+    scalar indices ``T.x,T.y,T.z,R.x,R.y,R.z,R.w`` so that
+    ``bone = (scalar + base) // 7``. The base is anchored on curve
+    constants (mode 5) that byte-equal exactly ONE non-zero bind component
+    (identities shared by several bones or border components are excluded
+    as ambiguous). Returns the winning base when at least two anchors vote
+    for it and every animated scalar then stays inside the rig, else
+    ``None`` — no guessed mapping is produced.
+    """
+    skeleton = package.skeleton
+    if skeleton is None or not package.curve_blocks:
+        return None
+    owners: dict[bytes, list] = {}
+    for bone, (trio, quat) in enumerate(
+            zip(skeleton.translations, skeleton.rotations)):
+        for comp, value in enumerate((*trio, *quat)):
+            owners.setdefault(struct.pack(">f", value), []).append(
+                (bone, comp))
+    decoded = []
+    for block in package.curve_blocks:
+        try:
+            decoded.append(decode_curve_block(block))
+        except (UnsupportedMotion, ValueError):
+            return None
+    votes: dict[int, int] = {}
+    for block_decoded in decoded:
+        for track in block_decoded.tracks:
+            if not track.values or track.values[0] != track.values[-1]:
+                continue
+            candidates = owners.get(struct.pack(">f", track.values[0]), [])
+            if len(candidates) == 1:
+                bone, comp = candidates[0]
+                key = 7 * bone + comp - track.scalar_index
+                votes[key] = votes.get(key, 0) + 1
+    for base, count in sorted(votes.items(), key=lambda item: -item[1]):
+        if count < 2:
+            continue
+        bones = skeleton.bone_count
+        in_rig = True
+        for block_decoded in decoded:
+            for track in block_decoded.tracks:
+                if track.values and not (
+                        0 <= (track.scalar_index + base) // 7 < bones):
+                    in_rig = False
+        if in_rig:
+            return base
+    return None
+
+
+def decode_scalar_clip(package, block: CurveBlock, base: int,
+                       frame_rate: float = 60.0) -> dict | None:
+    """Build a partial glTF clip dict from one verified curve block.
+
+    Returns ``None`` (never a guessed clip) when the block's channel layout
+    does not resolve strictly inside the package rig. Mapping (proven,
+    REVERSE_MOTION.md 2.2/2.3): one scalar = one component, grouped in
+    7-scalar-per-bone runs with the package channel base; mode 5 = the
+    constant channel key, modes 6/7 = dated keys (u8/u16 frames).
+    A bone contributes a translation channel only when its three
+    translation scalars share one strictly-increasing grid, a rotation
+    channel only when its four quaternion scalars do; everything else is
+    skipped conservatively (no reconstructed pose).
+    """
+    decoded = decode_curve_block(block)
+    bones = package.skeleton.bone_count
+    grids = defaultdict(dict)
+    for track in decoded.tracks:
+        if not track.values:
+            continue
+        bone, comp = divmod(track.scalar_index + base, 7)
+        if not 0 <= bone < bones:
+            return None  # base drift: no guessed channels
+        frames = track.frames if track.frames else [0]
+        if len(frames) != len(track.values):
+            return None
+        if any(b <= a for a, b in zip(frames, frames[1:])):
+            return None
+        grids[(bone, comp >= 3)][comp] = (frames, track.values)
+    channels = []
+    for (bone, is_rotation), comps in grids.items():
+        wanted = (3, 4, 5, 6) if is_rotation else (0, 1, 2)
+        if set(comps) != set(wanted):
+            continue  # incomplete component set: skipped, no reconstruction
+        union = sorted({frame for comp in wanted
+                        for frame in comps[comp][0]})
+        values = []
+        for frame in union:
+            pose = []
+            for comp in wanted:
+                frames, track_values = comps[comp]
+                current = track_values[0]  # hold first key before its time
+                for key_frame, value in zip(frames, track_values):
+                    if key_frame > frame:
+                        break
+                    current = value
+                pose.append(current)
+            values.append(pose)
+        times = [frame / frame_rate for frame in union]
+        path = "rotation" if is_rotation else "translation"
+        channels.append({
+            "joint": bone, "path": path,
+            "times": times, "values": values,
+            "interpolation": "STEP",
+        })
+    if not channels:
+        return None
+    return {
+        "channels": channels,
+        "sample_count": decoded.sample_count,
+        "resampled": "step_hold_union",
+        "frame_rate": frame_rate,
+    }
 
 
 def bind_pose_hits(package, tolerance: float = 1e-3) -> tuple[int, int]:

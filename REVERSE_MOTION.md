@@ -16,7 +16,7 @@
 | 2.3 | Décodage des keyframes (oracle bind pose FAIT ; clés quantifiées ouvertes) | 🔶 en cours |
 | 2.4 | Liaison records ↔ slots ↔ blocs + FPS | 🔶 en cours |
 | 2.5 | IK : journalisation puis exclusion des canaux non-FK | ⬜ |
-| 3 | Reconstruction des clips glTF (`decode_clip`) | ⬜ |
+| 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips / chr540 53 clips décódés**, humanoïdes en garde no-ghost) | 🔶 en cours |
 | 4 | Intégration pipeline / Godot (pont `export.py` partiellement FAIT) | 🔶 en cours |
 | 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 128 tests OK) | 🔶 en cours |
 | 6 | Documentation finale (README/ROADMAP) + nettoyage legacy | ⬜ |
@@ -327,17 +327,23 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   non-FK sont des positions d'effecteurs). Entrées disponibles :
   `chain_count` du squelette motion et flags de bones.
 
-## Phase 3 — Reconstruction des clips (À FAIRE)
+## Phase 3 — Reconstruction des clips (PARTIELLEMENT FAIT)
 
-- `curves.py` + `export.py` : `decode_clip` → dicts clips glTF
-  ({name, duration, channels[{joint, path, times, values}]}), FPS
-  paramétrable, canaux constants → 1 keyframe.
-- Conversion frames→secondes ; mapping index motion → index joint DDM via
-  les ids identiques ; rééchantillonnage si temps non strictement
-  croissants (exigence du writer GLB).
-- Génération générique : tout DDM skinné (chr, gim, demo) avec
-  motionSequence + motionPackage ET au moins un segment de courbe →
-  exporte les clips ; sinon skin seul (comportement actuel).
+- FAIT : `curves.resolve_scalar_channel_base` (base dérivée des ancres
+  bind — gim103=21, chr540=205) et `curves.decode_scalar_clip` (clés
+  mode 5/6/7 → canaux glTF `{joint, path, times, values}` STEP ; fusion
+  par union de clés avec hold documenté
+  `resampled='step_hold_union'`).
+- FAIT : `export.decode_character_animations` exporte maintenant les clips
+  quand la bijectivité record↔bloc tient : **gim103 = 4 clips** (noms des
+  records, durées 92/39×2 frames) et **chr540 = 53 clips**. Les humanoïdes
+  (chr300/chr370…) retournent une liste **vide** tant que leur base de
+  canaux n'est pas démontrée — aucune pose reconstruite (pas de ghost).
+- Tests : `tests/test_motion_curves.py` — base gim103=21, formes des
+  canaux (temps croissants, quats non nuls, translation == bind
+  à la première clé). Suite : 133 tests OK (1 skip).
+- À FAIRE : base humanoïde (oracles moteurs : mots d'index, flags),
+  `sample_count`/FPS, validation visuelle Godot.
 
 ## Phase 4 — Intégration pipeline + Godot (PARTIELLEMENT FAIT)
 
