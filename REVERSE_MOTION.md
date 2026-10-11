@@ -269,6 +269,18 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 
 ### 2.4 — Liaison records ↔ slots ↔ blocs + durées (PARTIEL)
 
+- **FAIT — slots ≠ clips** : le compte de slots dépasse le compte de
+  records (chr300 : 150 slots / 121 records ; chr370 : 38/3 ; chr540 :
+  88/…) → les slots **n'ont pas de bijection 1-1 avec les clips** ; ils
+  candidate comme **états/sous-segments** adressés par la machine qstm
+  (cohérent avec le couple (valeur, flags=0xFFFFFFFF) par slot et les
+  bitfields d'état observés).
+- **FAIT — la queue du qstm est dense en états** : au-delà de l'en-tête,
+  les mots u32 du qstm varient par record sur des dizaines d'offsets
+  (chr300, valeurs aux offsets +160..+252 : séries de petites valeurs
+  entremêlées de sentinelles 0xFFFFFFFF et de mots à octets 0xFF →
+  liste variable d'entrées d'états/événements). Longueurs de qstm
+  variables (chr300 : 208..452 octets, 21 tailles distinctes).
 - Champ **qstm+128** (décimal) varie par clip et s'accorde à l'ordre de
   grandeur des clips (chr300 : 1..142 ; chr540 : 66..266 ; chr590 : 11..45 ;
   gim103 : **92, 39, 92, 39**) → meilleur candidat des durées en frames,
