@@ -267,6 +267,24 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   (offsets dupliqués, paires miroir) ; l'association slot→bloc passe par
   la table de offsets du paquet, pas par les groupes de mots.
 
+### Mise à jour 2.4c — queue du qstm : escaliers de temps + instructions
+
+- **FAIT** : il y a dans la queue du qstm (après +128) des suites
+  ascendantes de u32 = candidate d'événements/états horodatés en frames.
+  Ex. chr300 `boredom_01_00` : `44 56 80 104`, puis
+  `[0, 88, 92, 111, 114, 129, 132]`, avec la durée candidate 142.
+  Corpus chr300 : 66 records ont 1 escalier, 36 en ont 2, 15 en ont 3 ;
+  chr540 : 31/53. Les escaliers ne bornent PAS la durée (42/121 seules
+  bornes < durée) → ce ne sont pas des bornes de sous-segments
+  exhaustives ; structure = curseurs + instructions intercalées.
+- **FAIT (instructions binaires)** : après l'escalier, des mots
+  octets-codés en paires se répètent : `01 00 00 02 | 01 06 00 07 | 04 00 |
+  03 00 | ...` (ex. boredom_01_00 +192..+236) → candidate d'un mini
+  bytecode de machine à états. Non décodé.
+- **Décision** : le détail de la machine qstm est reporté APRÈS le premier
+  export end-to-end : les canaux scalaires (2.3) et le layout de bone
+  (gim103, 2.2) suffisent à construire clip par bloc avant.
+
 ### 2.4 — Liaison records ↔ slots ↔ blocs + durées (PARTIEL)
 
 - **FAIT — slots ≠ clips** : le compte de slots dépasse le compte de
