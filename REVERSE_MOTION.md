@@ -16,7 +16,7 @@
 | 2.3 | Décodage des keyframes (extraction lossless FAIT corpus entier ; oracles de pose humanoïde ouverts) | 🔶 en cours |
 | 2.4 | Liaison records ↔ slots ↔ blocs + FPS | 🔶 en cours |
 | 2.5 | IK : journalisation puis exclusion des canaux non-FK | ⬜ |
-| 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips / chr540 53 clips décódés**, humanoïdes en garde no-ghost) | 🔶 en cours |
+| 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips / chr540 53 clips décodés**, humanoïdes en garde no-ghost) | 🔶 en cours |
 | 4 | Intégration pipeline / Godot (pont `export.py` partiellement FAIT) | 🔶 en cours |
 | 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 133 tests OK) | 🔶 en cours |
 | 6 | Documentation finale (README/ROADMAP) + nettoyage legacy | ⬜ |
