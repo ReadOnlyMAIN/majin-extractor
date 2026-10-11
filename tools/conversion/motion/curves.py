@@ -1,18 +1,21 @@
 """Prototype curve-block decoding (Phase 2 research, REVERSE_MOTION.md).
 
-Model confirmed on gim103 / chr370 / chr540 / chr980 data:
+Model confirmed on gim103 / chr300 / chr370 / chr540 data:
 
-- Curve blocks start with a 4-byte header ``[type][A][0][B]``. A is a
-  per-block frame/key width, B a channel-phase selector (both formalisms
-  are still being refined; values are kept raw).
-- Each block carries a **bit-packed channel table** at its start, followed
+- Curve blocks start with two big-endian u16 values.  The first is the exact
+  number of 3-bit descriptors at the start of the body. Eight descriptors are
+  read least-significant-first inside each big-endian 24-bit word. Treating
+  its high byte as a curve ``type`` was wrong (large rigs simply have more
+  than 255 descriptors).  The second value is sample-count-like and equals
+  the qstm duration candidate + 1 for most mappable blocks.
+- Each block carries that **bit-packed descriptor table**, followed
   by **value sections made of ``(f32 canonical value, u32 0)`` pairs**.
   A pair whose value is a bone translation magnitude (~100-300 units) or
   a unit-length quaternion component tracks real pose constants.
-- A trailing ``B == 2`` block with a 16-bit channel table is a
-  **constant-only curve**: exactly one ``(f32 value, 0)`` pair follows
+- A trailing ``sample_count == 2`` block with a descriptor table is a
+    **constant-only curve**: exactly one f32 value follows
   (e.g. gim103 blocks 3/4 both decode ``0.842059`` with the same table
-  differing in a single bit — the studied A/B discriminator).
+  differing in a single bit after the descriptor stream).
 
 This module exposes only what survives all probes; the layout-place
 decoder for the bit-packed streams is still Phase 2 research.
@@ -20,9 +23,11 @@ decoder for the bit-packed streams is still Phase 2 research.
 from __future__ import annotations
 
 import struct
+import math
 from dataclasses import dataclass
 
 from .package import CurveBlock
+from .resource import UnsupportedMotion
 
 
 @dataclass
@@ -32,6 +37,30 @@ class CurveSection:
     channel_words: int          # u32 words consumed by the bit-packed table
     constants: list[tuple[float, int]]  # decoded (value, sentinel) pairs
     trailing_words: int         # words after the last declared pair
+
+
+@dataclass
+class ScalarTrack:
+    """One structurally decoded scalar track; transform semantics are open."""
+
+    scalar_index: int
+    mode: int
+    frames: list[int]
+    values: list[float]
+    auxiliaries: list[float]
+
+
+@dataclass
+class DecodedCurveBlock:
+    """Lossless scalar-storage view of a curve block."""
+
+    descriptor_count: int
+    sample_count: int
+    tracks: list[ScalarTrack]
+    descriptor_padding: bytes
+    key_table_padding: bytes
+    payload_offset: int
+    key_time_width: int
 
 
 def _is_canonical_f32(word: int) -> bool:
@@ -78,15 +107,138 @@ def locate_value_start(body: bytes, default_channel_words: int) -> int:
 
 
 def block_curve_header(block: CurveBlock) -> tuple[int, int, int, int]:
-    """Return ``(type, A, phase, B)`` of a curve block.
-
-    Corpus-wide, byte 2 is almost always 0 (4415/4474) but is occasionally
-    1 (59 blocks) — kept as a raw ``phase`` byte rather than asserted zero.
-    """
+    """Return the four raw header bytes (legacy research helper)."""
     if len(block.header) != 4:
         raise ValueError('curve block header must be 4 bytes')
     kind, first, phase, second = block.header
     return kind, first, phase, second
+
+
+def curve_header_counts(block: CurveBlock) -> tuple[int, int]:
+    """Return ``(descriptor_count, sample_count)`` from the BE u16 header."""
+    if len(block.header) != 4:
+        raise ValueError('curve block header must be 4 bytes')
+    return struct.unpack('>HH', block.header)
+
+
+def descriptor_codes(block: CurveBlock) -> list[int]:
+    """Decode the leading 3-bit descriptor stream.
+
+    Eight descriptors occupy each big-endian 24-bit word, from its least
+    significant 3 bits upwards. The final word is padded with zero modes.
+    This orientation is discriminated corpus-wide by descriptor padding,
+    strictly increasing interior key times and exact payload consumption.
+    """
+    count, _sample_count = curve_header_counts(block)
+    table_size = ((count + 7) // 8) * 3
+    if table_size > len(block.body):
+        raise ValueError('curve descriptor stream exceeds block body')
+    codes = []
+    for offset in range(0, table_size, 3):
+        packed = int.from_bytes(block.body[offset:offset + 3], "big")
+        codes.extend((packed >> (3 * index)) & 7 for index in range(8))
+    if any(codes[count:]):
+        raise UnsupportedMotion("nonzero curve descriptor padding")
+    return codes[:count]
+
+
+def _decode_with_key_width(block: CurveBlock, key_time_width: int) \
+        -> DecodedCurveBlock:
+    descriptor_count, sample_count = curve_header_counts(block)
+    modes = descriptor_codes(block)
+    cursor = ((descriptor_count + 7) // 8) * 3
+    aligned_cursor = (cursor + key_time_width - 1) & -key_time_width
+    descriptor_padding = block.body[cursor:aligned_cursor]
+    cursor = aligned_cursor
+    key_frames: dict[int, list[int]] = {}
+    count_width = key_time_width
+    for scalar_index, mode in enumerate(modes):
+        if mode not in (6, 7):
+            continue
+        if cursor + count_width > len(block.body):
+            raise UnsupportedMotion("truncated curve key count")
+        interior_count = int.from_bytes(
+            block.body[cursor:cursor + count_width], "big"
+        )
+        cursor += count_width
+        byte_count = interior_count * key_time_width
+        if cursor + byte_count > len(block.body):
+            raise UnsupportedMotion("truncated curve key times")
+        interior = [
+            int.from_bytes(
+                block.body[offset:offset + key_time_width], "big"
+            )
+            for offset in range(cursor, cursor + byte_count, key_time_width)
+        ]
+        cursor += byte_count
+        if interior != sorted(set(interior)) or any(
+                not 0 < frame < sample_count - 1 for frame in interior):
+            raise UnsupportedMotion("invalid curve key times")
+        key_frames[scalar_index] = [0, *interior, sample_count - 1]
+
+    payload_offset = (cursor + 3) & ~3
+    if payload_offset > len(block.body):
+        raise UnsupportedMotion("invalid curve payload alignment")
+    padding = block.body[cursor:payload_offset]
+    cursor = payload_offset
+    tracks = []
+    for scalar_index, mode in enumerate(modes):
+        frames = key_frames.get(scalar_index, [0])
+        word_count = (
+            1 if mode == 5 else
+            len(frames) if mode == 6 else
+            2 * len(frames) if mode == 7 else 0
+        )
+        byte_count = word_count * 4
+        if cursor + byte_count > len(block.body):
+            raise UnsupportedMotion("truncated curve float payload")
+        words = list(struct.unpack_from(">" + "f" * word_count,
+                                        block.body, cursor))
+        if not all(math.isfinite(value) for value in words):
+            raise UnsupportedMotion("non-finite curve float payload")
+        cursor += byte_count
+        values = words[::2] if mode == 7 else words
+        auxiliaries = words[1::2] if mode == 7 else []
+        tracks.append(ScalarTrack(
+            scalar_index=scalar_index,
+            mode=mode,
+            frames=frames if word_count else [],
+            values=values,
+            auxiliaries=auxiliaries,
+        ))
+    if cursor != len(block.body):
+        raise UnsupportedMotion(
+            f"unaccounted curve payload bytes: {len(block.body) - cursor}"
+        )
+    return DecodedCurveBlock(
+        descriptor_count=descriptor_count,
+        sample_count=sample_count,
+        tracks=tracks,
+        descriptor_padding=descriptor_padding,
+        key_table_padding=padding,
+        payload_offset=payload_offset,
+        key_time_width=key_time_width,
+    )
+
+
+def decode_curve_block(block: CurveBlock) -> DecodedCurveBlock:
+    """Decode the verified scalar storage without assigning bone semantics.
+
+    Clips through 256 samples use u8 key counts/times. Longer clips normally
+    use u16 counts/times. A small exceptional family has a different wide-key
+    layout and is rejected rather than guessed.
+    """
+    descriptor_count, sample_count = curve_header_counts(block)
+    if descriptor_count == 0 or sample_count < 2:
+        raise UnsupportedMotion("placeholder or invalid curve block")
+    widths = (1,) if sample_count <= 256 else (2,)
+    errors = []
+    for width in widths:
+        try:
+            return _decode_with_key_width(block, width)
+        except (UnsupportedMotion, struct.error) as exc:
+            errors.append(str(exc))
+    raise UnsupportedMotion("; ".join(errors))
 
 
 def bind_pose_hits(package, tolerance: float = 1e-3) -> tuple[int, int]:
@@ -118,9 +270,6 @@ def bind_pose_hits(package, tolerance: float = 1e-3) -> tuple[int, int]:
 def _block_pose_constants(block: CurveBlock, components: list[float],
                           tolerance: float) -> tuple[int, int]:
     """Decode value-section constants of one block; (total, matches)."""
-    kind, _A, _phase, _B = block_curve_header(block)
-    if kind in (3, 4):
-        return 0, 0  # rare large blocks, not validated
     start_words = locate_value_start(block.body, 10)//4
     constants = decode_constant_section(
         block.body, start_words, 0).constants
@@ -138,15 +287,15 @@ def _block_pose_constants(block: CurveBlock, components: list[float],
 
 
 def is_constant_curve(block: CurveBlock) -> bool:
-    """True when the block is a B==2 constant-only curve (verified form)."""
-    kind, _A, _zero, second = block_curve_header(block)
-    return kind == 0 and second == 2 and len(block.body) == 20
+    """True for the verified sample_count=2 constant-only curve form."""
+    _descriptor_count, sample_count = curve_header_counts(block)
+    return sample_count == 2 and len(block.body) == 20
 
 
 def constant_curve_value(block: CurveBlock) -> float | None:
     """Decoded float of a constant-only curve, else ``None``."""
-    kind, _A, _zero, second = block_curve_header(block)
-    if not (kind == 0 and second == 2 and len(block.body) == 20):
+    _descriptor_count, sample_count = curve_header_counts(block)
+    if not (sample_count == 2 and len(block.body) == 20):
         return None
     return struct.unpack('>f', block.body[-4:])[0]
 

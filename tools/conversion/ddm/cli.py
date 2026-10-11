@@ -78,6 +78,27 @@ def main():
     ap.add_argument("input", type=Path, help="DDM file or directory")
     ap.add_argument("output", type=Path, help="Output directory")
     ap.add_argument(
+        "--animations-mode",
+        choices=("off", "baseline"),
+        default="off",
+        help=(
+            "Animation export mode. 'off' (default) exports no animation. "
+            "'baseline' exports one glTF animation per named motion clip: "
+            "while the quantized curve stream is still being reverse-"
+            "engineered, each clip is an explicitly tagged frozen bind-pose "
+            "baseline (duration from the clip's qstm state block)."
+        ),
+    )
+    ap.add_argument(
+        "--animation-frame-rate",
+        type=float,
+        default=60.0,
+        help=("Frames per second used to convert clip frame counts into "
+              "seconds in --animations-mode baseline. 60 is the shipped "
+              "default; some families may be authored at 30."),
+    )
+
+    ap.add_argument(
         "--material-mode",
         choices=("pbr", "godot", "original-godot"),
         default="pbr",

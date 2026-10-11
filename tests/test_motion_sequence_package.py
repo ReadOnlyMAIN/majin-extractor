@@ -52,7 +52,8 @@ class GoldenPackageTests(unittest.TestCase):
             CORPUS / "motionPackage/chr100/BigEndian/chr100")
         self.assertEqual(package.skeleton.bone_count, 146)
         self.assertEqual(package.skeleton.chain_count, 4)
-        self.assertEqual(len(package.curve_blocks), 368)
+        # 457 logical curve slots, including 90 duplicated/empty offsets.
+        self.assertEqual(len(package.curve_blocks), 367)
         skeleton = package.skeleton
         # bind-pose invariants
         for quat in skeleton.rotations:
@@ -63,19 +64,38 @@ class GoldenPackageTests(unittest.TestCase):
         self.assertEqual(len(set(ids)), 146)
         self.assertTrue(all(0 <= i < 256 for i in ids))
 
-    def test_timeline_counts(self):
-        for name, segments in (("gim103", 8), ("chr370", 38)):
+    def test_curve_index_offsets(self):
+        for name, slots, words in (("gim103", 8, 16),
+                                   ("chr370", 38, 82)):
             package = parse_motion_package(
                 CORPUS / f"motionPackage/{name}/BigEndian/{name}")
-            self.assertEqual(package.timeline.segment_count, segments)
-            boundaries = package.timeline.boundaries
-            self.assertEqual(
-                boundaries, sorted(set(boundaries)))
+            index = package.curve_index
+            self.assertEqual(index.slot_count, slots)
+            self.assertEqual(index.entry_offsets[0], 4 + (slots + 1) * 4)
+            self.assertEqual(index.entry_offsets[-1],
+                             index.entry_offsets[0] + words * 4)
+            self.assertEqual(len(index.words), words)
+            self.assertEqual(len(index.groups), slots)
             if name == "gim103":
-                for _value, sentinel in package.timeline.pairs:
-                    self.assertEqual(sentinel, 0xFFFFFFFF)
-            else:  # chr370: 41 pairs for 38 segments (open Phase 2.4)
-                self.assertEqual(len(package.timeline.pairs), 41)
+                self.assertTrue(all(group == [0, 0xFFFFFFFF]
+                                    for group in index.groups))
+
+    def test_duplicate_curve_slots_explain_count_mismatch(self):
+        package = parse_motion_package(
+            CORPUS / "motionPackage/chr540/BigEndian/chr540")
+        self.assertEqual(package.curve_index.slot_count, 88)
+        self.assertEqual(len(package.curve_blocks), 83)
+        self.assertEqual(sum(slot.size == 0 for slot in package.slots), 5)
+
+    def test_final_block_preserves_rig_controls(self):
+        chr300 = parse_motion_package(
+            CORPUS / "motionPackage/chr300/BigEndian/chr300")
+        self.assertEqual(len(chr300.footer), 92)
+        self.assertEqual(len(chr300.rig_controls.records), 15)
+        self.assertTrue(chr300.rig_controls.marker.endswith(b"\xFF\x00\x00"))
+        gim103 = parse_motion_package(
+            CORPUS / "motionPackage/gim103/BigEndian/gim103")
+        self.assertEqual(gim103.rig_controls.records, [])
 
     def test_truncated_file_raises(self):
         raw = (CORPUS / "motionPackage/chr100/BigEndian/chr100").read_bytes()
@@ -97,7 +117,7 @@ class CurveHeaderTests(unittest.TestCase):
         ]
         self.assertEqual(constants, [(3, 0.8415768146514893),
                                      (4, 0.8415768146514893)])
-        # The mirrored pair differs by exactly one byte (open A/B research).
+        # The mirrored pair differs by one post-descriptor byte.
         b4, b5 = [
             block for block in package.curve_blocks
             if curves.is_constant_curve(block)
@@ -105,10 +125,30 @@ class CurveHeaderTests(unittest.TestCase):
         diff = [i for i in range(20) if b4.body[i] != b5.body[i]]
         self.assertEqual(len(diff), 1)
 
-    def test_header_phase_byte_is_kept_raw(self):
+    def test_header_is_two_big_endian_u16_counts(self):
         package = parse_motion_package(CORPUS / "motionPackage/chr540/BigEndian/chr540")
-        phases = {curves.block_curve_header(block)[2]
-                  for block in package.curve_blocks}
+        descriptor_count, sample_count = curves.curve_header_counts(
+            package.curve_blocks[0])
+        self.assertEqual((descriptor_count, sample_count), (1112, 80))
+        self.assertEqual(len(curves.descriptor_codes(package.curve_blocks[0])),
+                         descriptor_count)
+
+    def test_gim103_descriptor_stream(self):
+        package = parse_motion_package(CORPUS / "motionPackage/gim103/BigEndian/gim103")
+        block = package.curve_blocks[3]
+        self.assertEqual(curves.curve_header_counts(block), (36, 2))
+        self.assertEqual(curves.descriptor_codes(block),
+                         [0, 0] + [1] * 9 + [5, 0, 0] + [1] * 22)
+
+    def test_gim103_scalar_storage_consumes_every_byte(self):
+        package = parse_motion_package(CORPUS / "motionPackage/gim103/BigEndian/gim103")
+        decoded = [curves.decode_curve_block(block)
+                   for block in package.curve_blocks]
+        self.assertEqual([clip.sample_count for clip in decoded],
+                         [93, 42, 40, 2, 2, 93, 42, 40])
+        constant = decoded[3].tracks[11]
+        self.assertEqual(constant.mode, 5)
+        self.assertAlmostEqual(constant.values[0], 0.8415768146514893)
     def test_gim103_channel_landmark(self):
         package = parse_motion_package(CORPUS / "motionPackage/gim103/BigEndian/gim103")
         animated = [

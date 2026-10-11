@@ -11,11 +11,64 @@ from pathlib import Path
 
 from .package import parse_motion_package
 from .resource import UnsupportedMotion, discover_motion_paths
+from .sequence import duration_frames_of, parse_motion_sequence
 
-try:
-    from ddm.binary import UnsupportedDDMVariant
-except ImportError:  # pragma: no cover - package import
-    from tools.conversion.ddm.binary import UnsupportedDDMVariant
+FPS_FALLBACK = 60  # documented fallback: grids are 8-frame aligned (REVERSE_MOTION.md)
+
+
+def decode_motion_baseline_clips(model_path: Path,
+                                 frame_rate: float = FPS_FALLBACK) -> list[dict]:
+    """Export glTF animation dicts for every named clip of an asset.
+
+    Practical variant (documented in REVERSE_MOTION.md 'Risques'):
+    while the quantized curve stream resists decoding, each clip exports a
+    *frozen baseline* — the joints hold the verified motion-skeleton bind
+    pose over the duration hypothesis (u32 at qstm+128). Output dict keys
+    match ``write_skinned_glb``'s glTF ``animations`` API, so the GLB
+    cycle-check must never fail: full (valid) tracks per joint.
+    """
+    motion_info = discover_character_motion(model_path)
+    if not motion_info or not motion_info.get("clip_count"):
+        return []
+    sequence_path, package_path = Path(motion_info["sequence_path"]), \
+        Path(motion_info["package_path"])
+    package = parse_motion_package(package_path)
+    _header, records = parse_clip_records(sequence_path)
+    if package.skeleton is None:
+        return []
+    skeleton = package.skeleton
+    quats = list(skeleton.rotations)
+    translations = list(skeleton.translations)
+    animations = []
+    for record in records:
+        frames = duration_frames_of(record)
+        if not frames or frames <= 0:
+            continue
+        times = [0.0, frames / frame_rate]
+        channels = []
+        for joint in range(skeleton.bone_count):
+            channels.append({
+                "joint": joint,
+                "path": "translation",
+                "times": times,
+                "values": [list(translations[joint]) for _t in times],
+                "interpolation": "STEP",
+            })
+            channels.append({
+                "joint": joint,
+                "path": "rotation",
+                "times": times,
+                "values": [list(quats[joint]) for _t in times],
+                "interpolation": "STEP",
+            })
+        animations.append({
+            "name": record.short_name,
+            "duration": frames / frame_rate,
+            "frame_rate": frame_rate,
+            "baseline": True,          # visible marker: not the timed curves
+            "channels": channels,
+        })
+    return animations
 
 
 def discover_character_motion(model_path: Path) -> dict | None:
@@ -71,8 +124,9 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                                 *args, **kwargs) -> list[dict]:
     """Decode the selected clips as glTF animation dicts.
 
-    Curve decoding is still under active research (REVERSE_MOTION.md
-    Phase 2), so this returns an empty list — the pipeline exports the
-    skinned mesh with its joints but no guessed animation.
+    REVERSE_MOTION.md Phase 2 research: no verified joint-by-joint timed
+    curve exists yet, so this STILL returns an empty list. See
+    ``decode_motion_baseline_clips`` for the documented frozen-baseline
+    export (explicitly tagged with ``baseline=True``).
     """
     return []

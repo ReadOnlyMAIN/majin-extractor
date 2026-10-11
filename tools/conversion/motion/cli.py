@@ -41,19 +41,23 @@ def inspect(kb_root: Path, name: str, curve_stats: bool = False) -> int:
         return 1
     skeleton = package.skeleton
     print(
-        "  skeleton: bones=%d chains=%d timeline=%s"
+        "  skeleton: bones=%d chains=%d curve_slots=%s"
         % (
             skeleton.bone_count if skeleton else -1,
             skeleton.chain_count if skeleton else -1,
-            package.timeline.segment_count if package.timeline else None,
+            package.curve_index.slot_count if package.curve_index else None,
         )
     )
     print(f"  curve blocks: {len(package.curve_blocks)}")
     if curve_stats:
         from collections import Counter
 
-        types = Counter(block.header[0] for block in package.curve_blocks)
-        print(f"  curve types: {dict(sorted(types.items()))}")
+        from .curves import curve_header_counts
+
+        descriptor_counts = Counter(
+            curve_header_counts(block)[0] for block in package.curve_blocks
+        )
+        print(f"  descriptor counts: {dict(sorted(descriptor_counts.items()))}")
     return 0
 
 

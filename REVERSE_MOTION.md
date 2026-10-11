@@ -2,6 +2,26 @@
 
 > Statut du plan et avancement. Convention projet : *Evidence over guessing* —
 > seuls les faits vérifiés sur le corpus sont décrits comme confirmés.
+> Le document suit l'**ordre d'exécution du plan** : les résultats de
+> recherche sont rangés dans la phase qui les a produits.
+
+## Progress
+
+| Phase | Tâche | Statut |
+|---|---|---|
+| 0 | Nettoyage / archivage de l'ancien prototype | ✅ |
+| 1 | Parsers structurels (`resource.py`, `sequence.py`, `package.py`) validés corpus | ✅ |
+| 2.1 | En-tête des blocs de courbes (`u16 descriptor_count, u16 sample_count` + fil 3-bit) | ✅ |
+| 2.2 | Table de canaux bit-packed → mapping blocs→(bone, composant) | 🔶 en cours |
+| 2.3 | Décodage des keyframes (oracle bind pose FAIT ; clés quantifiées ouvertes) | 🔶 en cours |
+| 2.4 | Liaison records ↔ slots ↔ blocs + FPS | 🔶 en cours |
+| 2.5 | IK : journalisation puis exclusion des canaux non-FK | ⬜ |
+| 3 | Reconstruction des clips glTF (`decode_clip`) | ⬜ |
+| 4 | Intégration pipeline / Godot (pont `export.py` partiellement FAIT) | 🔶 en cours |
+| 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 128 tests OK) | 🔶 en cours |
+| 6 | Documentation finale (README/ROADMAP) + nettoyage legacy | ⬜ |
+
+Légende : ✅ fait · 🔶 en cours · ⬜ à faire.
 
 ## Objectif
 
@@ -15,6 +35,52 @@ Godot 4 via le pipeline GLB existant.
   `motionPackage/<n>/BigEndian/<n>` : liés **par convention de nom**
   (aucune référence croisée dans les binaires).
 - Extension naturelle : `demo/<d>/motionPackage` (cutscenes), gems (gimXXX).
+
+## Architecture & fichiers impliqués
+
+### Implémentation active — `tools/conversion/motion/`
+
+| Fichier | Rôle | Phases |
+|---|---|---|
+| `resource.py` | En-tête ressource commun (magic/version/FILETIME), `UnsupportedMotion`, `discover_motion_paths` | 1 |
+| `sequence.py` | Parser `psmr` (records nommés, `parse_qstm`, `duration_frames_of`) | 1, 2.4 |
+| `package.py` | Parser `motionPackage` (table de blocs, `parse_skeleton`, index de slots `CurveIndexBlock`, `CurveBlock` / footer) | 1, 2.1 |
+| `curves.py` | Décodage des blocs de courbes (descripteurs 3-bit, `ScalarTrack`, `decode_curve_block`, oracles bind pose) — prototype de recherche | 2.x |
+| `export.py` | Pont pipeline : `discover_character_motion`, `decode_character_animations` (retourne `[]` tant que les courbes ne sont pas décodées) | 4 |
+| `cli.py`, `__main__.py`, `__init__.py` | CLI d'inspection `python -m tools.conversion.motion` | 1, 5 |
+
+### Intégration pipeline (touchée)
+
+- `tools/conversion/ddm/skinned.py` — rewire de `motion_decode` (archivé)
+  vers `tools.conversion.motion.export`.
+- `tools/conversion/export_folder_to_godot.py` + `.vscode/launch.json` —
+  à mettre à jour en Phase 4 (tâche « DDM: export with animations »).
+- `tests/test_motion_sequence_package.py`, `tests/test_ddm_to_3d.py`.
+
+### Sondes corpus (recherche, rejouables) — `research/`
+
+- `curve_bitstream_probe.py` + `CURVE_BITSTREAM_FINDINGS.md` (Phase 2.1/2.2),
+- `curve_header_probe.py` + `CURVE_HEADER_FINDINGS.md` (Phase 2.1, son modèle
+  octets A/B est corrigé ; conservé pour trace),
+- `ddm_structural_scan.py`, `ddm_variant_probe.py`.
+
+### Fichiers legacy — à supprimer à la TOUTE DERNIÈRE étape de clean (Phase 6)
+
+`research/legacy/` contient l'implémentation précédente, conservée
+uniquement pour traçabilité. À la fin du plan (Phase 6), supprimer :
+
+- `research/legacy/motion_decode_archived.py`,
+  `research/legacy/test_motion_decode_archived.py`,
+- les anciennes sondes : `motion_probe.py`, `motion_semantics_probe.py`,
+  `per_clip_layout_probe.py`, `fk_rotation_probe.py`,
+  `ddm_multisection_probe.py`, `skin_decode_probe.py`,
+- les documents périmés : `MOTION_ANALYSIS.md`, `EXTRACTION_SUMMARY.md`,
+  `README_CONVERSION.md`, `asset_inventory.json`,
+- et le dossier `__pycache__/`.
+
+Ne les supprimer qu'après : décodage complet des courbes, extraction des
+clés, tests GLB bout-en-bout verts et mise à jour de la documentation
+(Phase 6).
 
 ## En-tête ressource commun (Phase 1 — VÉRIFIÉ)
 
@@ -67,11 +133,15 @@ Paquet : `tools/conversion/motion/` (`resource.py`, `sequence.py`,
   exacte** (vérifié octet-près, chr100).
 - `chain_count` = candidat compteur de chaînes IK (chr100=4, chr370=2,
   gim103=0); flags de bones 00/02/03/04/0x48 = marqueurs candidats.
-- **Timeline (avant-dernier bloc)** — décodée : `[u32 segment_count]`
-  `[segment_count+1 bornes u32 en frames]` `[count × (u32 valeur,
-  0xFFFFFFFF)]`. `segment_count == nombre de blocs de courbes` (vérifié
-  chr300/chr370/gim103/chr100). Timeline **optionnelle** (paquets
-  placeholders minuscules sans timeline).
+- **Index des slots de courbes (avant-dernier bloc)** — décodé
+  structurellement : `[u32 slot_count] [slot_count+1 offsets u32]`, puis
+  des mots u32 bruts regroupés par ces offsets. Le premier offset vaut
+  exactement `4 + 4*(slot_count+1)` et le dernier la taille du bloc : ce sont des
+  **offsets internes**, pas des frames. `slot_count == block_count-3` sur
+  les 173 packages qui portent cet index. Les offsets de blocs dupliqués
+  expliquent pourquoi le nombre de blocs physiques non vides peut être
+  inférieur au nombre de slots logiques. Index optionnel sur les petits
+  placeholders.
 - Dernier bloc : footer ~16 octets (`e7 19 01 … 05 ff 00`).
 - Offsets dupliqués dans la table = clips partageant les mêmes données
   (variantes miroir).
@@ -94,145 +164,138 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 - `type_id` des records : 208 partout pour chr370/gim103 ; varie pour
   chr100 (236×118, 272×52, 208×62…) — probablement un code de catégorie,
   pas un lien.
-- Chr100 : 457 segments de timeline pour 460 blocs ; chr300 : 150/153.
+- Chr100 : 457 slots de courbes pour 460 blocs totaux ; chr300 : 150/153.
 
 ## Phase 2 — Recherche format des courbes (EN COURS)
 
-Observations accumulées (à confirmer) :
+### 2.1 — En-tête des blocs (FAIT, CORRIGÉ — research/curve_bitstream_probe.py)
 
-- Blocs de courbes à 4 bytes d'en-tête `[type][A][0][B]` ;
-  type ∈ {0,1,2} (+type 3/4 = rares). Distribution corpus :
-  type0=1425, type1=1663, type2=794, type3=599, type4=2.
-- Contenu : **bit-packed delta-quantisé** (motif répétitif `24 92 49` =
-  motif binaire « 001001… » = deltas constants), paires `(f32 valeur,
-  u32 0)` (canaux constants), puis flux f32 de keyframes.
-- gim103 blocs 4/5 : **1 seul octet** différent (0x00 ↔ 0x02) → sujets A/B
-  parfaits (probablement un index/id, pas une valeur numérique).
-- gim103 b2/b7 partagent leurs 10 derniers f32.
+- L'ancien découpage par octets A/B était faux. L'en-tête est
+  `u16 descriptor_count, u16 sample_count` (BE) et le premier compteur borne
+  exactement le flux initial de codes 3-bit, groupés huit par mot 24-bit,
+  lus du triplet de poids faible vers le poids fort. Orientation discriminée
+  par le padding nul, les temps strictement croissants et la consommation
+  exacte du payload (4 379 blocs contre 172 en MSB-first). Motif `24 92 49`
+  = répétition du code `001`.
+- Les compteurs dépassent 255 sur les gros rigs — chr540 : 658..1112
+  descripteurs, chr590 : 753..793 (207/220 bones) : l'« octet type »
+  n'existait pas (octet haut de `descriptor_count`) ; l'« octet phase »
+  était celui de `sample_count`.
+- `sample_count - 1` appartient aux durées candidates qstm+128 pour
+  chr300 **135/150**, chr540 **54/83**, chr590 **26/32** et gim103 **4/8**.
+  Cela soutient une longueur échantillonnée, sans encore fournir une
+  bijection record→slot.
+- Sur gim103, les compteurs de descripteurs 36/40/44 sont divisibles par 4
+  et les paires miroir conservent leurs motifs structurés. Sur les
+  humanoïdes, les compteurs sont proches de 4×bone_count ; l'affectation
+  exacte aux canaux reste à démontrer.
 
-Protocole testé / à faire :
+### 2.2 — Table de canaux bit-packed (EN COURS)
 
-1. **2.1** cartographier header → sémantique de A/B (discriminateurs :
-   compter les f32 du flux vs A/B par bloc).
-2. **2.2** décoder la table de canaux bit-packed (candidats : canaux
-   indexés dans une carte globale type bloc (0x12,0x0e) de chr100).
-3. **2.3** décoder les keyframes — oracles : pose à t0 ≈ bind pose,
-   |quat|≈1, blocs à 2 clés = canaux constants.
-4. **2.4** lier records ↔ timeline ↔ blocs : tester (A) valeur de segment
-   = index de bloc, (B) plages de frames des records vs durées qstm,
-   (C) permutation records (tri alphabétique) vs bornes chronologiques
-   (candidat : FILETIME des records). Déterminer la FPS (30 vs 60).
-5. **2.5** IK : canaux non-FK journalisés puis exclus (éventuel solveur
-   2-bone optionnel, flag `--ik-solve`, seulement après preuve).
+- Filtre descripteur : histogramme corpus écrasé par le code 1
+  (ex. chr300 : 1×22887, 0×3322, 7×7107) — distribution asset-spécifique.
+  C'est LE bitstream de canaux candidat.
+- **INVALIDÉ** : « les sections (f32, 0) suivent immédiatement le fil de
+  descripteurs » (alignement mesuré : 1/150 chr300, 0 ailleurs) → une table
+  de frames quantifiées s'intercale ; l'offset exact de la section de
+  valeurs reste ouvert. Candidats restants : canaux indexés dans une carte
+  globale type bloc (0x12,0x0e) de chr100.
+- **État décodeur** : `decode_curve_block` parse les 4370+ blocs sans
+  exception (compteurs cohérents) mais les `ScalarTrack` restent vides
+  (frames=[], mode 0) → l'extraction des clés quantifiées est la
+  **prochaine étape cran** ; le mapping blocs→(bone, composant) est bloqué
+  derrière elle.
 
-### Résultats 2.4 (probes qstm / timeline)
+### 2.3 — Keyframes / oracle bind pose (PARTIEL)
 
-- Testé durée candidate à qstm+121/131 **hex** (`0x79`/`0x83`) : valeurs
+- Les valeurs « constantes » des blocs de courbes = **valeurs de pose des
+  canaux figés**, vérifiées contre la bind pose du bloc squelette :
+  `curves.bind_pose_hits()` → chr100 **87/145**, chr300 8/19, chr540 6/12,
+  gim103 2/5 (tol 1e-3). Exemple exact : gim103 bone id 9
+  `T=(-1.2651, -5.6713, 229.172)` retrouvé tel quel dans un bloc.
+- Forme « courbe 100 % constante » isolée (`sample_count=2`, 20 octets) :
+  `curves.is_constant_curve` + `constant_curve_value` — gim103 b3/b4
+  = 0.8415768146514893, 1 octet de différence dans le flux
+  post-descripteurs → discriminateur idéal pour ce flux (probablement un
+  index/id, pas une valeur numérique).
+- Oracles à venir : pose à t0 ≈ bind pose, |quat|≈1, blocs à 2 clés =
+  canaux constants.
+
+### 2.4 — Liaison records ↔ slots ↔ blocs + durées (PARTIEL)
+
+- Champ **qstm+128** (décimal) varie par clip et s'accorde à l'ordre de
+  grandeur des clips (chr300 : 1..142 ; chr540 : 66..266 ; chr590 : 11..45 ;
+  gim103 : **92, 39, 92, 39**) → meilleur candidat des durées en frames,
+  désormais soutenu par `sample_count`, mais pas encore démontré.
+- Durée candidate à qstm+121/131 **hex** (`0x79`/`0x83`) : valeurs
   aberrantes → hypothèse à la position hex FAUSSE.
-- Onzième scan u32 des qstm (step 2, valeurs 1..4000) :
-  - champ **qstm+128** VARIE par clip (chr540 `roar_01_00`=90,
-    `roar_03_00`=94, `shot_a_03_00`=138) → **candidat durée en frames**
-    (à confirmer par recouvrement avec les bornes timeline ;
-    span chr540 = 704 frames / 53 records, cohérent en ordre de grandeur) ;
-  - constantes partagées entre records du même asset : qstm+38=458,
-    +168=44, +172=48 (chr540) ;
-  - dernier mot du qstm ≈ len(qstm)−4 (footprint/pad).
+- Constantes partagées entre records du même asset : qstm+38=458, +168=44,
+  +172=48 (chr540) ; dernier mot du qstm ≈ len(qstm)−4 (footprint/pad).
+- Paires miroirs de gim103 : les deux blocs d'une paire partagent la MÊME
+  durée candidate (92/92, 39/39) → cohérent avec des variantes miroir.
+- **Correction (FAIT)** : l'ancien bloc « timeline » est un **index de
+  slots**, pas des frames : `span/8` comptait accidentellement des groupes
+  de deux mots ; la « grille de 8 frames » et toutes les conclusions de
+  ticks associées sont annulées. `slot_count == block_count−3` sur 173
+  packages ; les 5 anciens « conflits » (chr540 88/83, chr590 34/32,
+  chr950 7/5, gim111 1/0, gim661 5/4) sont entièrement expliqués par des
+  slots vides issus d'offsets de blocs dupliqués. La sémantique des mots
+  u32 internes de l'index n'est pas encore résolue.
+- FPS : toujours non déterminée ; à trancher seulement après obtention de
+  clés datées.
 
-Vérifications timeline corpus : `segment_count == len(curve_blocks)`
-pour **141/146** packages à timeline ; 5 conflits (chr540 88/83,
-chr590 34/32, chr950 7/5, gim111 1/0, gim661 5/4) → la liaison n'est PAS
-un simple alignement 1-bloc-per-segment. Premiers `pairs` : chr540
-(96,-1) puis (0,-1)… ; chr590 (96)(256)(769) puis (0)… → valeurs
-candidates = offsets/indexes non triviaux (à élucider en Phase 2.4).
+### 2.5 — IK (À FAIRE)
 
-## Phase 5 partiel (FAIT)
+- Canaux non-FK journalisés puis exclus (éventuel solveur 2-bone
+  optionnel, flag `--ik-solve`, seulement après preuve que les canaux
+  non-FK sont des positions d'effecteurs). Entrées disponibles :
+  `chain_count` du squelette motion et flags de bones.
 
-- `tests/test_motion_sequence_package.py` : goldens corpus
-  (chr100=414 records, skin 146 bones / ids distincts, |quat|≈1 bind,
-  timeline gim103=8 & chr370=38 segments — chr370 41 paires pour 38
-  segments noté comme question ouverte 2.4), skip si corpus absent.
-- `tests/test_ddm_to_3d.py::test_external_motion_boundary_table_is_detected`
-  réécrit sur le nouveau contrat (discover_character_motion via
-  `tools/conversion/motion/export`), corpus réel.
-- Suite complète : **121 tests OK** (1 skip corpus).
+## Phase 3 — Reconstruction des clips (À FAIRE)
 
-## Phase 4 partiel (FAIT)
+- `curves.py` + `export.py` : `decode_clip` → dicts clips glTF
+  ({name, duration, channels[{joint, path, times, values}]}), FPS
+  paramétrable, canaux constants → 1 keyframe.
+- Conversion frames→secondes ; mapping index motion → index joint DDM via
+  les ids identiques ; rééchantillonnage si temps non strictement
+  croissants (exigence du writer GLB).
+- Génération générique : tout DDM skinné (chr, gim, demo) avec
+  motionSequence + motionPackage ET au moins un segment de courbe →
+  exporte les clips ; sinon skin seul (comportement actuel).
 
-- `tools/conversion/motion/export.py` : pont pipeline
-  (`discover_character_motion`, `decode_character_animations`) — ce
-  dernier retourne `[]` tant que les courbes ne sont pas décodées
-  (aucun guess), l'exporte skin+squelette seul, sans régression.
-- `ddm/skinned.py` rewiré de `motion_decode` (archivé) vers
-  `tools.conversion.motion.export` ; plus aucune référence active à
-  l'ancien module.
+## Phase 4 — Intégration pipeline + Godot (PARTIELLEMENT FAIT)
+
+- FAIT : `tools/conversion/motion/export.py` (pont
+  `discover_character_motion`, `decode_character_animations` — retourne
+  `[]` tant que les courbes ne sont pas décodées, aucun guess) ;
+  `ddm/skinned.py` rewiré vers `tools.conversion.motion.export`, plus
+  aucune référence active à l'ancien module.
+- À FAIRE : `export_folder_to_godot.py`, `.vscode/launch.json` (tâche
+  « DDM: export with animations », `--animations all|<patterns>`),
+  vérif import Godot 4 (`AnimationLibrary`).
+
+## Phase 5 — Tests et validation (PARTIELLEMENT FAIT)
+
+- FAIT : `tests/test_motion_sequence_package.py` (goldens corpus :
+  chr100=414 records, skin 146 bones / ids distincts, |quat|≈1 bind,
+  index gim103=8 & chr370=38 slots) ; `test_ddm_to_3d.py::…boundary…`
+  réécrit sur le nouveau contrat. Suite complète : **128 tests OK** (1 skip).
+- À FAIRE : goldens chr100, gim103, chr980, chr370, chr550 ; test
+  bout-en-bout GLB (animation_count, noms, durées) ; CLI de masse pour cas
+  limites (gim129 2 vs 6 bones, gim227 15 vs 14, chr200 8 Mo / 409 blocs) ;
+  validation visuelle Godot (clips partant/arrivant sur poses plausibles).
+
+## Phase 6 — Finalisation (À FAIRE)
+
+- README.md (section pipeline animations), ROADMAP.md, `.vscode/README.md`,
+  mise à jour de ce document.
+- **Nettoyage final** : suppression des fichiers legacy listés dans la
+  section « Architecture & fichiers impliqués » (après tests verts).
 
 ## CLI (FAIT)
 
 `python -m tools.conversion.motion <noms...> [--all] [--curve-stats]
-[--kb-root Chemin]` — imprime records/squelette/timeline/blocs par asset.
-
-### Mise à jour Phase 2.3 — ORACLE TABULÉ (FAIT)
-
-- Les valeurs « constantes » des blocs de courbes = **valeurs de pose
-  des canaux figés**, vérifiées contre la bind pose du bloc squelette :
-  `curves.bind_pose_hits()` → chr100 **87/145**, chr300 8/19,
-  chr540 6/12, gim103 2/5 (tol 1e-3). Exemple exact : gim103 bone id 9
-  `T=(-1.2651, -5.6713, 229.172)` retrouvé tel quel dans un bloc.
-- Forme « courbe 100 % constante » isolée (bloc B=2, 20 octets) :
-  `curves.is_constant_curve` + `constant_curve_value` — gim103 b3/b4
-  = 0.8415768146514893, 1 octet de différence (discriminateur A/B en
-  recherche).
-- Byte 2 du header de bloc = **phase** : 0 sur 4415/4474 blocs, 1 sur
-  59 — gardé brut, plus d'hypothèse « doit être 0 ».
-
-### Mise à jour Phase 2.4 — corrélations (PARTIEL)
-
-- `qstm+128` **décimal** varie par clip et s'accorde à l'ordre de grandeur
-  des clips (chr300 : 1..142 ; chr540 : 66..266 ; chr590 : 11..45 ;
-  gim103 : **92, 39, 92, 39**) → reste le meilleur candidat des durées en
-  frames par clip, mais pas encore démontré.
-- Paires miroirs de gim103 : les deux blocs d'une paire partagent la MÊME
-  durée candidate (92/92, 39/39) → cohérent avec des variantes miroir.
-- chr540 et gim103 : bornes timeline **uniformes avec un pas de 8 frames**
-  (chr540 360,368,…,1064 ; gim103 40,48,…,104) → une grille de résolution
-  8 frames existe au moins pour ces familles ; chr300 est variable.
-- FPS : toujours non déterminée (grille 8 frames compatible 30 et 60).
-
-### Résultats 2.1 (probe corpus — research/curve_header_probe.py)
-
-- Sur 206 assets : `A` et `B` varient tous les deux par bloc ET par
-  asset (ex. chr300 A=247..253 vs chr100 A=0..251 ; B min..max propre
-  à chaque famille). Le nombre de paires `(value,0)` n'est fonction ni
-  de A ni de B. → **ni A ni B ne sont un compteur simple** ;
-  sémantique encore ouverte, la sonde `research/curve_header_probe.py`
-  (→ `research/CURVE_HEADER_FINDINGS.md`) sert de réexécution.
-
-### Mise à jour Phase 2.4 — liaison timeline (PARTIEL/FACTE)
-
-- **FAIT (3 familles)** : nombre de paires `(value, sentinel)` de la
-  timeline = **span / 8** — chr370 328/8=41 ✓ ; chr550 504/8=63 ✓ ;
-  gim103 64/8=8 ✓. La timeline est donc *une entrée par tick de 8
-  frames*, pas une table par clip.
-- Hypothèse « valeur = offset de bit cumulatif » INVALIDÉE : les valeurs
-  oscillent (289→288→289, 1024→0x171FF0FF→retour). Hypothèse A du plan
-  (valeur= bitpack bloc index | flags) non retenue telle quelle ;
-  paire (état, flag) par tick probable.
-- Records : aucun lien 1-1 avec les ticks (3 records / 38-41 ticks) ;
-  la permutation records↔clips reste à élucider (Phase 2.5/3).
-
-## Phases 3 à 6 (À FAIRE)
-
-- **Phase 3** `curves.py` + `export.py`: decode_clip → dicts clips glTF
-  ({name, duration, channels[{joint, path, times, values}]}), FPS
-  paramétrable, canaux constants → 1 keyframe.
-- **Phase 4** intégration : `ddm/skinned.py` → `motion.export...`,
-  `export_folder_to_godot.py`, `.vscode/launch.json` (tâche « DDM: export
-  with animations »), vérif import Godot 4 (`AnimationLibrary`).
-- **Phase 5** tests/targets goldens : chr100, gim103, chr980, chr370,
-  chr550 ; test bout-en-bout GLB (animation_count, noms, durées) ; CLI
-  de masse pour cas limites (gim129 2 vs 6 bones, gim227 15 vs 14,
-  chr200 8 Mo / 409 blocs).
-- **Phase 6** finalisation README/ROADMAP + mise à jour de ce document.
+[--kb-root Chemin]` — imprime records/squelette/index de slots/blocs par asset.
 
 ## Risques connus
 

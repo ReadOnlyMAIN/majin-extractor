@@ -22,14 +22,16 @@ try:
     from ..glb_export import write_skinned_glb
     from ..godot_export import write_godot_material_assets
     from ..motion.export import (
-        decode_character_animations, discover_character_motion,
+        decode_character_animations, decode_motion_baseline_clips,
+        discover_character_motion,
     )
 except ImportError:
     from blend_mask import DEFAULT_BLEND_RADIUS
     from glb_export import write_skinned_glb
     from godot_export import write_godot_material_assets
     from motion.export import (
-        decode_character_animations, discover_character_motion,
+        decode_character_animations, decode_motion_baseline_clips,
+        discover_character_motion,
     )
 
 def _skinned_first_vertex_weight_sum(data, offset, vertices, indices, palette_size):
@@ -382,6 +384,13 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         getattr(args, "experimental_export_ik_targets", False),
         getattr(args, "experimental_ik_target_orientation", "source-row"),
     )
+    animation_mode = getattr(args, "animations_mode", "off")
+    if animation_mode == "baseline" and not animations:
+        animations = decode_motion_baseline_clips(
+            path,
+            frame_rate=getattr(args, "animation_frame_rate", 60),
+        )
+    animations = list(animations)
     ik_control_indices = {}
     for animation in animations:
         for channel in animation.get("channels", []):

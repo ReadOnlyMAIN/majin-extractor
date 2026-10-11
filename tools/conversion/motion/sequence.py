@@ -58,7 +58,7 @@ class QstmBlock:
     field_0c: int
     field_10: int
     filetime: int
-    duration_frames: int | None  # u32 at +0x83, see REVERSE_MOTION.md
+    duration_frames: int | None  # u32 at +0x80, see REVERSE_MOTION.md
     raw: bytes                   # whole block for further research
 
 
@@ -114,6 +114,22 @@ def parse_qstm(data: bytes, offset: int, limit: int) -> QstmBlock:
         duration_frames=None,  # resolved by research/; see REVERSE_MOTION.md
         raw=data[offset:limit],
     )
+
+
+def duration_frames_of(record: "SequenceRecord",
+                       offset: int = 128) -> int | None:
+    """Best current duration hypothesis of a record, or ``None``.
+
+    Probe results (REVERSE_MOTION.md Phase 2.4): the u32 at qstm+128
+    (DECIMAL offset into the qstm body) varies per clip and matches clip
+    magnitudes (gim103 mirror pairs share 92/92, 39/39; chr300 1..142).
+    NOT demonstrated yet — the caller must treat it as an unproven
+    baseline.
+    """
+    qstm = record.qstm
+    if qstm is None or len(qstm.raw) < offset + 4:
+        return None
+    return struct.unpack_from(">I", qstm.raw, offset)[0]
 
 
 def parse_motion_sequence(path: Path) -> tuple[ResourceHeader, list[SequenceRecord]]:

@@ -1,4 +1,4 @@
-"""motionPackage (bare-body resource): skeleton, curves and timeline.
+"""motionPackage (bare-body resource): skeleton, curves and curve index.
 
 Verified structure (REVERSE_MOTION.md):
 
@@ -8,11 +8,13 @@ Verified structure (REVERSE_MOTION.md):
   (verified on every shipped file);
 - ``block 0`` is the motion skeleton (bone ids in DDM transform order,
   parent/flag pairs, and the exact DDM bind pose);
-- blocks after the skeleton are curve blocks with a 4-byte head
-  ``[type][A][0][B]``;
-- the penultimate block is the timeline index: ``[u32 segment_count]`` then
-  ``segment_count + 1`` frame boundaries then ``segment_count`` pairs of
-  ``(value, 0xFFFFFFFF)``;
+- blocks after the skeleton are curve blocks with a 4-byte head containing
+  two big-endian u16 values: a 3-bit descriptor count and a sample-count-like
+  value;
+- the penultimate block is a curve-slot index: ``[u32 slot_count]``, then
+  ``slot_count + 1`` byte offsets into this same block, then u32 words grouped
+  by those offsets.
+  These offsets were previously mistaken for frame boundaries;
 - the last block is a short constant end-of-list marker (~16 bytes).
 """
 from __future__ import annotations
@@ -56,33 +58,74 @@ class CurveBlock:
     slot_index: int                     # table slot owning this block
     block_index: int                    # index into the unique curve blocks
     offset: int                         # absolute file offset
-    header: bytes                       # 4 bytes [type][A][0][B]
+    header: bytes                       # 4 bytes: [u16 descriptor_count][u16 sample_count]
     body: bytes                         # payload after the header
 
 
 @dataclass
-class TimelineBlock:
-    """Timeline index slicing the package into per-segment frame ranges."""
+class CurveIndexBlock:
+    """Index for logical curve slots; entry semantics are not decoded yet."""
 
-    segment_count: int
-    boundaries: list[int]               # segment_count + 1 frame numbers
-    pairs: list[tuple[int, int]]        # (value, sentinel) per segment
+    slot_count: int
+    entry_offsets: list[int]            # offsets relative to this block
+    words: list[int]                     # raw grouped u32 payload
+
+    @property
+    def groups(self) -> list[list[int]]:
+        """Return the raw u32 words belonging to each logical curve slot."""
+        start = self.entry_offsets[0]
+        return [
+            self.words[(left - start) // 4:(right - start) // 4]
+            for left, right in zip(self.entry_offsets, self.entry_offsets[1:])
+        ]
+
+    # Compatibility names for callers written before the offset proof.  They
+    # deliberately carry no temporal terminology in the maintained API.
+    @property
+    def segment_count(self) -> int:
+        return self.slot_count
+
+    @property
+    def boundaries(self) -> list[int]:
+        return self.entry_offsets
+
+    @property
+    def pairs(self) -> list[tuple[int, int]]:
+        """Deprecated compatibility view; grouping is not universally pairs."""
+        return list(zip(self.words[::2], self.words[1::2]))
+
+
+TimelineBlock = CurveIndexBlock
+
+
+@dataclass
+class RigControlBlock:
+    """Counted variable-length control records preceding the package marker."""
+
+    records: list[bytes]
+    marker: bytes
 
 
 @dataclass
 class MotionPackage:
-    """Parsed motionPackage body: skeleton, curve blocks and timeline."""
+    """Parsed motionPackage body: skeleton, curve blocks and curve index."""
 
     header: ResourceHeader
     slots: list[Slice] = field(default_factory=list)
     curve_blocks: list[CurveBlock] = field(default_factory=list)
     skeleton: MotionSkeleton | None = None
-    timeline: TimelineBlock | None = None
+    curve_index: CurveIndexBlock | None = None
     footer: bytes = b""
+    rig_controls: RigControlBlock | None = None
 
     @property
     def has_curves(self) -> bool:
         return bool(self.curve_blocks)
+
+    @property
+    def timeline(self) -> CurveIndexBlock | None:
+        """Deprecated compatibility alias; the block is not a timeline."""
+        return self.curve_index
 
 
 @dataclass
@@ -151,41 +194,64 @@ def parse_skeleton(block: bytes) -> MotionSkeleton | None:
     )
 
 
-def parse_timeline(block: bytes) -> TimelineBlock | None:
-    """Decode the timeline index when the verified layout fits exactly.
+def parse_curve_index(block: bytes) -> CurveIndexBlock | None:
+    """Decode the penultimate curve-slot index.
 
-    ``segment_count`` followed by ``segment_count + 1`` strictly increasing
-    frame boundaries, then every remaining aligned ``(value, flag)`` pair —
-    the pair count is NOT assumed to equal ``segment_count`` (chr370 stores
-    41 pairs for 38 segments; the pairing is an open Phase 2.4 question).
+    The first offset is exactly the end of the offset table and the final
+    offset is exactly ``len(block)``.  Consecutive offsets delimit groups of
+    u32 words, so their spacing is structural and not a frame grid. Payload
+    word semantics remain open research.
     """
     if len(block) < 12:
         return None
-    segment_count = struct.unpack_from(">I", block, 0)[0]
-    if not 1 <= segment_count <= 200_000:
+    slot_count = struct.unpack_from(">I", block, 0)[0]
+    if not 1 <= slot_count <= 200_000:
         return None
     cursor = 4
-    boundaries = [
+    entry_offsets = [
         struct.unpack_from(">I", block, cursor + 4 * i)[0]
-        for i in range(segment_count + 1)
+        for i in range(slot_count + 1)
     ]
-    if any(b <= a for a, b in zip(boundaries, boundaries[1:])):
+    table_end = 4 + (slot_count + 1) * 4
+    if entry_offsets[0] != table_end or entry_offsets[-1] != len(block):
         return None
-    cursor += (segment_count + 1) * 4
-    remaining = len(block) - cursor
-    if remaining < 0 or remaining % 8 != 0:
+    if any(b < a for a, b in zip(entry_offsets, entry_offsets[1:])):
         return None
-    pairs = [
-        (struct.unpack_from(">I", block, cursor + 8 * i)[0],
-         struct.unpack_from(">I", block, cursor + 8 * i + 4)[0])
-        for i in range(remaining // 8)
+    if any((offset - table_end) % 4 for offset in entry_offsets):
+        return None
+    words = [
+        struct.unpack_from(">I", block, table_end + 4 * i)[0]
+        for i in range((len(block) - table_end) // 4)
     ]
-    if any(sentinel != END_OF_LIST for _value, sentinel in pairs[:4]) \
-            and any(pair[1] not in (0xFFFFFFFF, 0) for pair in pairs):
-        return None
-    return TimelineBlock(
-        segment_count=segment_count, boundaries=boundaries, pairs=pairs
+    return CurveIndexBlock(
+        slot_count=slot_count, entry_offsets=entry_offsets, words=words
     )
+
+
+parse_timeline = parse_curve_index
+
+
+def parse_rig_controls(block: bytes) -> RigControlBlock | None:
+    """Split the final block into 0xFF-terminated controls and marker bytes.
+
+    The record payload semantics are intentionally left raw.  A zero count
+    is the common no-controls form used by gimmicks and simpler characters.
+    """
+    if not block:
+        return None
+    count = block[0]
+    cursor = 1
+    records = []
+    for _ in range(count):
+        end = block.find(b"\xFF", cursor)
+        if end < cursor:
+            return None
+        records.append(block[cursor:end])
+        cursor = end + 1
+    marker = block[cursor:]
+    if len(marker) < 8:
+        return None
+    return RigControlBlock(records=records, marker=marker)
 
 
 def parse_motion_package(path: Path) -> MotionPackage:
@@ -218,12 +284,14 @@ def parse_motion_package(path: Path) -> MotionPackage:
         if decoded is not None and package.skeleton is None:
             package.skeleton = decoded
             continue
-        decoded_timeline = parse_timeline(payload)
-        if decoded_timeline is not None and package.timeline is None:
-            package.timeline = decoded_timeline
-            continue
+        if slot_index == slot_count - 2:
+            decoded_index = parse_curve_index(payload)
+            if decoded_index is not None:
+                package.curve_index = decoded_index
+                continue
         if slot_index == slot_count - 1:
-            package.footer = payload[-16:]
+            package.footer = payload
+            package.rig_controls = parse_rig_controls(payload)
             break
         package.curve_blocks.append(CurveBlock(
             slot_index=slot_index,
@@ -237,8 +305,7 @@ def parse_motion_package(path: Path) -> MotionPackage:
         raise UnsupportedMotion(
             f"motionPackage {path.name}: no recognisable skeleton block."
         )
-    if package.timeline is None:
-        # Some tiny packages (empty placeholder assets) carry no timeline.
+    if package.curve_index is None:
+        # Some tiny packages (empty placeholder assets) carry no curve index.
         pass
     return package
-
