@@ -13,7 +13,10 @@ from .package import parse_motion_package
 from .resource import UnsupportedMotion, discover_motion_paths
 from .sequence import duration_frames_of, parse_motion_sequence
 
-FPS_FALLBACK = 60  # documented fallback: grids are 8-frame aligned (REVERSE_MOTION.md)
+FPS_FALLBACK = 30  # verified clock: mode-7 tangents are per-second derivatives
+# and the (v1-v0)/tangent ratio over one-frame key gaps measures 1/30 on the
+# large humanoid packages (chr300 10305 gaps, chr540 115033 gaps —
+# research/HUMANOID_LAYOUT_FINDINGS.md).
 
 
 def decode_motion_baseline_clips(model_path: Path,
@@ -124,13 +127,16 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
                                 *args, **kwargs) -> list[dict]:
     """Decode the selected clips as glTF animation dicts (Phase 3).
 
-    Evidence-gated: the package channel base is derived from bind-pose
-    anchors (``curves.resolve_scalar_channel_base``); a curve block becomes
-    a clip only when ``sample_count - 1`` equals a record's duration
-    candidate (u32 at qstm+128) and every record/block pairing stays
-    bijective — otherwise the function exports nothing rather than a
-    guessed pose. Unanimated joints keep their bind pose in the GLB scene,
-    so partial channels stay valid for Godot.
+    Evidence-gated twice.  First, the package channel base is derived from
+    bind-pose anchors under a consensus gate
+    (``curves.resolve_scalar_channel_base``): a base only survives when it
+    explains nearly every unique-anchor vote (gim103 passes 5/5; chr540's
+    split vote 205/181/317 fails, so its packages export nothing rather
+    than a guessed pose).  Second, a curve block becomes a clip only when
+    ``sample_count - 1`` equals a record's duration candidate (u32 at
+    qstm+128) and every record/block pairing stays bijective.
+    Unanimated joints keep their bind pose in the GLB scene, so partial
+    channels stay valid for Godot.
     """
     from .curves import decode_scalar_clip, resolve_scalar_channel_base
     if not motion_info or not motion_info.get("clip_count"):
@@ -185,7 +191,7 @@ def decode_character_animations(motion_info, skeleton, clip_indices=None,
             "duration": duration / frame_rate,
             "frame_rate": frame_rate,
             "channels": clip["channels"],
-            "scalar_mapping": "resolved_from_bind_anchors",
+            "scalar_mapping": "resolved_from_bind_anchors_consensus",
             "resampled": clip["resampled"],
         })
     return animations

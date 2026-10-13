@@ -1,4 +1,4 @@
-"""Prototype curve-block decoding (Phase 2 research, REVERSE_MOTION.md).
+"""Curve-block decoding primitives (Phase 2 research, REVERSE_MOTION.md).
 
 Model confirmed on gim103 / chr300 / chr370 / chr540 data:
 
@@ -8,17 +8,24 @@ Model confirmed on gim103 / chr300 / chr370 / chr540 data:
   its high byte as a curve ``type`` was wrong (large rigs simply have more
   than 255 descriptors).  The second value is sample-count-like and equals
   the qstm duration candidate + 1 for most mappable blocks.
-- Each block carries that **bit-packed descriptor table**, followed
-  by **value sections made of ``(f32 canonical value, u32 0)`` pairs**.
-  A pair whose value is a bone translation magnitude (~100-300 units) or
-  a unit-length quaternion component tracks real pose constants.
-- A trailing ``sample_count == 2`` block with a descriptor table is a
-    **constant-only curve**: exactly one f32 value follows
-  (e.g. gim103 blocks 3/4 both decode ``0.842059`` with the same table
-  differing in a single bit after the descriptor stream).
+- Lossless scalar storage per descriptor: mode 5 = constant (1 f32),
+  mode 6 = dated keys (u8/u16 counts and times), mode 7 = keys plus a
+  per-second tangent (cubic Hermite); modes 0-4 store no payload.
+- Blocks are animation *segments*: consecutive blocks chain through the
+  carry oracle (:func:`carry_fidelity`, :func:`carry_chains`) — a
+  payload-free channel of a following block holds the value the previous
+  segment ended with.
+- One scalar = one transform component, grouped in 7-scalar-per-bone runs
+  anchored per package (:func:`resolve_scalar_channel_base`). The mapping
+  carries *translations* (verified against the motion bind pose) but its
+  rotation reading is refuted: the Phase 2.2 probes measured quaternion
+  norms 38..2002 on chr540 and zero unit quaternions corpus-wide, so
+  :func:`decode_scalar_clip` gates every emitted channel on a pose oracle
+  and refuses blocks that would fabricate poses.
 
-This module exposes only what survives all probes; the layout-place
-decoder for the bit-packed streams is still Phase 2 research.
+This module exposes only what survives probes; the humanoid channel
+program (root prefix + euler triplets, REVERSE_MOTION.md 2.2) is still
+Phase 2 research — see research/humanoid_layout_probe.py.
 """
 from __future__ import annotations
 
@@ -242,6 +249,9 @@ def decode_curve_block(block: CurveBlock) -> DecodedCurveBlock:
     raise UnsupportedMotion("; ".join(errors))
 
 
+BASE_CONSENSUS = 0.8
+
+
 def resolve_scalar_channel_base(package) -> int | None:
     """Derive the per-package 7-scalar-per-bone channel base from evidence.
 
@@ -251,8 +261,22 @@ def resolve_scalar_channel_base(package) -> int | None:
     constants (mode 5) that byte-equal exactly ONE non-zero bind component
     (identities shared by several bones or border components are excluded
     as ambiguous). Returns the winning base when at least two anchors vote
-    for it and every animated scalar then stays inside the rig, else
+    for it, every animated scalar then stays inside the rig, and the vote
+    is near-unanimous (:data:`BASE_CONSENSUS` of all anchors) — else
     ``None`` — no guessed mapping is produced.
+
+    The consensus gate is measured, not cosmetic (Phase 2.2 probes):
+    gim103 votes 5/5 for base 21, while chr540's 57 anchors split across
+    bases 205/181/317/… (top share 0.28) because its blocks cover several
+    channel sections with different offsets — a single base cannot describe
+    them, and exporting through the plurality winner fabricated garbage
+    rotations (quaternion norms 38..2002).
+
+    Scope note: the anchor evidence covers the *translation* components;
+    the same 7-scalar reading applied to the rotation components yields
+    non-unit quaternions, which is why :func:`decode_scalar_clip` gates
+    rotations on a unit-length pose oracle instead of trusting this base
+    blindly.
     """
     skeleton = package.skeleton
     if skeleton is None or not package.curve_blocks:
@@ -270,6 +294,7 @@ def resolve_scalar_channel_base(package) -> int | None:
         except (UnsupportedMotion, ValueError):
             return None
     votes: dict[int, int] = {}
+    total_anchors = 0
     for block_decoded in decoded:
         for track in block_decoded.tracks:
             if not track.values or track.values[0] != track.values[-1]:
@@ -279,8 +304,11 @@ def resolve_scalar_channel_base(package) -> int | None:
                 bone, comp = candidates[0]
                 key = 7 * bone + comp - track.scalar_index
                 votes[key] = votes.get(key, 0) + 1
+                total_anchors += 1
+    if not total_anchors:
+        return None
     for base, count in sorted(votes.items(), key=lambda item: -item[1]):
-        if count < 2:
+        if count < 2 or count < BASE_CONSENSUS * total_anchors:
             continue
         bones = skeleton.bone_count
         in_rig = True
@@ -292,6 +320,9 @@ def resolve_scalar_channel_base(package) -> int | None:
         if in_rig:
             return base
     return None
+
+
+QUAT_NORM_TOLERANCE = 1e-3
 
 
 def decode_scalar_clip(package, block: CurveBlock, base: int,
@@ -307,6 +338,16 @@ def decode_scalar_clip(package, block: CurveBlock, base: int,
     translation scalars share one strictly-increasing grid, a rotation
     channel only when its four quaternion scalars do; everything else is
     skipped conservatively (no reconstructed pose).
+
+    Pose oracles (Phase 2.2 empirical, REVERSE_MOTION.md): a rotation
+    channel is accepted only when every emitted quaternion is unit-length
+    within :data:`QUAT_NORM_TOLERANCE` (the stored components are emitted
+    normalised). An unmet oracle cancels the whole block — the Phase 2.2
+    probes measured chr540 rotation channels built this way at quaternion
+    norms 38..2002, i.e. the 7-scalar mapping does not carry rotations,
+    and a guessed pose is worse than no clip. Translation channels carry
+    no per-block oracle: mid-chain segments legitimately hold carried
+    values that differ from the bind pose (verified on gim103 blocks 1/2/6/7).
     """
     decoded = decode_curve_block(block)
     bones = package.skeleton.bone_count
@@ -342,6 +383,17 @@ def decode_scalar_clip(package, block: CurveBlock, base: int,
                     current = value
                 pose.append(current)
             values.append(pose)
+        if is_rotation:
+            for pose in values:
+                norm = math.sqrt(sum(c * c for c in pose))
+                if abs(norm - 1.0) > QUAT_NORM_TOLERANCE:
+                    return None  # not a quaternion: mapping refused
+            values = [
+                [component / norm for component in pose]
+                for pose, norm in (
+                    (pose, math.sqrt(sum(c * c for c in pose)))
+                    for pose in values)
+            ]
         times = [frame / frame_rate for frame in union]
         path = "rotation" if is_rotation else "translation"
         channels.append({
@@ -357,6 +409,72 @@ def decode_scalar_clip(package, block: CurveBlock, base: int,
         "resampled": "step_hold_union",
         "frame_rate": frame_rate,
     }
+
+
+CARRY_TOLERANCE = 1e-4
+CHAIN_CARRY_THRESHOLD = 0.5
+
+
+def block_end_values(decoded) -> dict[int, float]:
+    """Last emitted value of every valued track of a decoded block."""
+    return {
+        track.scalar_index: track.values[-1]
+        for track in decoded.tracks if track.values
+    }
+
+
+def block_constants(decoded) -> dict[int, float]:
+    """Constant (mode 5) value of every constant track of a decoded block."""
+    return {
+        track.scalar_index: track.values[0]
+        for track in decoded.tracks
+        if track.mode == 5 and track.values
+    }
+
+
+def carry_fidelity(previous, following) -> tuple[int, int]:
+    """Measure the segment-chain oracle between two consecutive blocks.
+
+    Verified structure (Phase 2.4, REVERSE_MOTION.md): curve blocks are
+    animation *segments* — a following block whose channel was left
+    payload-free (modes 0-4) holds the value the previous segment ended
+    with, and whenever that channel is stored as a mode-5 constant the two
+    floats agree byte-close. Returns ``(hits, comparisons)`` over the
+    scalars that are constants in ``following`` and valued in ``previous``.
+    """
+    end_values = block_end_values(previous)
+    constants = block_constants(following)
+    hits = 0
+    comparisons = 0
+    for scalar, value in constants.items():
+        previous_value = end_values.get(scalar)
+        if previous_value is None:
+            continue
+        comparisons += 1
+        if abs(value - previous_value) <= CARRY_TOLERANCE:
+            hits += 1
+    return hits, comparisons
+
+
+def carry_chains(blocks) -> list[list[int]]:
+    """Split decoded blocks into carry chains at segment breaks.
+
+    A break is a consecutive pair whose carry fidelity is below
+    :data:`CHAIN_CARRY_THRESHOLD` (new segment: the frozen channels reset to
+    a state the previous segment did not end with). Returns lists of block
+    indices; every decoded block belongs to exactly one chain. Requires
+    ``(block, decoded)`` pairs so decoding failures stay outside chains.
+    """
+    chains: list[list[int]] = []
+    for index, (_block, decoded) in enumerate(blocks):
+        if chains:
+            hits, comparisons = carry_fidelity(
+                blocks[chains[-1][-1]][1], decoded)
+            if comparisons and hits / comparisons >= CHAIN_CARRY_THRESHOLD:
+                chains[-1].append(index)
+                continue
+        chains.append([index])
+    return chains
 
 
 def bind_pose_hits(package, tolerance: float = 1e-3) -> tuple[int, int]:

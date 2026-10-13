@@ -12,13 +12,13 @@
 | 0 | Nettoyage / archivage de l'ancien prototype | ✅ |
 | 1 | Parsers structurels (`resource.py`, `sequence.py`, `package.py`) validés corpus | ✅ |
 | 2.1 | En-tête des blocs de courbes (`u16 descriptor_count, u16 sample_count` + fil 3-bit) | ✅ |
-| 2.2 | Table de canaux bit-packed → mapping blocs→(bone, composant) | 🔶 en cours |
-| 2.3 | Décodage des keyframes (extraction lossless FAIT corpus entier ; oracles de pose humanoïde ouverts) | 🔶 en cours |
-| 2.4 | Liaison records ↔ slots ↔ blocs + FPS | 🔶 en cours |
+| 2.2 | Table de canaux bit-packed → mapping blocs→(bone, composant) (gim103 prouvé base 21 ; humanoïdes : base locale par bloc, see CURRENT_WORK.md) | 🔶 en cours |
+| 2.3 | Décodage des keyframes (extraction lossless FAIT corpus entier ; rotations humanoïdes : lecture quaternion INVALIDÉE corpus entier, candidat euler ouvert — see CURRENT_WORK.md) | 🔶 en cours |
+| 2.4 | Liaison records ↔ slots ↔ blocs + **FPS=30 vérifié** (tangentes mode 7) | 🔶 en cours |
 | 2.5 | IK : journalisation puis exclusion des canaux non-FK | ⬜ |
-| 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips / chr540 53 clips décodés**, humanoïdes en garde no-ghost) | 🔶 en cours |
+| 3 | Reconstruction des clips glTF (`decode_scalar_clip` + pont export : **gim103 4 clips (translation-only) exportés** ; chr540 53 clips REVOQUÉS par la porte de consensus — vote split 205/181/317 ; humanoïdes en garde no-ghost) | 🔶 en cours |
 | 4 | Intégration pipeline / Godot (pont `export.py` partiellement FAIT) | 🔶 en cours |
-| 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 133 tests OK) | 🔶 en cours |
+| 5 | Tests goldens + GLB bout-en-bout (partiellement FAIT : 138 tests OK) | 🔶 en cours |
 | 6 | Documentation finale (README/ROADMAP) + nettoyage legacy | ⬜ |
 
 Légende : ✅ fait · 🔶 en cours · ⬜ à faire.
@@ -45,8 +45,8 @@ Godot 4 via le pipeline GLB existant.
 | `resource.py` | En-tête ressource commun (magic/version/FILETIME), `UnsupportedMotion`, `discover_motion_paths` | 1 |
 | `sequence.py` | Parser `psmr` (records nommés, `parse_qstm`, `duration_frames_of`) | 1, 2.4 |
 | `package.py` | Parser `motionPackage` (table de blocs, `parse_skeleton`, index de slots `CurveIndexBlock`, `CurveBlock` / footer) | 1, 2.1 |
-| `curves.py` | Décodage des blocs de courbes (descripteurs 3-bit, `ScalarTrack`, `decode_curve_block`, oracles bind pose) — prototype de recherche | 2.x |
-| `export.py` | Pont pipeline : `discover_character_motion`, `decode_character_animations` (export réel des clips quand la bijectivité record↔bloc tient : gim103 4 / chr540 53 ; no-ghost sinon) | 3, 4 |
+| `curves.py` | Décodage des blocs de courbes (descripteurs 3-bit, `ScalarTrack`, `decode_curve_block`, chaînes de segments `carry_fidelity`/`carry_chains`, oracles bind pose + pose (norme quaternion), porte de consensus `resolve_scalar_channel_base` + `BASE_CONSENSUS=0.8`) | 2.x |
+| `export.py` | Pont pipeline : `discover_character_motion`, `decode_character_animations` (export réel des clips quand la bijectivité record↔bloc tient ET la base de canaux passe le consensus — **gim103 = 4 clips translation-only** ; no-ghost sinon). `FPS_FALLBACK = 30` vérifié (tangentes mode 7) | 3, 4 |
 | `cli.py`, `__main__.py`, `__init__.py` | CLI d'inspection `python -m tools.conversion.motion` | 1, 5 |
 
 ### Intégration pipeline (touchée)
@@ -62,7 +62,24 @@ Godot 4 via le pipeline GLB existant.
 - `curve_bitstream_probe.py` + `CURVE_BITSTREAM_FINDINGS.md` (Phase 2.1/2.2),
 - `curve_header_probe.py` + `CURVE_HEADER_FINDINGS.md` (Phase 2.1, son modèle
   octets A/B est corrigé ; conservé pour trace),
-- `ddm_structural_scan.py`, `ddm_variant_probe.py`.
+- `ddm_structural_scan.py`, `ddm_variant_probe.py`,
+- `scalar_channel_probe.py` + `SCALAR_CHANNEL_FINDINGS.md` (Phase 2.2/2.3,
+  ancres bind pose par indice scalaire),
+- `channel_base_probe.py` + `CHANNEL_BASE_FINDINGS.md` (Phase 2.2, balayage
+  base × pose oracle — grille brute, readings interprétés dans les autres docs),
+- `humanoid_layout_probe.py` + `HUMANOID_LAYOUT_FINDINGS.md` (Phase 2.2/2.3 :
+  invalidation quaternion corpus entier, chaînes de segments, horloge tangentes
+  FPS=30, préfixe racine, sections multi-offsets chr540/chr100),
+- `package_group_probe.py` + `PACKAGE_GROUP_FINDINGS.md` (Phase 2.2 : verdicts
+  de la porte de consensus pour les 193 packages, familles de squelettes
+  partagés, conclusion « même rig ≠ même base »),
+- `quaternion_spacing_probe.py` + `QUATERNION_SPACING_FINDINGS.md` (Phase 2.2 :
+  quartets de rotation sous base candidat — gim103 0 quartet, chr540 5144
+  quartets non-unitaires → lecture quaternion refutée).
+
+> **Document de reprise** : `CURRENT_WORK.md` (racine du repo) synthétise
+> l'état de la recherche en cours, les pistes invalidées et les étapes
+> restantes pour la Phase 2.2 humanoïde.
 
 ### Fichiers legacy — à supprimer à la TOUTE DERNIÈRE étape de clean (Phase 6)
 
@@ -208,7 +225,8 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   de frames quantifiées s'intercale ; désormais décodée (cf. 2.3), mais
   l'offset exact de la section de valeurs reste ouvert. Candidats restants :
   canaux indexés dans une carte globale type bloc (0x12,0x0e) de chr100.
-- **Mapping humanoïdes — EN COURS** : les mappings naïfs
+- **Mapping humanoïdes — EN COURS** (détails et pistes invalidées dans
+  `CURRENT_WORK.md`) : les mappings naïfs
   `scalar_index//4` (quaternion par bone) et `//7` (T+R par bone) sont
   invalidés (0 hits sur gim103/chr300/chr370 ; chr540 b0 : 23/25 hits en
   //7, asset-spécifique). Balayage exhaustif base × permutation (7!) sur
@@ -218,6 +236,20 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   (oracles supplémentaires requis : mots u32 internes de l'index de slots,
   flags de bones, tangentes mode 7). Les constantes 0.0 sont exclues des
   oracles (trivialement ambigües).
+- **NOUVEAU (Phase 2.2/2.3, see CURRENT_WORK.md)** :
+  - la lecture **quaternion est invalidée sur TOUT le corpus**
+    (0 unitaires partout, y compris sur des millions de sous-ensembles
+    exhaustifs) → les rotations humanoïdes ne sont pas des quats ;
+    candidat restant : triplets d'euler (degrés).
+  - descripteurs **périodiques par bone, 7 par groupe, code 1 en pos 6**
+    (R.w sans payload) — le bloc couvre une plage contiguë de canaux
+    `[base, base+dc)` et la base paraît **locale au bloc** (chr540 :
+    3 sections distinctes dans UN bloc ; chr330 : même valeur votant des
+    bases différentes selon l'indice).
+  - **préfixe racine** (chr300/chr540) : s2..s4 = translation racine modèle,
+    s5..s7 = deltas d'orientation démarrant à 0.
+  - **même rig ≠ même base** (gim511..514 vs chr330/chr332 ; chr360/chr361
+    décalés de +360 exactement) — la porte de base DOIT rester par-package.
 
 
 ### 2.3 — Keyframes (EXTRACTION FAIT corpus entier ; oracles de pose PARTIELS)
@@ -315,8 +347,9 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
   chr950 7/5, gim111 1/0, gim661 5/4) sont entièrement expliqués par des
   slots vides issus d'offsets de blocs dupliqués. La sémantique des mots
   u32 internes de l'index n'est pas encore résolue.
-- FPS : toujours non déterminée ; à trancher seulement après obtention de
-  clés datées.
+- FPS : **vérifiée à 30** (voir Phase 3/`CURRENT_WORK.md`) : les tangentes
+  mode 7 sont des dérivées par seconde ; le ratio `(v1−v0)/tangente` sur les
+  gaps d'une frame donne 1/30 (chr300 10 305 gaps, chr540 115 033 gaps).
 
 ### 2.5 — IK (À FAIRE)
 
@@ -327,21 +360,38 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 
 ## Phase 3 — Reconstruction des clips (PARTIELLEMENT FAIT)
 
-- FAIT : `curves.resolve_scalar_channel_base` (base dérivée des ancres
-  bind — gim103=21, chr540=205) et `curves.decode_scalar_clip` (clés
-  mode 5/6/7 → canaux glTF `{joint, path, times, values}` STEP ; fusion
-  par union de clés avec hold documenté
-  `resampled='step_hold_union'`).
-- FAIT : `export.decode_character_animations` exporte maintenant les clips
-  quand la bijectivité record↔bloc tient : **gim103 = 4 clips** (noms des
-  records, durées 92/39×2 frames) et **chr540 = 53 clips**. Les humanoïdes
+- FAIT : `curves.resolve_scalar_channel_base` (base dérivée des ancres bind
+  sous une **porte de consensus** `BASE_CONSENSUS = 0.8` : gim103 vote 5/5
+  pour base 21 → passe ; chr540 vote 205/181/317 en split multi-section →
+  la porte refuse) et `curves.decode_scalar_clip` (clés mode 5/6/7 → canaux
+  glTF `{joint, path, times, values}` STEP ; fusion par union de clés avec
+  hold documenté `resampled='step_hold_union'` ; **oracle de pose** : une
+  rotation n'est émise que si chaque quaternion émis est unitaire ±1e-3,
+  normalisation explicite — sinon tout le bloc est refusé, jamais de canal
+  deviné).
+- FAIT : `export.decode_character_animations` exporte les clips vérifiés :
+  **gim103 = 4 clips** (noms des records, translation-only car gim103 n'a
+  0 quartet de rotation complet — sonde quaternion_spacing). **chr540 est
+  REVOQUÉ** (l'ancien export de 53 clips passait la plurality brute ;
+  le consensus mesuré le refuse — plus de pose fantôme). Les humanoïdes
   (chr300/chr370…) retournent une liste **vide** tant que leur base de
-  canaux n'est pas démontrée — aucune pose reconstruite (pas de ghost).
-- Tests : `tests/test_motion_curves.py` — base gim103=21, formes des
-  canaux (temps croissants, quats non nuls, translation == bind
-  à la première clé). Suite : 133 tests OK (1 skip).
-- À FAIRE : base humanoïde (oracles moteurs : mots d'index, flags),
-  `sample_count`/FPS, validation visuelle Godot.
+  canaux n'est pas démontrée.
+- FAIT : **FPS = 30 vérifié** (les tangentes mode 7 sont des dérivées par
+  seconde ; ratio `(v1−v0)/tangente` = 1/30 sur les gaps d'une frame :
+  chr300 10 305, chr540 115 033, chr370 2 068 ; `export.FPS_FALLBACK = 30`
+  est désormais une valeur mesurée, pas un fallback).
+- FAIT : **chaînes de segments** (`carry_fidelity` / `carry_chains`) —
+  un bloc suivant tient la valeur du précédent sur ses canaux sans payload ;
+  chr300 31 chaînes (max 37 blocs, fidélité moyenne 0.879), chr370 26,
+  gim103 4 (fidélité 0.958). Les paires miroirs de gim103 se retrouvent
+  comme chaînes séparées, cohérent avec des variantes.
+- Tests : `tests/test_motion_curves.py` — base gim103=21, formes des canaux
+  (temps croissants, translation == bind à la première clé), clips
+  translation-only, refus chr540 sous base 205, chaînes chr300.
+  Suite complète : **138 tests OK** (1 skip).
+- À FAIRE : base humanoïde par bloc (rotations euler ?), sections
+  multi-offsets, machine qstm, validation visuelle Godot — détail et pistes
+  invalidées dans `CURRENT_WORK.md`.
 
 ## Phase 4 — Intégration pipeline + Godot (PARTIELLEMENT FAIT)
 
@@ -359,8 +409,10 @@ chr100 = 414 records / 460 slots ; gim103 = 4 records / 11 blocs.
 - FAIT : `tests/test_motion_sequence_package.py` (goldens corpus :
   chr100=414 records, skin 146 bones / ids distincts, |quat|≈1 bind,
   index gim103=8 & chr370=38 slots) ; `test_ddm_to_3d.py::…boundary…`
-  réécrit sur le nouveau contrat. Suite complète : **133 tests OK** (1 skip,
-  dont les 3 goldens `test_motion_curves.py` gim103 ajoutés en Phase 3).
+  réécrit sur le nouveau contrat. Suite complète : **138 tests OK** (1 skip)
+  — les goldens gim103 de `test_motion_curves.py` élargis (base 21,
+  translation-only, refus chr540, chaînes chr300) et le nouveau compte de
+  tests intègre les ajouts Phase 3.
 - À FAIRE : goldens chr100, gim103, chr980, chr370, chr550 ; test
   bout-en-bout GLB (animation_count, noms, durées) ; CLI de masse pour cas
   limites (gim129 2 vs 6 bones, gim227 15 vs 14, chr200 8 Mo / 409 blocs) ;
