@@ -2,7 +2,7 @@ extends Node3D
 ## Node-authored animation viewer. Uses Godot's normal imported PackedScenes.
 
 @export_dir var characters_directory := "res://original_files/decoded/chara"
-@export var initial_character := "chr301"
+@export var initial_character := "chr1"
 
 @onready var model_root: Node3D = $ModelRoot
 @onready var camera: Camera3D = $Camera
@@ -22,7 +22,7 @@ extends Node3D
 @onready var follow: CheckButton = controls.get_node("Options/Follow")
 
 @onready var customization: PanelContainer = $UI/Customization
-@onready var equipment: VBoxContainer = $UI/Customization/Margin/Controls
+@onready var equipment: VBoxContainer = $UI/Customization/Scroll/Margin/Controls
 @onready var unnamed: CheckButton = controls.get_node("Unnamed")
 
 var model: Node3D
@@ -44,10 +44,19 @@ var bone_material := StandardMaterial3D.new()
 
 func _ready() -> void:
 	unnamed.toggled.connect(func(_value: bool): _filter_animations())
-	for slot in ["head", "torso", "legs"]:
+	for slot in ["body", "head", "bracelets"]:
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 		dropdown.item_selected.connect(_customize.bind(slot))
+	equipment.get_node("Cinematic").toggled.connect(_change_render_mode)
 	equipment.get_node("Health").value_changed.connect(_change_health)
+	equipment.get_node("AppearanceToggle").toggled.connect(func(value: bool): equipment.get_node("Appearance").visible = value)
+	var appearance_properties := {"Feather": "darkness_mask_feather", "Reflection": "darkness_reflection", "Normal": "darkness_normal_strength", "Flow": "darkness_flow_speed"}
+	for field in appearance_properties:
+		equipment.get_node("Appearance/" + field).value_changed.connect(_change_appearance.bind(appearance_properties[field]))
+	equipment.get_node("Appearance/Color").color_changed.connect(_change_appearance.bind("darkness_color"))
+	equipment.get_node("Appearance/Animate").toggled.connect(_change_appearance.bind("darkness_animate"))
+	equipment.get_node("Appearance/Mask").toggled.connect(_change_appearance.bind("darkness_show_mask"))
+	equipment.get_node("Appearance/Reset").pressed.connect(_reset_appearance)
 	characters.item_selected.connect(_select_character)
 	controls.get_node("Refresh").pressed.connect(_refresh_characters)
 	filter.text_changed.connect(func(_text: String): _filter_animations())
@@ -79,7 +88,7 @@ func _find_glbs(directory: String, result: Array[String]) -> void:
 		if file.get_extension().to_lower() == "glb":
 			result.append(directory.path_join(file))
 	for child in folder.get_directories():
-		if not child.begins_with(".") and not (child.length() == 6 and child.begins_with("chr1") and child.substr(3).is_valid_int()):
+		if not child.begins_with(".") and not (child.length() == 6 and (child.begins_with("chr1") or child.begins_with("chr72") or child.begins_with("chr74")) and child.substr(3).is_valid_int()):
 			_find_glbs(directory.path_join(child), result)
 
 
@@ -184,16 +193,37 @@ func _select_character(index: int) -> void:
 
 func _setup_customization() -> void:
 	customization.show()
-	var options: Array = model.available_armor()
-	for slot in ["head", "torso", "legs"]:
+	for slot in ["body", "head", "bracelets"]:
+		var options: Array = model.available_equipment(slot)
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 		dropdown.clear()
 		for asset in options:
-			dropdown.add_item(asset)
+			dropdown.add_item("None" if asset == "none" else asset)
 			dropdown.set_item_metadata(dropdown.item_count - 1, asset)
 		dropdown.select(maxi(0, options.find(model.get(slot))))
 	equipment.get_node("Health").set_value_no_signal(model.health_ratio)
 	_change_health(model.health_ratio)
+	_sync_appearance_controls()
+	_sync_render_mode()
+
+
+func _change_render_mode(enabled: bool) -> void:
+	if customization.visible and is_instance_valid(model):
+		model.cinematic_render = enabled
+		_sync_render_mode()
+
+
+func _sync_render_mode() -> void:
+	var dropdown: OptionButton = equipment.get_node("Body")
+	for i in range(dropdown.item_count):
+		var cinematic: String = dropdown.get_item_metadata(i)
+		var gameplay: String = model.ARMOR_PAIRS[cinematic]
+		dropdown.set_item_text(i, cinematic if model.cinematic_render else gameplay)
+		dropdown.set_item_tooltip(i, "Cinematic: %s / Gameplay: %s" % [cinematic, gameplay])
+	equipment.get_node("Cinematic").set_pressed_no_signal(model.cinematic_render)
+	for field in ["HealthLabel", "Health", "Note", "AppearanceToggle"]:
+		equipment.get_node(field).visible = not model.cinematic_render
+	equipment.get_node("Appearance").visible = not model.cinematic_render and equipment.get_node("AppearanceToggle").button_pressed
 
 
 func _customize(index: int, slot: String) -> void:
@@ -207,6 +237,78 @@ func _change_health(value: float) -> void:
 	if customization.visible and is_instance_valid(model):
 		model.health_ratio = value
 		equipment.get_node("HealthLabel").text = "Health: %d%%" % roundi(value * 100.0)
+
+
+func _change_appearance(value: Variant, property: String) -> void:
+	if customization.visible and is_instance_valid(model):
+		model.set(property, value)
+		_sync_appearance_controls()
+
+
+func _sync_appearance_controls() -> void:
+	var properties := {"Feather": "darkness_mask_feather", "Reflection": "darkness_reflection", "Normal": "darkness_normal_strength", "Flow": "darkness_flow_speed"}
+	var labels := {"Feather": "Edge softness", "Reflection": "Reflections", "Normal": "Normal strength", "Flow": "Flow speed"}
+	for field in properties:
+		var value: float = model.get(properties[field])
+		equipment.get_node("Appearance/" + field).set_value_no_signal(value)
+		equipment.get_node("Appearance/" + field + "Label").text = "%s: %.3f" % [labels[field], value]
+	equipment.get_node("Appearance/Color").color = model.darkness_color
+	equipment.get_node("Appearance/Animate").set_pressed_no_signal(model.darkness_animate)
+	equipment.get_node("Appearance/Mask").set_pressed_no_signal(model.darkness_show_mask)
+
+	var has_flow_texture: bool = model.darkness_tar_normal != null or model.darkness_noise != null
+	equipment.get_node("Appearance/Flow").editable = has_flow_texture
+	equipment.get_node("Appearance/Animate").disabled = not has_flow_texture
+	equipment.get_node("Appearance/Flow").tooltip_text = "" if has_flow_texture else "Assign a tar normal or noise texture in the chr1 Inspector to enable flow."
+	equipment.get_node("Appearance/TextureStatus").text = "Original global textures loaded. Flow animates the tar normals and reflections." if has_flow_texture else "Uses armor normal and reflection maps. Original global tar textures are not assigned; texture flow is disabled."
+
+
+func _reset_appearance() -> void:
+	if not customization.visible or not is_instance_valid(model):
+		return
+	model.darkness_mask_feather = 0.04
+	model.darkness_reflection = 1.0
+	model.darkness_normal_strength = 1.0
+	model.darkness_flow_speed = 0.1
+	model.darkness_color = Color(0.02, 0.015, 0.025, 1.0)
+	model.darkness_animate = true
+	model.darkness_show_mask = false
+	_sync_appearance_controls()
+
+
+func _update_tar_lighting() -> void:
+	if not customization.visible or not is_instance_valid(model):
+		return
+	var key: DirectionalLight3D = $KeyLight
+	var environment: Environment = $WorldEnvironment.environment
+	var sky := environment.ambient_light_color * environment.ambient_light_energy
+	var light_color := key.light_color * key.light_energy
+	var positions := PackedVector3Array([Vector3.ZERO, Vector3.ZERO, Vector3.ZERO])
+	var colors := PackedVector3Array([Vector3.ZERO, Vector3.ZERO, Vector3.ZERO])
+	var parameters := PackedVector2Array([Vector2.ZERO, Vector2.ZERO, Vector2.ZERO])
+	var count := 0
+	for light in find_children("*", "OmniLight3D", true, false):
+		if count == 3:
+			break
+		if not light.is_visible_in_tree():
+			continue
+		positions[count] = light.global_position
+		var color: Color = light.light_color * light.light_energy
+		colors[count] = Vector3(color.r, color.g, color.b)
+		parameters[count] = Vector2(0.0, light.omni_range * 100.0)
+		count += 1
+	model.set_tar_lighting({
+		"color_sky": Vector3(sky.r, sky.g, sky.b),
+		"color_ground": Vector3(sky.r, sky.g, sky.b) * 0.2,
+		"dir_light_vector": key.global_basis.z,
+		"color_dir_light": Vector3(light_color.r, light_color.g, light_color.b),
+		"point_light_count": count,
+		"point_light_position": positions,
+		"point_light_color": colors,
+		"point_light_param": parameters,
+		"fog_param": Vector3(0.0, 0.0, environment.fog_density / 100.0 if environment.fog_enabled else 0.0),
+		"fog_color": Vector3(environment.fog_light_color.r, environment.fog_light_color.g, environment.fog_light_color.b),
+	})
 
 
 func _filter_animations() -> void:
@@ -309,6 +411,7 @@ func _frame_model() -> void:
 
 
 func _process(_delta: float) -> void:
+	_update_tar_lighting()
 	if player != null and clip != &"":
 		if not player.is_playing() and not paused and not scrubbing:
 			if loop.button_pressed:

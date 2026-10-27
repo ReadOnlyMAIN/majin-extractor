@@ -34,6 +34,13 @@ class RsxFragmentDisassemblyTests(unittest.TestCase):
         self.assertEqual(instructions[1]["literal"], [2.0, -1.0, 0.0, 0.0])
         self.assertEqual(instructions[1]["literal_slot"], 2)
 
+    def test_negation_is_applied_after_absolute_value(self):
+        word = (2 << 2) | (1 << 17) | (1 << 18)
+        source = rsx_fp_disasm.decode_source(word, 1, 0)
+        self.assertEqual(source['text'], '-|R2.x|')
+        self.assertTrue(source['absolute'])
+        self.assertTrue(source['negate'])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,8 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     # Equipment packages share the chr100 animation rig. Export the family
     # together even when one chr1xx folder was selected.
     player_family = re.fullmatch(r"chr1\d{2}", source.name) is not None and source.parent.name == "chara"
-    sources = sorted(folder for folder in source.parent.glob("chr1[0-9][0-9]")
-                     if folder.is_dir()) if player_family else [source]
+    sources = sorted(folder for folder in source.parent.iterdir()
+                     if folder.is_dir() and re.fullmatch(r"chr(?:1\d{2}|7[24]\d)", folder.name)) if player_family else [source]
     if not args.dry_run:
         output_folder.mkdir(parents=True, exist_ok=True)
     for folder in sources:
@@ -109,6 +109,16 @@ def main(argv: list[str] | None = None) -> int:
         scene = output_folder.parent / "chr1.tscn"
         print(f"Player armor scene: {scene}")
         if not args.dry_run:
+            try:
+                from tools.conversion.tar_assets import write_tar_globals
+            except ImportError:
+                from tar_assets import write_tar_globals
+            static_pak = (PROJECT_ROOT / "game_files/package/PS3_GAME/USRDIR/finalizedPS3/KB/package/static.pak"
+                          if kb_root == PROJECT_ROOT / "game_files/decompressed/KB" else None)
+            try:
+                write_tar_globals(kb_root, output_root, static_pak)
+            except FileNotFoundError as exc:
+                print(f"Tar globals not installed: {exc}")
             script = PROJECT_ROOT / "godot/utility/player_armor.gd"
             shutil.copyfile(script, scene.with_name("player_armor.gd"))
             # Relative paths work when output/decoded is later copied into Godot.

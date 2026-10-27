@@ -1,5 +1,16 @@
 # Player equipment, jaw and contamination
 
+**Usage correction:** [PLAYER_MODEL_USAGE.md](PLAYER_MODEL_USAGE.md) establishes
+that chr100 belongs to the gameplay family and chr101 to the cinematic family.
+The controller now uses the complete body family selected by `cinematic_render`,
+which defaults to true; it no longer combines chr101 base geometry with chr100 tar. The earlier head/torso/legs partition is a Lab feature, not a decoded
+equipment table; source data instead names Body, Head and Bracelet.
+
+Update: the complete parameterized tar shader equations are now decoded; see
+[TAR_SHADER_FORMULA.md](TAR_SHADER_FORMULA.md) and the executable reference
+`tools/research/tar_shader_math.py`. The former local-Y cutoff is superseded
+by the source vertex-red mask and tarHP equations.
+
 Evidence from the local PS3 resources and connected Godot project, 2026-10-27.
 
 ## Jaw: absolute local poses cannot be copied between the two rigs
@@ -42,14 +53,16 @@ separate `textureSamplerTar` on hardware unit 4. Other bindings include base
 sphere (6) and shadow (7). These are original binary reflection names, not
 inferred Godot parameter names.
 
-For KbTarModel_1, the fragment program is 2,896 bytes at file offset 19,968.
+For KbTarModel_1, the fragment program is 2,896 bytes at absolute file offset 20,096 (19,968 relative to fxbf).
 Its first texture instruction samples unit 4 at TEX0.zw, and the result is
 remapped with `2*x-1`. This is evidence of a vector/detail input, not evidence
 that the tar texture is simply an alpha mask. The program also contains
 comparisons, fragment kills and later alpha arithmetic; `tarHP` has constant
 relocations at 0x50, 0xA90, 0xAD0 and 0xAF0 (the inspector also reports zero
 entries, which should not be interpreted as additional confirmed usages).
-The straight-line disassembler does not reconstruct this shader's branches.
+The upgraded decoder now reports predicates, CC writes, and branch targets.
+Relocation counts are bounded by metadata; zero entries reported by the old
+unbounded scan were not actual tarHP patches.
 
 The source chr100 DDM has separate T_body and T_huku geometry/materials using
 chr100_c03, different normal maps n03/n04, and f01. chr110 uses tar_body and
@@ -57,21 +70,23 @@ tar_face; other visually identified pairs have corresponding T* materials.
 This supports distinct geometry and a dedicated dynamic tar effect rather
 than a single ordinary black material applied to the whole clean outfit.
 
-User observation establishes upward coverage related to health. The shader
-names corroborate health-dependent rendering and root-relative controls, but
-the exact tarHP vector components, vertex-to-fragment height packing, texture
-motion, threshold equation and game health curve are not yet reconstructed.
-Do not describe the Godot smoothstep as the recovered original shader.
+User observation establishes upward coverage related to health. The later bytecode analysis establishes that coverage uses interpolated
+COLOR.r, compared against tarHP.x/y with a linear slope tarHP.z. The vertical
+coordinate is used in procedural tar UVs, not in this coverage comparison.
+The CPU health-to-tarHP mapping remains outside the shader. The old Godot
+smoothstep must not be described as the recovered original shader.
 
 ## Godot preview and remaining limits
 
-The preview draws clean armor from the identified clean package and the
-additional tar surfaces from its contaminated partner. Alpha uses a soft
-height cutoff. The controller subtracts the animated root's vertical offset
-so root-motion jumps do not independently move the coverage threshold through
-the body. Height endpoints and feather remain adjustable and health mapping
-remains a linear approximation. Original tar shading/noise/UV behavior and
-exact equipment seams still need further decoding or comparison with gameplay.
+The controller draws clean armor and its paired tar surfaces. Coverage follows
+vertex red and the original tarHP alpha formula. Root-relative position belongs
+to procedural UV generation, not a separate height cutoff. The dedicated shader
+now implements the decoded lighting, normals, reflections and fog, with original
+global textures resolved through CPU evidence. See
+[TAR_RENDER_INTEGRATION.md](TAR_RENDER_INTEGRATION.md) for implementation,
+validation and remaining runtime limits. The health slider still supplies a
+preview mapping; the game's complete PV curve and exact equipment seams remain
+unverified.
 
 ## Animation names
 

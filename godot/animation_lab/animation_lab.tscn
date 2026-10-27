@@ -173,60 +173,154 @@ visible = false
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
+anchor_bottom = 1.0
+offset_bottom = -20.0
 offset_left = -330.0
 offset_top = 20.0
 offset_right = -20.0
 theme = ExtResource("2_dxbl5")
 
-[node name="Margin" type="MarginContainer" parent="UI/Customization"]
+[node name="Scroll" type="ScrollContainer" parent="UI/Customization"]
 layout_mode = 2
+horizontal_scroll_mode = 0
+
+[node name="Margin" type="MarginContainer" parent="UI/Customization/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
 theme_override_constants/margin_left = 18
 theme_override_constants/margin_top = 18
 theme_override_constants/margin_right = 18
 theme_override_constants/margin_bottom = 18
 
-[node name="Controls" type="VBoxContainer" parent="UI/Customization/Margin"]
+[node name="Controls" type="VBoxContainer" parent="UI/Customization/Scroll/Margin"]
 layout_mode = 2
 theme_override_constants/separation = 10
 
-[node name="Title" type="Label" parent="UI/Customization/Margin/Controls"]
+[node name="Title" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 text = "CHR1 / CUSTOMIZATION"
 
-[node name="HeadLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+[node name="Cinematic" type="CheckButton" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
-text = "Head"
+text = "Cinematic rendering"
+button_pressed = true
 
-[node name="Head" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+[node name="BodyLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
+text = "Body costume"
 
-[node name="TorsoLabel" type="Label" parent="UI/Customization/Margin/Controls"]
-layout_mode = 2
-text = "Torso and arms"
-
-[node name="Torso" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+[node name="Body" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 
-[node name="LegsLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+[node name="HeadLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
-text = "Legs"
+text = "Head accessory"
 
-[node name="Legs" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+[node name="Head" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 
-[node name="HealthLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+[node name="BraceletsLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Bracelets"
+
+[node name="Bracelets" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+
+[node name="HealthLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 text = "Health: 100%"
 
-[node name="Health" type="HSlider" parent="UI/Customization/Margin/Controls"]
+[node name="Health" type="HSlider" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 min_value = 0.0
 max_value = 1.0
 step = 0.01
 value = 1.0
 
-[node name="Note" type="Label" parent="UI/Customization/Margin/Controls"]
+[node name="Note" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 custom_minimum_size = Vector2(260, 0)
-text = "Lower health raises darkness.\nCoverage is a reconstruction; original tar shading is still under study."
+text = "Coverage follows the original vertex mask. Health response and appearance remain preview settings."
 autowrap_mode = 2
+
+[node name="AppearanceToggle" type="CheckButton" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Darkness appearance"
+
+[node name="Appearance" type="VBoxContainer" parent="UI/Customization/Scroll/Margin/Controls"]
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="FeatherLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Edge softness"
+
+[node name="Feather" type="HSlider" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+min_value = 0.001
+max_value = 0.2
+step = 0.001
+value = 0.04
+
+[node name="ReflectionLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Reflections"
+
+[node name="Reflection" type="HSlider" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+min_value = 0
+max_value = 2
+step = 0.01
+value = 1
+
+[node name="NormalLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Normal strength"
+
+[node name="Normal" type="HSlider" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+min_value = 0
+max_value = 2
+step = 0.01
+value = 1
+
+[node name="FlowLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Flow speed"
+
+[node name="Flow" type="HSlider" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+min_value = 0
+max_value = 2
+step = 0.001
+value = 0.1
+
+[node name="ColorLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Darkness color"
+
+[node name="Color" type="ColorPickerButton" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 30)
+edit_alpha = false
+color = Color(0.02, 0.015, 0.025, 1)
+
+[node name="Animate" type="CheckButton" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+button_pressed = true
+text = "Animate texture flow"
+
+[node name="Mask" type="CheckButton" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Show coverage mask"
+
+[node name="Reset" type="Button" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+text = "Reset appearance"
+
+[node name="TextureStatus" type="Label" parent="UI/Customization/Scroll/Margin/Controls/Appearance"]
+layout_mode = 2
+custom_minimum_size = Vector2(240, 0)
+autowrap_mode = 2
+text = "Uses armor normal and reflection maps. Original global tar textures are not assigned."

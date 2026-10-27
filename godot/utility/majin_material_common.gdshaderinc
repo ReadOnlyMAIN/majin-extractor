@@ -43,17 +43,6 @@ uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
 uniform float specular : hint_range(0.0, 1.0, 0.01) = 0.5;
 uniform vec4 albedo_modulate : source_color = vec4(1.0);
-#ifdef PLAYER_DARKNESS
-// Height is in character-local meters. A dedicated alpha variant keeps the
-// coverage control off ordinary materials and other instances of this armor.
-instance uniform float darkness_height = 10000.0;
-instance uniform float darkness_feather = 0.04;
-instance uniform float darkness_root_y = 0.0;
-varying float darkness_local_y;
-void vertex() {
-    darkness_local_y = VERTEX.y - darkness_root_y;
-}
-#endif
 
 vec4 blend_base(vec2 uv, vec4 weights) {
     vec4 base = texture(base_texture, uv) * weights.r;
@@ -139,10 +128,6 @@ void fragment() {
     ALPHA_SCISSOR_THRESHOLD = 0.5;
 #elif MATERIAL_ALPHA_MODE == 2
     ALPHA = base.a * (use_vertex_alpha ? COLOR.a : 1.0);
-#endif
-#ifdef PLAYER_DARKNESS
-    ALPHA *= 1.0 - smoothstep(darkness_height - darkness_feather,
-                              darkness_height + darkness_feather, darkness_local_y);
 #endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;

@@ -1,8 +1,7 @@
-"""Player mesh partition inferred from the shared chr1xx bone hierarchy.
+"""Player render groups and legacy bone-influence partition helpers.
 
-The original equipment table is not decoded. Assign whole triangles by summed
-skin influence: head below bone 101, lower body below bone 4, torso otherwise.
-No vertex is moved or duplicated across slot boundaries.
+Runtime costumes use whole source bodies. Only the legacy partition helper
+splits head/torso/legs; it is retained for existing callers and old exports.
 """
 from collections import defaultdict
 import re
@@ -48,4 +47,26 @@ def partition_player_parts(vertices, parts, skeleton, materials=()):
         for slot, triangles in groups.items():
             suffix = '_darkness' if part.get('material_index') in darkness else ''
             result.append(dict(part, armor_slot=slot + suffix, triangles=triangles))
+    return result
+
+
+def is_player_accessory(name: str) -> bool:
+    return re.fullmatch(r"chr7[24]\d", name) is not None
+
+
+def partition_player_render_parts(parts, materials, vertices=None, bracelets=False):
+    """Keep complete bodies; split the two static bracers onto their forearms."""
+    darkness = darkness_material_indices(materials)
+    result = []
+    for part in parts:
+        suffix = "_darkness" if part.get("material_index") in darkness else ""
+        if bracelets:
+            groups = defaultdict(list)
+            for triangle in part['triangles']:
+                side = "positive" if sum(vertices[i]['position'][0] for i in triangle) >= 0 else "negative"
+                groups[side].append(triangle)
+            for side, triangles in groups.items():
+                result.append(dict(part, armor_slot="bracelet_" + side + suffix, triangles=triangles))
+        else:
+            result.append(dict(part, armor_slot="body" + suffix))
     return result

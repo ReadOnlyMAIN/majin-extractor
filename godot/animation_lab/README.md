@@ -68,17 +68,28 @@ camera displacement was zero with follow off and 0.52065 m with follow on for
 the sampled walking pose. The final run produced no game errors. These are
 viewer checks, not proof of fidelity for every source animation.
 
-The player is now represented by one `chr1` entry backed by `chara/chr1.tscn`;
-individual chr1xx packages are excluded from the character dropdown. Selecting
-chr1 reveals the right-hand customization panel with head, torso/arms, legs,
-and health controls. Other characters hide this panel. Animation playback
-continues to use chr100's AnimationPlayer and motion sidecar.
+The player has one `chr1` entry backed by `chara/chr1.tscn`, selected initially
+when available. Individual chr1xx/chr72x/chr74x packages are hidden from the
+character dropdown. The right panel provides **Body costume**, **Head accessory**,
+**Bracelets**, and a **Cinematic rendering** switch enabled by default.
 
-Named clips are shown by default. **Show unnamed segments** includes physical
-segments with no source sequence name; stable segment IDs remain in tooltips.
-For chr1 this is 391 named clips/aliases, or 477 including 86 unnamed segments.
-The corrected player materials, bind-aware jaw retargeting, and root-relative
-contamination preview are described in
-`research/PLAYER_CONTAMINATION_FINDINGS.md` in the extractor repository.
-The original tar shader is still under investigation; the preview remains an
-approximation. Source decoding limitations remain in the motion sidecars.
+The switch loads the complete cinematic or gameplay body for the same costume.
+Gameplay retains that model's own tar geometry. The hidden chr100 animation
+master remains active, preserving playback time, equipment and health across
+switches. There are eleven body choices and ten models per accessory category,
+plus None. Each bracelet half follows its own forearm.
+
+Health and the expandable **Darkness appearance** controls are visible only in
+gameplay mode. They provide edge softness, reflections, normals, color, flow,
+coverage-mask display and reset. Flow defaults to .1 and the original global tar
+textures load automatically. Reset preserves equipment and health. The panel
+scrolls on smaller windows and is hidden for other characters.
+
+Named clips are shown by default. **Show unnamed segments** reveals unnamed
+physical segments with stable source IDs in tooltips. chr1 retains 391 named
+clips/aliases and 86 unnamed segments (477 total). Exact motion/cloth and source
+health-curve limits remain documented in the research findings.
+
+`tools/validation/player_render_modes.gd` checks all 22 body/mode combinations,
+20 accessories, texture availability and animation preservation in the imported
+project. `research/PLAYER_MODEL_USAGE.md` explains the original family selection.

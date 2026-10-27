@@ -5,9 +5,10 @@ RSX fragment instructions are 128-bit records whose bytes are swapped inside
 each 16-bit half-word. A source of type CONSTANT makes the following 128-bit
 record inline literal data rather than another instruction.
 
-This tool intentionally reports every encoded source, even when the opcode or
-destination mask means that source is unused. It is aimed at short compiled Cg
-programs such as ``KbCloudModel_1`` and does not reconstruct control flow.
+The decoder reports condition-code writes, per-lane predicates and IFE target
+slots. Branch operands are addresses, not source registers or inline literals.
+The raw words remain available for instruction-level verification. Numerical
+execution and full tar-specific control flow are in tar_shader_math.py.
 """
 
 from __future__ import annotations
@@ -41,7 +42,10 @@ OPCODES = [
 OPERANDS = {
     "NOP": 0, "MOV": 1, "MUL": 2, "ADD": 2, "MAD": 3,
     "DP3": 2, "DP4": 2, "MIN": 2, "MAX": 2, "TEX": 1,
-    "DIVSQ": 2, "NRM": 1, "TXL": 2, "TXB": 2,
+    "DIVSQ": 2, "NRM": 1, "TXL": 1, "TXB": 1,
+    "SLT": 2, "SGE": 2, "SLE": 2, "SGT": 2, "SNE": 2, "SEQ": 2,
+    "SIN": 1, "COS": 1, "RSQ": 1, "RCP": 1, "EX2": 1, "LG2": 1,
+    "DIV": 2, "DP2": 2, "KIL": 0, "IFE": 0, "FENCT": 0, "FENCB": 0,
 }
 ATTRIBUTES = [
     "WPOS", "COL0", "COL1", "FOGC", "TEX0", "TEX1", "TEX2",
@@ -85,10 +89,10 @@ def decode_source(word: int, source_index: int, attribute: int) -> dict:
         base = "UNKNOWN"
         kind = "unknown"
     text = base + _swizzle(word)
-    if (word >> 17) & 1:
-        text = "-" + text
     if (word >> absolute_bit) & 1:
         text = "|" + text + "|"
+    if (word >> 17) & 1:
+        text = "-" + text
     return {
         "text": text,
         "kind": kind,
@@ -128,6 +132,12 @@ def disassemble(payload: bytes) -> list[dict]:
         )
         scale = (src1 >> 28) & 7
         item = {
+            "result_precision": (destination >> 22) & 3,
+            "set_condition": bool((destination >> 8) & 1),
+            "condition_write_register": (src0 >> 30) & 1,
+            "condition_register": (src0 >> 31) & 1,
+            "condition_swizzle": "".join(CHANNELS[(src0 >> shift) & 3] for shift in (21, 23, 25, 27)),
+            "condition_mask": (src0 >> 18) & 7,
             "slot": slot,
             "byte_offset": slot * 16,
             "opcode": opcode,
@@ -144,7 +154,10 @@ def disassemble(payload: bytes) -> list[dict]:
             "end": bool(destination & 1),
             "raw_words": [f"0x{word:08x}" for word in words],
         }
-        if any(source["kind"] == "constant" for source in sources):
+        if opcode == "IFE":
+            item["else_slot"] = (src1 & 0x7FFFFFFF) // 4
+            item["end_slot"] = src2 // 4
+        if any(source["kind"] == "constant" for source in sources[:item['operand_count']]):
             literal_slot = slot + 1
             if literal_slot * 16 >= len(payload):
                 raise ValueError(f"instruction in slot {slot} has a truncated literal")
@@ -171,10 +184,18 @@ def format_assembly(instructions: list[dict]) -> str:
         operands = [source["text"] for source in used]
         if instruction["opcode"] in {"TEX", "TXL", "TXB"}:
             operands.append(f'texture[{instruction["texture_unit"]}]')
-        prefix = instruction["destination"] + ", " if instruction["destination"] else ""
+        target = instruction['destination']
+        if target is None and instruction['set_condition']:
+            target = f"CC{instruction['condition_write_register']}.{instruction['write_mask']}"
+        prefix = target + ", " if target else ""
         suffix = ""
         if instruction["result_scale"] != "1":
             suffix += f' ; scale={instruction["result_scale"]}'
+        suffix += f" ; pred={instruction['condition_mask']} CC{instruction['condition_register']}.{instruction['condition_swizzle']}"
+        if instruction['set_condition']:
+            suffix += f" set=CC{instruction['condition_write_register']}"
+        if instruction['opcode'] == 'IFE':
+            suffix += f" else={instruction['else_slot']} end={instruction['end_slot']}"
         if "literal" in instruction:
             suffix += f' ; literal={instruction["literal"]}'
         lines.append(

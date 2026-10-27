@@ -5,7 +5,7 @@ from tools.conversion.ddm.skinned import (
     decode_skinned_geometry, decode_skinned_skeleton, find_skinned_geometry_header,
 )
 from tools.conversion.ddm.materials import parse_materials
-from tools.conversion.player_armor import partition_player_parts, is_player_asset, darkness_material_indices
+from tools.conversion.player_armor import partition_player_parts, is_player_asset, darkness_material_indices, partition_player_render_parts, is_player_accessory
 
 
 class PlayerArmorTests(unittest.TestCase):
@@ -25,6 +25,36 @@ class PlayerArmorTests(unittest.TestCase):
         self.assertTrue(is_player_asset('chr100'))
         self.assertTrue(is_player_asset('chr156'))
         self.assertFalse(is_player_asset('chr200'))
+
+    def test_render_partition_preserves_complete_source_surfaces(self):
+        parts = [dict(material_index=0, triangles=[(0, 1, 2)]),
+                 dict(material_index=1, triangles=[(3, 4, 5)])]
+        result = partition_player_render_parts(parts, [dict(index=0, name='body'), dict(index=1, name='T_body')])
+        self.assertEqual([p['armor_slot'] for p in result], ['body', 'body_darkness'])
+        self.assertEqual([p['triangles'] for p in result], [p['triangles'] for p in parts])
+        self.assertTrue(is_player_accessory('chr720'))
+        self.assertTrue(is_player_accessory('chr749'))
+        self.assertFalse(is_player_accessory('chr730'))
+
+    def test_bracelet_sides_keep_each_surface_on_its_own_forearm(self):
+        vertices = [dict(position=(x, 0, 0)) for x in [1, 2, 3, -1, -2, -3]]
+        parts = [dict(material_index=1, triangles=[(0, 1, 2), (3, 4, 5)])]
+        result = partition_player_render_parts(parts, [dict(index=1, name='tar_kote')], vertices, bracelets=True)
+        self.assertEqual([p['armor_slot'] for p in result], ['bracelet_positive_darkness', 'bracelet_negative_darkness'])
+        self.assertEqual([p['triangles'] for p in result], [[(0, 1, 2)], [(3, 4, 5)]])
+
+    def test_static_attachment_rig_omits_tr_arrays(self):
+        import struct
+        data = bytearray(0x110)
+        struct.pack_into('>II', data, 0xac, 0x13, 2)
+        data[0xb4:0xb8] = bytes([0, 0, 1, 0])
+        data[0xb8:0xbc] = bytes([0, 0, 0, 255])
+        skeleton = decode_skinned_skeleton(bytes(data))
+        self.assertEqual([j['parent'] for j in skeleton['joints']], [None, 0])
+        self.assertEqual(skeleton['joints'][1]['rotation'], (0, 0, 0, 1))
+        struct.pack_into('>I', data, 0xac, 0x1b)
+        with self.assertRaisesRegex(RuntimeError, 'quaternion norm'):
+            decode_skinned_skeleton(bytes(data))
 
     def test_darkness_surfaces_are_separate_from_equipment(self):
         materials = [dict(index=i, name=name) for i, name in enumerate(

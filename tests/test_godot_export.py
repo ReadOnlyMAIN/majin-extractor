@@ -98,16 +98,23 @@ class GodotExportTests(unittest.TestCase):
             self.assertIn("shader_parameter/detail_texture", tres)
             self.assertIn("shader_parameter/use_detail = true", tres)
 
-    def test_player_darkness_uses_height_shader_without_changing_clean_material(self):
+    def test_player_darkness_uses_tar_shader_without_changing_clean_material(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
-            materials = [dict(index=0, name='T_body', textures=[]),
+            materials = [dict(index=0, name='T_body', textures=[], render_state={'mode':'alpha_blend','shader_key':'0x00a07377'}),
                          dict(index=1, name='body', textures=[])]
             result = write_godot_material_assets(out, materials, {}, asset_kind='character')
             bindings = json.loads((out / result['manifest']).read_text())['materials']
             self.assertEqual(bindings[0]['shader'], 'res://majin_utility/player_darkness.gdshader')
             self.assertEqual(bindings[0]['material_type'], 'ShaderMaterial')
             self.assertIsNone(bindings[1]['shader'])
+            self.assertEqual(bindings[0]['colors'], {})
+            self.assertEqual(set(bindings[0]['switches']), {
+                'use_normal_texture', 'use_utility_texture', 'use_env_sphere_texture', 'normal_texture_y_converted',
+            })
+            self.assertEqual(bindings[0]['vectors']['mat_param1'], [0.5, 0, 1, -1])
+            tres = (out / bindings[0]['material_resource']).read_text()
+            self.assertIn('shader_parameter/mat_param1 = Vector4(0.5, 0, 1, -1)', tres)
 
     def _triangle(self, vertices, material_index, positions):
         base = len(vertices)

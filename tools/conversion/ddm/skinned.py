@@ -175,6 +175,9 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
     id_to_joint = {
         bone_id: index for index, bone_id in enumerate(transform_bone_ids)
     }
+    # Static attachment DDMs (chr72x/74x) omit TR arrays: layout 0x13,
+    # unlike the animated 0x1b layout. Their two-node bind rig is identity.
+    static_attachment = be_u32(data, 0xAC) == 0x13 and transform_count == 2
     joints = []
     for index, bone_id in enumerate(transform_bone_ids):
         parent_id = parent_by_id[bone_id]
@@ -186,8 +189,10 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
             raise RuntimeError(
                 f"Bone {bone_id} references unknown parent id {parent_id}."
             )
-        translation = struct.unpack_from(">3f", data, translation_offset + index * 16)
-        rotation = struct.unpack_from(">4f", data, rotation_offset + index * 16)
+        translation = ((0.0, 0.0, 0.0) if static_attachment else struct.unpack_from(
+            ">3f", data, translation_offset + index * 16))
+        rotation = ((0.0, 0.0, 0.0, 1.0) if static_attachment else struct.unpack_from(
+            ">4f", data, rotation_offset + index * 16))
         if not finite3(translation) or not all(math.isfinite(x) for x in rotation):
             raise RuntimeError(f"Bone {bone_id} has a non-finite bind transform.")
         norm = math.sqrt(sum(x * x for x in rotation))
@@ -420,11 +425,11 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         ]
     if uses_godot_materials(args):
         try:
-            from ..player_armor import is_player_asset, partition_player_parts
+            from ..player_armor import is_player_asset, is_player_accessory, partition_player_render_parts
         except ImportError:
-            from player_armor import is_player_asset, partition_player_parts
-        if is_player_asset(path.stem):
-            mesh_parts = partition_player_parts(vertices, mesh_parts, skeleton, materials)
+            from player_armor import is_player_asset, is_player_accessory, partition_player_render_parts
+        if is_player_asset(path.stem) or is_player_accessory(path.stem):
+            mesh_parts = partition_player_render_parts(mesh_parts, materials, vertices, bracelets=path.stem.startswith("chr74"))
     image_data = {}
     if not args.no_textures:
         with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:

@@ -139,75 +139,57 @@ example, importing `ins107.glb` creates
 `res://terrain/foliage/meshes/ins107.res`, matching the default paths emitted
 by `hsc_to_foliage.py`.
 
-### Player equipment (`chr1xx`)
+### Player character (`chr1`)
 
-Exporting any `KB/chara/chr1xx` folder with `export_folder_to_godot.py`
-exports all available sibling `chr1xx` packages and creates `chara/chr1.tscn`.
-Only `chr100` receives animations. Open or instantiate `chr1.tscn`, then select
-`head`, `torso` (including arms), and `legs` in the Inspector. Selection also
-works at runtime by assigning these properties. `available_armor()` lists
-the eight visually identified clean armor package IDs;
-`get_animation_player()` returns the chr100 player. The pairs below were
-identified visually by the user, rather than decoded from game metadata:
+Exporting a chr1xx folder collects the body families and chr72x/74x accessories
+and creates `chara/chr1.tscn`. The character exposes:
 
-| Clean armor | Package containing contamination |
-| --- | --- |
-| chr101 | chr100 |
-| chr111 | chr110 |
-| chr116 | chr115 |
-| chr121 | chr120 |
-| chr126 | chr125 |
-| chr131 | chr130 |
-| chr136 | chr135 |
-| chr141 | chr140 |
+- `cinematic_render` (boolean, **true** by default): cinematic body when enabled,
+  gameplay body with its own tar when disabled.
+- `body`: costume identity, stored as the cinematic asset ID (chr101, chr111,
+  chr116, chr121, chr126, chr131, chr136, chr141, chr151, chr156, chr146).
+  Gameplay resolves to chr100, chr110, chr115, chr120, chr125, chr130, chr135,
+  chr140, chr150, chr155, chr145 respectively.
+- `head`: none or an exported chr720..729 accessory.
+- `bracelets`: none or chr740..749, with its two halves following separate forearms.
 
-Each slot loads the clean mesh from its armor package and the matching
-`armor_*_darkness` mesh from its paired package. `health_ratio` controls a local-Y
-alpha transition from clean (1) to covered (0), rising from feet to head.
-`darkness_height_range` is in exported meters; `darkness_feather` controls the
-soft edge. The height-to-health mapping is currently linear, an approximation
-of the behavior reported by the user, not a recovered original shader.
-The dedicated `player_darkness.gdshader` uses per-instance parameters so health
-changes do not mutate shared materials or other characters. Install the updated
-`majin_utility` shaders together with the controller and generated materials.
-Packages chr145/146/150/151/155/156 remain exported for inspection but are excluded
-from the equipment selector while their material appearance is unresolved.
-The controller keeps each piece's Skin and transfers source deformation by
-bone name through each rig's global rest matrices. Extra unmapped bones retain
-their local rest pose; differing bind axes are preserved (notably the jaw).
+Both body modes use the complete geometry of their selected source model.
+Gameplay never mixes cinematic base geometry with gameplay tar. Current exports
+split only normal/tar render groups; old exports with head/torso/legs mesh names
+also work, because the controller retains every source body mesh.
 
-The three GLB meshes (`armor_head`, `armor_torso`, `armor_legs`) are inferred
-from summed triangle skin influences below bones 101 (head) and 4 (pelvis/legs),
-with other bones assigned to the torso. This preserves every source triangle,
-but the game's equipment/unlock table and exact clothing boundaries remain
-unverified. Package names are used rather than guessed armor names. Mixed sets
-may need boundary adjustments after visual comparison with the game.
+The hidden chr100 master keeps the 477 animation clips. Changing body or mode
+preserves the AnimationPlayer, playback time, health and accessories. Visible
+body rigs receive source deformation through their global bind matrices, which
+preserves the cinematic jaw's different bind axes. Static accessories omit the
+animated TR arrays in their two-node DDM rig. Head follows the head anchor;
+bracelets are split by their authored positive/negative X geometry and follow
+bones 13/43. This is a preview attachment reconstruction, not a recovered complete
+cinematic cloth/accessory simulation.
 
-The decoder now reads both rigid seven-attribute sections (24-byte vertices,
-one palette index with implicit unit weight) and weighted eight-attribute
-sections. In particular, chr100 contains 16 sections and 13,515 source vertices;
-the old weighted-only detection started inside the group and read only 2,998.
+The Animation Lab starts on chr1 when present. Its right panel exposes body,
+head, bracelets and **Cinematic rendering**. Body labels follow the active family
+and tooltips show both IDs. Health and tar appearance controls appear only in
+gameplay mode. The panel is hidden for other characters; individual body and
+accessory packages are excluded from the character dropdown.
 
-Runtime verification in the connected Godot 4.8-dev7 project confirmed all eight
-armor pairs and all 24 contamination slots. All 114 visible contamination
-surfaces used `player_darkness.gdshader`. Health values 1, .75, .5, .25, and 0
-produced matching height thresholds across the three slots; clean, half-covered,
-and fully covered states were inspected visually. A mixed chr116/chr111/chr126
-outfit followed the chr100 animation with no pose mismatch on shared bones.
-The 477 animations were present; this does not validate every clip visually.
+Tar uses the decoded eight-pass equations, original vertex-red coverage and
+global textures installed in `tar_globals/`. Flow defaults to .1 following the
+user's visual observation. The health slider still supplies a preview PV→tarHP
+mapping; `use_original_tar_hp` permits explicit source inputs. Per-player
+materials, root-relative UVs, native Godot shadows and an explicit original-frame
+lighting replay mode remain available. `darkness_depth_bias` is **zero** by
+default; coherent geometry replaces the earlier 1 mm workaround.
 
-When changing an existing material's shader path manually, remove an old shader
-`uid` from that external resource reference if it still identifies the previous
-shader. Godot can otherwise resolve the UID to the old shader despite the new
-path, leaving some contamination surfaces unaffected by the height cutoff.
-Freshly generated materials use the correct shader path without a stale UID.
+See `research/PLAYER_MODEL_USAGE.md`, `research/TAR_SHADER_FORMULA.md` and
+`research/TAR_RENDER_INTEGRATION.md` for evidence and remaining rendering limits.
+Several late source assets contain test textures or previously unresolved
+material settings; the mode switch does not claim to repair all those materials.
 
+Checks: 184 Python tests; Godot integration checks cover all eleven costumes in
+both modes, all twenty accessories, source texture availability and preservation
+of the 477 animations. Shader equation validation covers 384 controlled GPU cases.
 
-The jaw correction is documented in `research/PLAYER_CONTAMINATION_FINDINGS.md`.
-The earlier equal-local-pose check was insufficient: chr101 jaw bone_120 has a
-180-degree bind-axis difference from chr100. The controller now transfers
-`source_global_pose * inverse(source_global_rest) * target_global_rest` and
-converts back through the target parent's posed transform. The contamination
-preview also compensates for animated vertical root motion. This remains an
-approximation of the original KbTarModel effect, whose reflection explicitly
-contains tarHP, tarColor, rootPos and a separate tar sampler.
+When changing an existing material's shader path manually, remove a stale shader
+UID if it still resolves to the previous shader. Newly generated resources use
+the intended path without such a stale reference.

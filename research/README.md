@@ -112,3 +112,33 @@ Assets whose meaning only exists inside HexaEngine (the procedural day/night
 sky, some bespoke engine shaders) are deliberately **not** reverse engineered;
 they are reproduced with host-engine primitives (for example a native Godot
 `Sky`). See `ROADMAP.md`.
+
+
+## Decoded PS3 tar shaders
+
+`TAR_SHADER_FORMULA.md` documents the original equations of the 32 compiled
+KbTarModel passes. `tools/research/tar_shader_decode.py` decodes both stages,
+including skinning loops, predicates and runtime constant bindings;
+`tools/research/tar_shader_math.py` contains executable simplified equations
+and separate instruction evaluators. The test suite compares 768 RGBA cases
+and 128 vertex cases against the original resources when static.pak is present.
+The coverage mask is vertex COLOR.r with tarHP cut/fade parameters, not local Y.
+Game CPU health mapping and sampler/framebuffer state remain separate inputs.
+
+## Tar rendering
+
+- [TAR_SHADER_FORMULA.md](TAR_SHADER_FORMULA.md): all 32 original shader variants.
+- [TAR_RENDER_INTEGRATION.md](TAR_RENDER_INTEGRATION.md): CPU texture bindings,
+  Godot shader integration, numerical GPU validation and remaining limits.
+- `tools/research/rsx_vp_disasm.py`: RSX vertex instruction decoder.
+- `tools/research/tar_shader_decode.py`, `tar_shader_math.py`: decoded programs
+  and executable equations checked against an independent instruction evaluator.
+- `tools/research/tar_cpu_inspect.py`: bounded evidence from a local decrypted ELF.
+- `tools/conversion/tar_assets.py`: exact original global texture extraction.
+- `tools/validation/tar_shader_gpu.gd`, `check_tar_gpu.py`: controlled GPU samples
+  compared with the independently validated source equations.
+
+[PLAYER_MODEL_USAGE.md](PLAYER_MODEL_USAGE.md) establishes gameplay versus
+cinematic player families from original model/item tables and PPU selection
+code. `tools/research/player_model_usage.py` reproduces the evidence and records
+the original accessory categories separately from the Lab’s inferred mesh slots.

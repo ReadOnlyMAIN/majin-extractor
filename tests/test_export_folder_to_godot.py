@@ -78,7 +78,7 @@ class ExportFolderToGodotTests(unittest.TestCase):
     def test_player_export_collects_siblings_and_only_animates_chr100(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ('chr100', 'chr101', 'chr156', 'chr200'):
+            for name in ('chr100', 'chr101', 'chr156', 'chr200', 'chr720', 'chr749'):
                 (root / 'KB/chara' / name).mkdir(parents=True)
             output = root / 'decoded'
             with mock.patch('tools.conversion.export_folder_to_godot.run') as execute, \
@@ -87,9 +87,9 @@ class ExportFolderToGodotTests(unittest.TestCase):
                                        '--output-root', str(output)]), 0)
             commands = [call.args[0] for call in execute.call_args_list]
             self.assertEqual([Path(command[2]).name for command in commands],
-                             ['chr100', 'chr101', 'chr156'])
+                             ['chr100', 'chr101', 'chr156', 'chr720', 'chr749'])
             self.assertEqual([command[command.index('--animations') + 1]
-                              for command in commands], ['all', 'none', 'none'])
+                              for command in commands], ['all', 'none', 'none', 'none', 'none'])
             self.assertTrue((output / 'chara/chr1.tscn').is_file())
             self.assertTrue((output / 'chara/player_armor.gd').is_file())
 

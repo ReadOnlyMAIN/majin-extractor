@@ -36,20 +36,24 @@ def _cstring(data: bytes, offset: int) -> str:
 
 
 def _constant_relocations(
-    data: bytes, base: int, table_offset: int, program_size: int,
+    data: bytes, base: int, table_offset: int, program_size: int, count: int | None = None,
 ) -> list[int]:
     """Decode Cg fragment-constant patch locations.
 
     Each four-byte entry contains a big-endian uint16 byte offset followed by
-    a zero uint16. Unused table space is filled with ``####``.
+    a zero uint16. The low byte of fragment parameter metadata is the exact
+    occurrence count. Tables may share/abut storage without a #### separator;
+    scanning to that sentinel would bind the next uniform's first occurrence.
+    Unused table space is filled with ``####``.
     """
     if not table_offset:
         return []
     cursor = base + table_offset
     relocations = []
-    while cursor + 4 <= len(data) and data[cursor:cursor + 4] != b"####":
+    while (cursor + 4 <= len(data) and data[cursor:cursor + 4] != b"####"
+           and (count is None or len(relocations) < count)):
         program_offset, reserved = struct.unpack_from(">HH", data, cursor)
-        if reserved or program_offset % 16 or program_offset >= program_size:
+        if reserved or not program_offset or program_offset % 16 or program_offset >= program_size:
             break
         relocations.append(program_offset)
         cursor += 4
@@ -139,6 +143,7 @@ def inspect_shader(data: bytes) -> dict:
                         base,
                         value_offset,
                         fragment_range[1] - fragment_range[0],
+                        count=metadata_word & 0xFF,
                     )
                 parameters.append(item)
 

@@ -366,6 +366,13 @@ class MapGeometryTests(unittest.TestCase):
         self.assertEqual(state['shader_key'], '0x0084733f')
         self.assertEqual(state['variant_word'], 0)
 
+    def test_tar_material_family_preserves_source_feature_bits(self):
+        data = b'\x02' + bytes.fromhex('00a07377 00000002') + b'payload'
+        state = ddm.decode_material_render_state(data, {'offset': 9})
+        self.assertEqual(state['shader_key'], '0x00a07377')
+        self.assertEqual(state['mode'], 'alpha_blend')
+        self.assertEqual(state['variant_word'], 2)
+
     def test_material_render_state_rejects_unknown_layout(self):
         self.assertIsNone(ddm.decode_material_render_state(
             b'\x00' * 16, {'offset': 9},

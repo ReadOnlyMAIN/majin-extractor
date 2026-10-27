@@ -223,7 +223,7 @@ def decode_material_render_state(data: bytes, phong):
     # All correlated KbBase map feature keys occupy the 0x008xxxxx range.
     # This also keeps a zero-filled control block from passing merely because
     # zero is valid for both the opaque mode and the newly observed word.
-    if (shader_key & 0xFFF00000) != 0x00800000:
+    if (shader_key & 0xFFF00000) not in (0x00800000, 0x00A00000):
         return None
     return {
         "mode_value": mode_value,

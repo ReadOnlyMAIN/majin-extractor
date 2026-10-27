@@ -73,17 +73,6 @@ uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
 uniform float specular : hint_range(0.0, 1.0, 0.01) = 0.5;
 uniform vec4 albedo_modulate : source_color = vec4(1.0);
-#ifdef PLAYER_DARKNESS
-// Height is in character-local meters. A dedicated alpha variant keeps the
-// coverage control off ordinary materials and other instances of this armor.
-instance uniform float darkness_height = 10000.0;
-instance uniform float darkness_feather = 0.04;
-instance uniform float darkness_root_y = 0.0;
-varying float darkness_local_y;
-void vertex() {
-    darkness_local_y = VERTEX.y - darkness_root_y;
-}
-#endif
 
 vec4 blend_base(vec2 uv, vec4 weights) {
     vec4 base = texture(base_texture, uv) * weights.r;
@@ -170,10 +159,6 @@ void fragment() {
 #elif MATERIAL_ALPHA_MODE == 2
     ALPHA = base.a * (use_vertex_alpha ? COLOR.a : 1.0);
 #endif
-#ifdef PLAYER_DARKNESS
-    ALPHA *= 1.0 - smoothstep(darkness_height - darkness_feather,
-                              darkness_height + darkness_feather, darkness_local_y);
-#endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
     SPECULAR = specular;
@@ -185,12 +170,10 @@ GODOT_CUSTOM_SHADER = """shader_type spatial;
 #include "majin_material_common.gdshaderinc"
 """
 
-PLAYER_DARKNESS_SHADER = """shader_type spatial;
-render_mode depth_prepass_alpha;
-#define MATERIAL_ALPHA_MODE 2
-#define PLAYER_DARKNESS
-#include "majin_material_common.gdshaderinc"
-"""
+# A separate shader prevents KbBase blending/color semantics leaking into tar.
+PLAYER_DARKNESS_SHADER = (
+    Path(__file__).resolve().parents[2] / "godot" / "utility" / "player_darkness.gdshader"
+).read_text(encoding="utf-8")
 PLAYER_DARKNESS_SHADER_FILE_NAME = "player_darkness.gdshader"
 
 GODOT_CUSTOM_CUTOUT_SHADER = GODOT_CUSTOM_SHADER.replace(
@@ -314,6 +297,7 @@ def _write_shader_material(
     switches: dict[str, bool],
     scalars: dict[str, float],
     colors: dict[str, list[float]] | None = None,
+    vectors: dict[str, list[float]] | None = None,
 ) -> None:
     resources = [("Shader", shader_reference, "1_shader")]
     texture_ids = {}
@@ -348,6 +332,10 @@ def _write_shader_material(
         f'shader_parameter/{name} = Color({value[0]:.9g}, {value[1]:.9g}, '
         f'{value[2]:.9g}, {value[3]:.9g})'
         for name, value in (colors or {}).items()
+    )
+    lines.extend(
+        f'shader_parameter/{name} = Vector4({value[0]:.9g}, {value[1]:.9g}, {value[2]:.9g}, {value[3]:.9g})'
+        for name, value in (vectors or {}).items()
     )
     lines.append("")
     path.write_text("\n".join(lines), encoding="ascii")
@@ -841,6 +829,7 @@ def write_godot_material_assets(
         while len(diffuse) < 3:
             diffuse.append(1.0)
         colors = {"albedo_modulate": [*map(float, diffuse), 1.0]}
+        vectors = {}
         if switches["use_detail"]:
             detail = material.get("detail") or {}
             scalars["detail_strength"] = float(detail.get("strength", 0.5))
@@ -864,6 +853,25 @@ def write_godot_material_assets(
             if material["index"] in darkness_material_indices([material]):
                 custom_shader = True
                 selected_custom_shader = f"{GODOT_UTILITY_DIR}/{PLAYER_DARKNESS_SHADER_FILE_NAME}"
+                # Tar has its own sampler and vertex-color semantics. Do not
+                # serialize KbBase blend/tint parameters into its resources.
+                uniforms = {key: value for key, value in uniforms.items()
+                            if key in {"base_texture", "normal_texture", "utility_texture", "env_sphere_texture"}}
+                switches = {key: value for key, value in switches.items()
+                            if key in {"use_normal_texture", "use_utility_texture", "use_env_sphere_texture"}}
+                switches["normal_texture_y_converted"] = "normal_texture" in uniforms
+                if "normal_texture" in uniforms:
+                    try:
+                        from .tar_assets import configure_vector_texture_import
+                    except ImportError:
+                        from tar_assets import configure_vector_texture_import
+                    configure_vector_texture_import(out_dir / uniforms["normal_texture"])
+                colors = {}
+                scalars = {}
+                # Original VS/CPU use these feature bits to flip T/B axes.
+                key = int((material.get("render_state") or {}).get("shader_key", "0"), 16)
+                vectors["mat_param1"] = [0.5, 0.0, -1.0 if key & 0x80 else 1.0,
+                                         -1.0 if key & 0x100 else 1.0]
         if foliage_shader:
             _write_foliage_material(
                 resource_path,
@@ -874,7 +882,7 @@ def write_godot_material_assets(
         elif custom_shader:
             _write_shader_material(
                 resource_path, selected_custom_shader, uniforms, switches, scalars,
-                colors,
+                colors, vectors,
             )
         else:
             _write_standard_material(
@@ -902,6 +910,7 @@ def write_godot_material_assets(
             "switches": switches,
             "scalars": scalars,
             "colors": colors,
+            "vectors": vectors,
             "blend_map": asset["path"] if asset else None,
             "detail": material.get("detail"),
             "render_state": material.get("render_state"),

@@ -60,7 +60,7 @@ class ShaderInspectTests(unittest.TestCase):
         struct.pack_into(">I", data, base + 0x50, 0x90)
         struct.pack_into(">II", data, base + 0x64, 0, 0x40)
         struct.pack_into(">IIII", data, base + 0x80,
-                         0x120, 0x00100401, 0, 0x160)
+                         0x120, 0x00100402, 0, 0x160)
         data[base + 0x100:base + 0x10C] = b"TestProgram\0"
         data[base + 0x120:base + 0x12B] = b"matParam0\0"
         data[base + 0x160:base + 0x16C] = bytes.fromhex(
@@ -70,6 +70,27 @@ class ShaderInspectTests(unittest.TestCase):
         parameter = inspect_shader(bytes(data))["programs"][0]["parameters"][0]
 
         self.assertEqual(parameter["fragment_constant_offsets"], [0x10, 0x30])
+
+    def test_relocation_count_does_not_consume_an_adjacent_uniform(self):
+        data = bytearray(0x400)
+        data[:4] = b'0bxf'
+        base = 0x80
+        data[base:base+4] = b'fxbf'
+        struct.pack_into('>H', data, base+6, 1)
+        struct.pack_into('>I', data, base+12, 0x200)
+        struct.pack_into('>II', data, base+0x18, 0x100, 0x40)
+        struct.pack_into('>I', data, base+0x44, 0x80)
+        struct.pack_into('>I', data, base+0x50, 0xA0)
+        struct.pack_into('>II', data, base+0x64, 0, 0x60)
+        struct.pack_into('>IIII', data, base+0x80, 0x120, 0x00100402, 0, 0x160)
+        struct.pack_into('>IIII', data, base+0x90, 0x130, 0x00100401, 1, 0x168)
+        data[base+0x100:base+0x10C] = b'TestProgram\0'
+        data[base+0x120:base+0x126] = b'first\0'
+        data[base+0x130:base+0x137] = b'second\0'
+        data[base+0x160:base+0x170] = bytes.fromhex('00100000 00300000 00500000 23232323')
+        parameters = inspect_shader(bytes(data))['programs'][0]['parameters']
+        self.assertEqual(parameters[0]['fragment_constant_offsets'], [0x10, 0x30])
+        self.assertEqual(parameters[1]['fragment_constant_offsets'], [0x50])
 
 
 if __name__ == "__main__":

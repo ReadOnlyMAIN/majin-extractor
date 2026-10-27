@@ -1,46 +1,104 @@
 @tool
 extends Node3D
-## Three equipment slots reconstructed from skin influences, not game unlock data.
-## Each piece keeps its own Skin and bind pose; common bones follow chr100 by name.
+## Gameplay/cinematic body families decoded from the original costume tables.
+## Visible bodies retain their complete geometry and their own tar surfaces.
 
 @export_dir var characters_directory := "res://original_files/decoded/chara"
-@export var head := "chr101":
+@export var cinematic_render := true:
+	set(value):
+		cinematic_render = value
+		if is_node_ready():
+			_equip_body()
+@export var body := "chr101":
+	set(value):
+		body = value
+		if is_node_ready():
+			_equip_body()
+@export var head := "none":
 	set(value):
 		head = value
 		if is_node_ready():
-			_equip("head", value)
-@export var torso := "chr101":
+			_equip_accessory("head", value)
+@export var bracelets := "none":
 	set(value):
-		torso = value
+		bracelets = value
 		if is_node_ready():
-			_equip("torso", value)
-@export var legs := "chr101":
-	set(value):
-		legs = value
-		if is_node_ready():
-			_equip("legs", value)
+			_equip_accessory("bracelets", value)
 
-# Pairs identified visually by the user. Later packages remain unclassified.
+# Cinematic -> gameplay, including the three additional source costume pairs.
 const ARMOR_PAIRS := {
 	"chr101": "chr100", "chr111": "chr110", "chr116": "chr115",
 	"chr121": "chr120", "chr126": "chr125", "chr131": "chr130",
-	"chr136": "chr135", "chr141": "chr140",
+	"chr136": "chr135", "chr141": "chr140", "chr151": "chr150",
+	"chr156": "chr155", "chr146": "chr145",
 }
 
-## Full health = clean; zero health = full height. The mapping is a preview
-## approximation; the game's exact health curve and feather are not decoded.
+## Health-to-mask mapping is a preview; the game's CPU PV->tarHP curve is unknown.
 @export_range(0.0, 1.0, 0.01) var health_ratio := 1.0:
 	set(value):
 		health_ratio = clampf(value, 0.0, 1.0)
 		_refresh_darkness()
-@export var darkness_height_range := Vector2(-0.1, 1.8):
+## Small depth separation for coincident clean/tar geometry, in meters.
+@export_range(0.0, 0.01, 0.0001) var darkness_depth_bias := 0.0:
 	set(value):
-		darkness_height_range = value
+		darkness_depth_bias = value
 		_refresh_darkness()
-@export_range(0.001, 0.2, 0.001) var darkness_feather := 0.04:
+## Width in vertex-mask units, not meters.
+@export_range(0.001, 1.0, 0.001) var darkness_mask_feather := 0.04:
 	set(value):
-		darkness_feather = value
+		darkness_mask_feather = value
 		_refresh_darkness()
+## Enable to inspect the original shader inputs independently of preview health.
+@export var use_original_tar_hp := false:
+	set(value):
+		use_original_tar_hp = value
+		_refresh_darkness()
+@export var tar_hp := Vector3(1.0, 1.0, 1.0):
+	set(value):
+		tar_hp = value
+		_refresh_darkness()
+
+@export var darkness_color := Color(0.02, 0.015, 0.025, 1.0):
+	set(value):
+		darkness_color = value
+		_refresh_darkness()
+@export_range(0.0, 2.0, 0.01) var darkness_reflection := 1.0:
+	set(value):
+		darkness_reflection = value
+		_refresh_darkness()
+@export_range(0.0, 2.0, 0.01) var darkness_normal_strength := 1.0:
+	set(value):
+		darkness_normal_strength = value
+		_refresh_darkness()
+@export var darkness_show_mask := false:
+	set(value):
+		darkness_show_mask = value
+		_refresh_darkness()
+## Scrolling is a preview speed; original animated uvOffset is unknown.
+@export var darkness_animate := true
+# Visual reference: at least 0.1. Source constructor 0.006 is not the final phase speed.
+@export_range(0.0, 2.0, 0.001) var darkness_flow_speed := 0.1
+@export_range(-360.0, 360.0, 1.0) var darkness_flow_angle := 90.0
+## Scene integration receives Godot shadows. Disable for original-uniform replay.
+@export var darkness_scene_lighting := true:
+	set(value):
+		darkness_scene_lighting = value
+		_refresh_tar_textures()
+## Optional original global samplers. Unset means disabled, no guessed binding.
+@export var darkness_tar_normal: Texture2D:
+	set(value):
+		darkness_tar_normal = value
+		_refresh_tar_textures()
+@export var darkness_noise: Texture2D:
+	set(value):
+		darkness_noise = value
+		_refresh_tar_textures()
+@export_range(0.0, 0.5, 0.01) var darkness_noise_strength := 0.15:
+	set(value):
+		darkness_noise_strength = value
+		_refresh_tar_textures()
+var _tar_phase := Vector2.ZERO
+var _tar_lighting: Dictionary = {}
 
 
 var _base: Node3D
@@ -51,7 +109,7 @@ var _catalog: Dictionary = {}
 
 func _ready() -> void:
 	for folder in DirAccess.get_directories_at(characters_directory):
-		if folder.length() == 6 and folder.begins_with("chr1") and folder.substr(3).is_valid_int():
+		if folder.length() == 6 and (folder.begins_with("chr1") or folder.begins_with("chr72") or folder.begins_with("chr74")) and folder.substr(3).is_valid_int():
 			var path := characters_directory.path_join(folder).path_join(folder + ".glb")
 			if ResourceLoader.exists(path):
 				_catalog[folder] = path
@@ -59,6 +117,7 @@ func _ready() -> void:
 	if not _catalog.has("chr100"):
 		push_warning("Player armor requires an exported chr100 in " + characters_directory)
 		return
+	_load_tar_globals()
 	_base = (load(_catalog["chr100"]) as PackedScene).instantiate()
 	add_child(_base)
 	_skeleton = _find_skeleton(_base)
@@ -68,26 +127,35 @@ func _ready() -> void:
 		push_error("chr100 has no Skeleton3D")
 		return
 	_skeleton.skeleton_updated.connect(_sync_poses)
-	_equip("head", head)
-	_equip("torso", torso)
-	_equip("legs", legs)
+	_equip_body()
+	_equip_accessory("head", head)
+	_equip_accessory("bracelets", bracelets)
 	_refresh_darkness.call_deferred()
 
 
 func _validate_property(property: Dictionary) -> void:
-	if property.name in ["head", "torso", "legs"]:
-		var names := available_armor()
+	if property.name in ["body", "head", "bracelets"]:
 		property.hint = PROPERTY_HINT_ENUM
-		property.hint_string = ",".join(names)
+		property.hint_string = ",".join(available_equipment(property.name))
 
 
-func available_armor() -> Array:
+func available_equipment(slot: String) -> Array[String]:
 	var names: Array[String] = []
-	for asset in ARMOR_PAIRS:
-		if _catalog.has(asset):
-			names.append(asset)
-	names.sort()
+	if slot == "body":
+		for asset in ARMOR_PAIRS:
+			if _catalog.has(asset) and _catalog.has(ARMOR_PAIRS[asset]):
+				names.append(asset)
+	else:
+		names.append("none")
+		var prefix := "chr72" if slot == "head" else "chr74"
+		for asset in _catalog:
+			if String(asset).begins_with(prefix):
+				names.append(asset)
 	return names
+
+
+func available_armor() -> Array[String]:
+	return available_equipment("body")
 
 
 func get_animation_player() -> AnimationPlayer:
@@ -106,78 +174,179 @@ func _find_skeleton(root: Node) -> Skeleton3D:
 	return null
 
 
-func _equip(slot: String, asset: String) -> void:
+func _remove_piece(key: String) -> void:
+	if _pieces.has(key):
+		var previous: Node = _pieces[key]
+		_pieces.erase(key)
+		remove_child(previous)
+		previous.queue_free()
+
+
+func _equip_body() -> void:
 	if not is_instance_valid(_skeleton):
 		return
-	# Accept older saved scenes that selected the contaminated package directly.
+	var selected := body
 	for clean in ARMOR_PAIRS:
-		if ARMOR_PAIRS[clean] == asset:
-			asset = clean
-	if not ARMOR_PAIRS.has(asset) or not _catalog.has(asset):
-		push_warning("Unclassified or missing armor: " + asset)
+		if ARMOR_PAIRS[clean] == selected:
+			selected = clean
+	if not ARMOR_PAIRS.has(selected):
+		push_warning("Unknown body costume: " + body)
 		return
-	_install_piece(slot, asset, "armor_" + slot)
-	var overlay_key := slot + "_darkness"
-	var overlay_asset: String = ARMOR_PAIRS[asset]
-	if _pieces.has(overlay_key):
-		var previous: Node = _pieces[overlay_key]
-		_pieces.erase(overlay_key)
-		if is_instance_valid(previous):
-			remove_child(previous)
-			previous.queue_free()
-	if _catalog.has(overlay_asset):
-		_install_piece(overlay_key, overlay_asset, "armor_" + overlay_key)
+	var asset: String = selected if cinematic_render else ARMOR_PAIRS[selected]
+	if not _catalog.has(asset):
+		push_warning("Missing body model: " + asset)
+		return
+	var piece := _new_piece(asset)
+	_remove_piece("body")
+	_pieces["body"] = piece
+	add_child(piece)
+	_prepare_tar_materials(piece)
+	_refresh_darkness()
+	_refresh_tar_textures()
+	_sync_poses()
+
+
+func _equip_accessory(slot: String, asset: String) -> void:
+	for key in _pieces.keys():
+		if key == slot or String(key).begins_with(slot + "_"):
+			_remove_piece(key)
+	if asset == "none" or not is_instance_valid(_skeleton):
+		return
+	var prefix := "chr72" if slot == "head" else "chr74"
+	if not asset.begins_with(prefix) or not _catalog.has(asset):
+		push_warning("Missing " + slot + " accessory: " + asset)
+		return
+	var sides := [""] if slot == "head" else ["positive", "negative"]
+	for side in sides:
+		var piece := _new_piece(asset)
+		var key: String = slot if side == "" else slot + "_" + side
+		_pieces[key] = piece
+		add_child(piece)
+		for mesh in piece.find_children("*", "MeshInstance3D", true, false):
+			var selected: bool = side == "" or String(mesh.name).begins_with("armor_bracelet_" + side)
+			mesh.visible = selected
+			mesh.set_meta("player_equipped_surface", selected)
+		_prepare_tar_materials(piece)
+	_refresh_tar_textures()
 	_refresh_darkness()
 	_sync_poses()
 
 
-func _install_piece(key: String, asset: String, mesh_name: String) -> void:
+func _new_piece(asset: String) -> Node3D:
 	var piece := (load(_catalog[asset]) as PackedScene).instantiate() as Node3D
-	var matching := false
-	for mesh in piece.find_children("*", "MeshInstance3D", true, false):
-		mesh.visible = String(mesh.name) == mesh_name
-		matching = matching or mesh.visible
-	if not matching:
-		piece.free()
-		push_warning(asset + " has no " + mesh_name + "; re-export or inspect its materials")
-		return
 	for animation in piece.find_children("*", "AnimationPlayer", true, false):
 		animation.active = false
-	if _pieces.has(key) and is_instance_valid(_pieces[key]):
-		remove_child(_pieces[key])
-		_pieces[key].queue_free()
-	_pieces[key] = piece
-	add_child(piece)
+	return piece
+
+
+func _tar_meshes() -> Array[MeshInstance3D]:
+	var result: Array[MeshInstance3D] = []
+	for piece in _pieces.values():
+		for mesh in piece.find_children("*", "MeshInstance3D", true, false):
+			if String(mesh.name).ends_with("_darkness") and mesh.get_meta("player_equipped_surface", true):
+				result.append(mesh)
+	return result
+
+
+func _prepare_tar_materials(piece: Node3D) -> void:
+	for mesh in piece.find_children("*", "MeshInstance3D", true, false):
+		if not String(mesh.name).ends_with("_darkness"):
+			continue
+		for index in range(mesh.mesh.get_surface_count()):
+			var material = mesh.get_active_material(index)
+			if material is ShaderMaterial:
+				mesh.set_surface_override_material(index, material.duplicate())
+
+
+func _load_tar_globals() -> void:
+	var directory := characters_directory.get_base_dir().path_join("tar_globals")
+	if darkness_tar_normal == null:
+		var path := directory.path_join("waterwave_n2.png")
+		if ResourceLoader.exists(path):
+			darkness_tar_normal = load(path) as Texture2D
+	if darkness_noise == null:
+		var path := directory.path_join("AmbientSphere3.png")
+		if ResourceLoader.exists(path):
+			darkness_noise = load(path) as Texture2D
+
+
+func _refresh_tar_textures() -> void:
+	if not is_node_ready():
+		return
+	for mesh in _tar_meshes():
+		for index in range(mesh.mesh.get_surface_count()):
+			var material = mesh.get_active_material(index)
+			if material is ShaderMaterial:
+				material.set_shader_parameter("use_scene_lights", darkness_scene_lighting)
+				material.set_shader_parameter("tar_normal_texture", darkness_tar_normal)
+				material.set_shader_parameter("use_tar_normal_texture", darkness_tar_normal != null)
+				material.set_shader_parameter("tar_noise_texture", darkness_noise)
+				material.set_shader_parameter("use_tar_noise_texture", darkness_noise != null)
+				material.set_shader_parameter("mat_param2", Vector4(0.0, 0.0, darkness_noise_strength, 0.0))
+				for parameter in _tar_lighting:
+					material.set_shader_parameter(parameter, _tar_lighting[parameter])
+
+
+func set_tar_lighting(frame: Dictionary) -> void:
+	# A scene adapter can provide the original frame uniforms without changing
+	# the shader equations or sharing mutable materials with another player.
+	if frame == _tar_lighting:
+		return
+	_tar_lighting = frame.duplicate()
+	_refresh_tar_textures()
+
+
+func _process(delta: float) -> void:
+	if darkness_animate and not Engine.is_editor_hint():
+		var direction := Vector2.from_angle(deg_to_rad(darkness_flow_angle))
+		_tar_phase += direction * delta * darkness_flow_speed
+		_tar_phase = Vector2(fposmod(_tar_phase.x, 1.0), fposmod(_tar_phase.y, 1.0))
+	_update_tar_frame()
+
+
+func _update_tar_frame() -> void:
+	if not is_instance_valid(_skeleton):
+		return
+	var root_world := _skeleton.to_global(_skeleton.get_bone_global_pose(0).origin)
+	for mesh in _tar_meshes():
+		mesh.set_instance_shader_parameter("tar_root_world", root_world)
+		mesh.set_instance_shader_parameter("tar_uv_offset", Vector4(0.0, 0.0, _tar_phase.x, _tar_phase.y))
 
 
 func _refresh_darkness() -> void:
 	if not is_node_ready():
 		return
-	var height := lerpf(darkness_height_range.x, darkness_height_range.y, 1.0 - health_ratio)
-	for key in _pieces:
-		if not String(key).ends_with("_darkness"):
-			continue
-		var piece: Node3D = _pieces[key]
-		if not is_instance_valid(piece):
-			continue
-		piece.visible = health_ratio < 1.0
-		for mesh in piece.find_children("*", "MeshInstance3D", true, false):
-			mesh.set_instance_shader_parameter("darkness_height", height)
-			mesh.set_instance_shader_parameter("darkness_feather", darkness_feather)
+	# The extra feather puts both endpoints outside/at the mask range:
+	# full health hides the overlay, zero health makes every mask value opaque.
+	var width := maxf(darkness_mask_feather, 0.001)
+	var cutoff := (1.0 - health_ratio) * (1.0 + width)
+	var parameters := tar_hp if use_original_tar_hp else Vector3(cutoff, cutoff - width, 1.0 / width)
+	for mesh in _tar_meshes():
+		mesh.visible = not cinematic_render and (darkness_show_mask or use_original_tar_hp or health_ratio < 1.0)
+		mesh.set_instance_shader_parameter("tar_depth_bias", darkness_depth_bias)
+		mesh.set_instance_shader_parameter("tar_hp", parameters)
+		mesh.set_instance_shader_parameter("tar_color", darkness_color)
+		mesh.set_instance_shader_parameter("tar_reflection_strength", darkness_reflection)
+		mesh.set_instance_shader_parameter("tar_normal_strength", darkness_normal_strength)
+		mesh.set_instance_shader_parameter("tar_show_mask", darkness_show_mask)
 
 
 func _sync_poses() -> void:
 	if not is_instance_valid(_skeleton) or not is_inside_tree():
 		return
-	var root_y := (_skeleton.get_bone_global_pose(0).origin.y
-		- _skeleton.get_bone_global_rest(0).origin.y)
 	for key in _pieces:
 		var piece = _pieces[key]
 		if not is_instance_valid(piece):
 			continue
-		if String(key).ends_with("_darkness"):
-			for mesh in piece.find_children("*", "MeshInstance3D", true, false):
-				mesh.set_instance_shader_parameter("darkness_root_y", root_y)
+		if key != "body":
+			# Keep accessory axes aligned with the model at rest, then follow the
+			# attachment bone's deformation rather than copying its bind axes.
+			var bone_name := "bone_101" if key == "head" else ("bone_013" if key == "bracelets_positive" else "bone_043")
+			var bone := _skeleton.find_bone(bone_name)
+			if bone >= 0:
+				var rest := _skeleton.get_bone_global_rest(bone)
+				piece.transform = _skeleton.transform * _skeleton.get_bone_global_pose(bone) * rest.affine_inverse() * Transform3D(Basis.IDENTITY, rest.origin)
+			continue
 		var target := _find_skeleton(piece)
 		if target == null:
 			continue
@@ -204,3 +373,4 @@ func _sync_poses() -> void:
 			target.set_bone_pose(index, parent_pose.affine_inverse() * desired)
 			for child in target.get_bone_children(index):
 				pending.append(child)
+	_update_tar_frame()
