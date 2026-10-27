@@ -593,7 +593,7 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
         'skeleton': roots[0] if len(roots) == 1 else roots[0],
     })
 
-    primitives = []
+    slot_primitives = defaultdict(list)
     surfaces = defaultdict(list)
     for part in mesh_parts:
         signature = tuple(
@@ -612,7 +612,7 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
             )
             for triangle in part['triangles']
         )
-        surfaces[signature].append(part)
+        surfaces[(part.get("armor_slot", ""), signature)].append(part)
     variant_indices = {}
     exported_triangle_count = 0
     for _surface_signature, surface_parts in surfaces.items():
@@ -684,11 +684,15 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
             }
             if 'KHR_materials_variants' not in doc.setdefault('extensionsUsed', []):
                 doc['extensionsUsed'].append('KHR_materials_variants')
-        primitives.append(primitive)
-    doc['meshes'].append({'name': f'{object_name}_mesh', 'primitives': primitives})
-    mesh_node = len(doc['nodes'])
-    doc['nodes'].append({'name': object_name, 'mesh': 0, 'skin': 0})
-    doc['scenes'][0]['nodes'] = roots + [mesh_node]
+        slot_primitives[surface_parts[0].get('armor_slot', '')].append(primitive)
+    mesh_nodes = []
+    for slot, group in slot_primitives.items():
+        name = f'armor_{slot}' if slot else object_name
+        mesh_index = len(doc['meshes'])
+        doc['meshes'].append({'name': name + '_mesh', 'primitives': group})
+        mesh_nodes.append(len(doc['nodes']))
+        doc['nodes'].append({'name': name, 'mesh': mesh_index, 'skin': 0})
+    doc['scenes'][0]['nodes'] = roots + mesh_nodes
 
     for clip_index, clip in enumerate(animations or []):
         gltf_animation = {
@@ -769,8 +773,8 @@ def write_skinned_glb(path, vertices, mesh_parts, materials, skeleton,
         stream.write(struct.pack('<I4s', len(binary), b'BIN\0'))
         stream.write(binary)
     return {
-        'object_count': 1,
-        'mesh_count': 1,
+        'object_count': len(mesh_nodes),
+        'mesh_count': len(doc['meshes']),
         'triangle_count': exported_triangle_count,
         'source_triangle_count': sum(len(part['triangles']) for part in mesh_parts),
         'joint_count': len(joints),

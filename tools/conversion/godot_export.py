@@ -73,6 +73,17 @@ uniform float reflection_strength : hint_range(0.0, 2.0, 0.01) = 1.0;
 uniform float roughness : hint_range(0.0, 1.0, 0.01);
 uniform float specular : hint_range(0.0, 1.0, 0.01) = 0.5;
 uniform vec4 albedo_modulate : source_color = vec4(1.0);
+#ifdef PLAYER_DARKNESS
+// Height is in character-local meters. A dedicated alpha variant keeps the
+// coverage control off ordinary materials and other instances of this armor.
+instance uniform float darkness_height = 10000.0;
+instance uniform float darkness_feather = 0.04;
+instance uniform float darkness_root_y = 0.0;
+varying float darkness_local_y;
+void vertex() {
+    darkness_local_y = VERTEX.y - darkness_root_y;
+}
+#endif
 
 vec4 blend_base(vec2 uv, vec4 weights) {
     vec4 base = texture(base_texture, uv) * weights.r;
@@ -159,6 +170,10 @@ void fragment() {
 #elif MATERIAL_ALPHA_MODE == 2
     ALPHA = base.a * (use_vertex_alpha ? COLOR.a : 1.0);
 #endif
+#ifdef PLAYER_DARKNESS
+    ALPHA *= 1.0 - smoothstep(darkness_height - darkness_feather,
+                              darkness_height + darkness_feather, darkness_local_y);
+#endif
     METALLIC = 0.0;
     ROUGHNESS = roughness;
     SPECULAR = specular;
@@ -169,6 +184,19 @@ GODOT_CUSTOM_SHADER = """shader_type spatial;
 #define MATERIAL_ALPHA_MODE 0
 #include "majin_material_common.gdshaderinc"
 """
+
+PLAYER_DARKNESS_SHADER = """shader_type spatial;
+render_mode depth_prepass_alpha;
+#define MATERIAL_ALPHA_MODE 2
+#define PLAYER_DARKNESS
+#include "majin_material_common.gdshaderinc"
+"""
+PLAYER_DARKNESS_SHADER_FILE_NAME = "player_darkness.gdshader"
+
+GODOT_CUSTOM_CUTOUT_SHADER = GODOT_CUSTOM_SHADER.replace(
+    'MATERIAL_ALPHA_MODE 0', 'MATERIAL_ALPHA_MODE 1')
+GODOT_CUSTOM_ALPHA_SHADER = GODOT_CUSTOM_SHADER.replace(
+    'MATERIAL_ALPHA_MODE 0', 'MATERIAL_ALPHA_MODE 2')
 
 GODOT_FOLIAGE_SHADER = """shader_type spatial;
 render_mode cull_disabled;
@@ -210,6 +238,8 @@ ROLE_TO_UNIFORM = {
 # ``godot/utility/`` only has to be installed once.
 GODOT_UTILITY_DIR = "res://majin_utility"
 CUSTOM_SHADER_FILE_NAME = "majin_multitexture.gdshader"
+CUSTOM_CUTOUT_SHADER_FILE_NAME = "majin_multitexture_cutout.gdshader"
+CUSTOM_ALPHA_SHADER_FILE_NAME = "majin_multitexture_alpha.gdshader"
 FOLIAGE_SHADER_FILE_NAME = "majin_foliage.gdshader"
 SHADER_COMMON_FILE_NAME = "majin_material_common.gdshaderinc"
 ASSIGN_SCRIPT_FILE_NAME = "assign_materials.gd"
@@ -228,9 +258,12 @@ def write_godot_utility(destination, overwrite=True):
     written = []
     for name, content in (
         (CUSTOM_SHADER_FILE_NAME, GODOT_CUSTOM_SHADER),
+        (CUSTOM_CUTOUT_SHADER_FILE_NAME, GODOT_CUSTOM_CUTOUT_SHADER),
+        (CUSTOM_ALPHA_SHADER_FILE_NAME, GODOT_CUSTOM_ALPHA_SHADER),
         (FOLIAGE_SHADER_FILE_NAME, GODOT_FOLIAGE_SHADER),
         (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
+        (PLAYER_DARKNESS_SHADER_FILE_NAME, PLAYER_DARKNESS_SHADER),
     ):
         path = destination / name
         if overwrite or not path.exists():
@@ -746,7 +779,8 @@ def write_godot_material_assets(
     # contain no vertex alpha information at all.
     has_source_vertex_alpha = _mesh_has_source_vertex_alpha(vertices, mesh_parts)
     blend_assets: dict[int, dict] = {}
-    if vertices and mesh_parts and len(materials) > 1 and not has_source_vertex_alpha:
+    if (asset_kind != "character" and vertices and mesh_parts
+            and len(materials) > 1 and not has_source_vertex_alpha):
         blend_assets = _build_blend_assets(
             out_dir, material_dir, materials, mesh_parts, vertices, scale, radius,
         )
@@ -818,6 +852,18 @@ def write_godot_material_assets(
         custom_shader = _requires_custom_shader(material, uniforms, use_blend)
         foliage_shader = _is_double_sided_cutout_foliage(material)
         render_mode = (material.get("render_state") or {}).get("mode", "opaque")
+        selected_custom_shader = {
+            "alpha_scissor": f"{GODOT_UTILITY_DIR}/{CUSTOM_CUTOUT_SHADER_FILE_NAME}",
+            "alpha_blend": f"{GODOT_UTILITY_DIR}/{CUSTOM_ALPHA_SHADER_FILE_NAME}",
+        }.get(render_mode, custom_shader_reference)
+        if asset_kind == "character":
+            try:
+                from .player_armor import darkness_material_indices
+            except ImportError:
+                from player_armor import darkness_material_indices
+            if material["index"] in darkness_material_indices([material]):
+                custom_shader = True
+                selected_custom_shader = f"{GODOT_UTILITY_DIR}/{PLAYER_DARKNESS_SHADER_FILE_NAME}"
         if foliage_shader:
             _write_foliage_material(
                 resource_path,
@@ -827,7 +873,7 @@ def write_godot_material_assets(
             )
         elif custom_shader:
             _write_shader_material(
-                resource_path, custom_shader_reference, uniforms, switches, scalars,
+                resource_path, selected_custom_shader, uniforms, switches, scalars,
                 colors,
             )
         else:
@@ -843,7 +889,7 @@ def write_godot_material_assets(
         material_resources.append(resource_path.relative_to(out_dir).as_posix())
         selected_shader = (
             foliage_shader_reference if foliage_shader
-            else custom_shader_reference if custom_shader
+            else selected_custom_shader if custom_shader
             else None
         )
         bindings.append({

@@ -88,6 +88,44 @@ _subresources={"nodes": {&"PATH:AnimationPlayer": {
             self.assertIn('animation/fps=30.0', updated)
             self.assertIn('animation/remove_immutable_tracks=false', updated)
 
+    def test_project_scene_preset_replaces_old_parameters_without_animation_overrides(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / 'project.godot').write_text('''config_version=5
+[importer_defaults]
+scene={"animation/fps": 60, "animation/remove_immutable_tracks": true,
+"gltf/embedded_image_handling": 0, "import_script/path": "uid://user_script",
+"_subresources": {"nodes": {"PATH:Mesh": {"custom": NodePath("keep/me")}}}}
+[rendering]
+renderer/rendering_method="gl_compatibility"
+''')
+            glb = project / 'original_files/decoded/model.glb'
+            glb.parent.mkdir(parents=True)
+            config = Path(str(glb) + '.import')
+            config.write_text('''[remap]
+importer="scene"
+uid="uid://keep_asset_identity"
+[params]
+gltf/embedded_image_handling=1
+import_script/path="res://old.gd"
+animation/fps=30
+old_override=true
+''')
+            result = write_animation_import_settings(glb)
+            updated = config.read_text()
+            self.assertEqual(result['preset'], 'importer_defaults/scene')
+            self.assertIn('uid="uid://keep_asset_identity"', updated)
+            self.assertIn('animation/fps=60', updated)
+            self.assertIn('animation/remove_immutable_tracks=true', updated)
+            self.assertIn('gltf/embedded_image_handling=0', updated)
+            self.assertIn('import_script/path="uid://user_script"', updated)
+            self.assertIn('NodePath("keep/me")', updated)
+            self.assertNotIn('optimizer/enabled', updated)
+            self.assertNotIn('old_override', updated)
+            self.assertNotIn('res://old.gd', updated)
+            write_animation_import_settings(glb)
+            self.assertEqual(config.read_text(), updated)
+
 
 class IKGeometryTests(unittest.TestCase):
     def test_two_bone_reach_preserves_lengths(self):

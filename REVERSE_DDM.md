@@ -1851,16 +1851,27 @@ already used for `chr300/301/...`.
 `find_skinned_geometry_header`; `chr500` changed from a hard failure to 22,000
 valid vertices / 23 parts with no change to any other character.
 
-### Multiple meshes per character file
+### Mixed rigid and weighted sections (corrected 2026-10-27)
 
-A character file can contain several groups (a main body plus weapons/props).
-`chr100` holds a 4-section group at `0x5d91` and a 14-section group at `0xe659`;
-`chr500` holds groups at `0x353e4`, `0x75a46` and more. All of them pass the
-weight gate and chain to the end (a later group's tail fills the file).
+Player files begin with a seven-attribute rigid section, using 24-byte vertices:
+position/color/UV followed by a little-endian u32 palette index with implicit
+unit weight. Eight-attribute sections instead use 28-byte vertices with four
+byte palette indices and four byte weights. Both layouts may occur in one group.
 
-The maintained decoder exports the group it finds first. Decoding **every**
-group (to include held weapons) is recorded as an open improvement in
-`ROADMAP.md`; it does not affect the skin correctness of the exported group.
+The old weighted-only detector started inside the group and treated the previous
+section's last bone-list entry as its section count. The supposed overlapping
+"groups" in chr100 were this detection artifact: the actual group starts at
+`0x4097`, has 16 sections and 13,515 vertices, and leaves a 16-byte file trailer.
+All 22 chr1xx packages now decode through their last section to that trailer.
+Material parsing also recognizes textureless `JRIG_MT` / `chr101_JRIG_MT`
+records, preserving the material indices in the equipment packages.
+
+Godot player GLBs expose three meshes, assigned by summed triangle skin
+influences: descendants of bone 101 form the head, descendants of bone 4 form
+the lower body, and remaining bones form the torso/arms. This is an inferred
+partition, not a decoded game equipment table; exact mixed-set seams and
+unlock/name metadata remain unverified. Character surfaces do not receive the
+terrain proximity-blending heuristic across clothing/skin boundaries.
 
 ### Joint matrix resolution must tolerate cycles (revised 2026-10-09)
 
@@ -1957,3 +1968,19 @@ all chr3x clips in the sweep) is dominated by the stride-controller triplets
 that the binder reads as leg rotations — the per-bone rule for those slots is
 the remaining unknown of plan step 4 (Euler order/composition cannot be
 demonstrated until the rotation slot mapping is exact).
+
+### Player armor and contamination pairs (2026-10-27)
+
+User visual inspection identifies clean/corrupted pairs:
+101/100, 111/110, 116/115, 121/120, 126/125, 131/130, 136/135, 141/140.
+Each package contains a whole outfit; this does not imply that gameplay equips
+the whole outfit as one item. The Godot exporter partitions the meshes into
+three inferred anatomical slots independently of these package pairs.
+
+The corrupted packages contain additional T_body/T_huku/Tbody/tar_* surfaces
+(and chr140T_body/chr140T_manto). These are treated as contamination overlays,
+not extra outfits. According to the user's observations, coverage progresses
+vertically in local Y as health falls. The Godot preview uses an adjustable
+local-Y alpha transition driven linearly by health_ratio. Its exact original
+curve, noise, and rendering constants are not recovered. The later chr1xx
+packages are not classified pending resolution of their material appearance.

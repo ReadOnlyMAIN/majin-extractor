@@ -167,9 +167,11 @@ Godot IK addon. `--ik off` exports the FK comparison.
 Each animated model writes `<name>.glb`, `<name>.glb.import` and `<name>.motion.json`, including with
 `--final`. The latter records source slots, named-state bindings, rejected or
 missing states, IK residuals/clamped targets and unresolved secondary controls.
-Copy the `.glb.import` companion with the model: it disables Godot animation
-simplification that would otherwise move baked IK endpoints. Existing UID,
-material scripts and unrelated import settings are preserved on re-export.
+When exporting into a Godot project, its saved default scene import preset is
+applied as defined, including embedded-image handling and the material import
+script. Existing resource UIDs are retained. Outside a project with an explicit
+preset, the `.glb.import` companion disables animation simplification that would
+otherwise move baked IK endpoints, preserving unrelated import settings.
 The larger `analysis.json` is omitted with `--final`. Positions are scaled by
 0.01 to meter-like units; `--scale` overrides this.
 

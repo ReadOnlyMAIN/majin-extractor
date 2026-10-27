@@ -102,26 +102,31 @@ Import réel Godot **4.7.2**, après réglages de fidélité :
 L'optimiseur d'import Godot déplaçait des effecteurs jusqu'à 1,5 cm sur les
 échantillons testés. `motion/godot.py` produit/actualise `<modèle>.glb.import`
 pour désactiver simplification, compression et suppression des pistes de repos.
-Il conserve UID, script de matériaux et autres paramètres, y compris les valeurs
-Variant natives des sous-ressources. **Copier ce fichier avec le GLB**.
+Sans preset de projet explicite, il conserve UID, script de matériaux et autres
+paramètres, y compris les valeurs Variant natives des sous-ressources. Dans un
+projet avec un preset d'import scène, **le preset utilisateur est prioritaire et
+appliqué intégralement**, sans overrides d'animation ; les UID restent conservés.
+Le preset actuel de `majin-godot` ignore les images intégrées aux GLB et utilise
+le script de matériaux du projet. Les 17 PNG extraits en double ont été retirés
+après comparaison des pixels et vérification des références. Le shader custom
+respecte désormais les modes alpha décodés, dont `chr200/plant` en alpha scissor.
 
 Projet indiqué par l'utilisateur : `/mnt/ssd990pro/Projects/Godot/majin-godot`.
 La configuration VS Code propose ce projet comme destination ; le convertisseur
 reste générique avec `--godot-project CHEMIN` (ou `--output-root CHEMIN`).
-Les imports préexistants de chr200/chr301 contiennent des changements utilisateur.
-Les nouveaux essais sont donc dans :
+Les essais et le debug utilisent désormais `res://animation_lab/animation_lab.tscn`,
+avec UI en nodes et thème personnalisé. Les personnages chr100, chr200, chr300,
+chr301, chr370 et chr540 ont été exportés ou réexportés à la demande de
+l'utilisateur dans `res://original_files/decoded/chara/` : 1 257 animations.
+Sélection, filtre, pause, scrubbing, squelette et suivi caméra optionnel ont été
+vérifiés via le MCP dans **Godot 4.8-dev7**. La caméra reste fixe par défaut.
+Les sources réutilisables et le détail des contrôles sont dans `godot/animation_lab/`.
+L'ancien dossier de validation daté a été supprimé à la demande de l'utilisateur.
 
-`original_files/decoded/animation_validation_20261027/preview_chr301.tscn`
-
-Cette scène a été exécutée dans le projet utilisateur avec **Godot 4.8-dev7**.
-L'export exact déposé a aussi passé l'import éditeur **4.8-dev7** : 140 animations,
-418 poses, erreur maximale des cibles sans bornage 0,99 µm.
-Elle permet sélection d'animation, pause, scrubbing, orbite et zoom. Elle charge le
-GLB via GLTFDocument pour fonctionner avant l'import éditeur. Les images
-repos/combat/rotation ont été inspectées, et une vidéo de déplacement est dans
-`output/research/chr301-walk.mp4` ; les données GLB avec leurs réglages
-ont aussi passé séparément l'importeur normal. Les fichiers utilisateur existants
-n'ont pas été remplacés.
+La validation précédente de chr301 par l'import éditeur **4.8-dev7** reste valable :
+140 animations, 418 poses, erreur maximale des cibles sans bornage 0,99 µm.
+La vidéo de déplacement précédente reste dans `output/research/chr301-walk.mp4`.
+Les matériaux de chr100 restent non résolus ; ce modèle apparaît sans textures.
 
 ## Ce qui reste réellement ouvert
 

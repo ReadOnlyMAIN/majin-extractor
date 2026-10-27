@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import re
+import shutil
 from pathlib import Path
 import subprocess
 import sys
+
+try:
+    from .motion.godot import apply_scene_import_preset
+except ImportError:
+    from motion.godot import apply_scene_import_preset
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -78,15 +85,44 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    # Equipment packages share the chr100 animation rig. Export the family
+    # together even when one chr1xx folder was selected.
+    player_family = re.fullmatch(r"chr1\d{2}", source.name) is not None and source.parent.name == "chara"
+    sources = sorted(folder for folder in source.parent.glob("chr1[0-9][0-9]")
+                     if folder.is_dir()) if player_family else [source]
     if not args.dry_run:
         output_folder.mkdir(parents=True, exist_ok=True)
-    run([
-        sys.executable, str(DDM_CONVERTER), str(source), str(output_folder.parent),
-        "--recursive", "--final", "--material-mode", "godot",
-        "--object-mode", "auto", "--scale", "0.01",
-        "--texture-root", str(kb_root),
-        "--animations", args.animations, "--ik", args.ik,
-    ], dry_run=args.dry_run)
+    for folder in sources:
+        run([
+            sys.executable, str(DDM_CONVERTER), str(folder), str(output_folder.parent),
+            "--recursive", "--final", "--material-mode", "godot",
+            "--object-mode", "auto", "--scale", "0.01",
+            "--texture-root", str(kb_root),
+            "--animations", args.animations if folder.name == "chr100" or not player_family else "none",
+            "--ik", args.ik,
+        ], dry_run=args.dry_run)
+        if args.godot_project and not args.dry_run:
+            for glb in sorted((output_folder.parent / folder.name).rglob('*.glb')):
+                apply_scene_import_preset(glb, args.godot_project)
+
+    if player_family:
+        scene = output_folder.parent / "chr1.tscn"
+        print(f"Player armor scene: {scene}")
+        if not args.dry_run:
+            script = PROJECT_ROOT / "godot/utility/player_armor.gd"
+            shutil.copyfile(script, scene.with_name("player_armor.gd"))
+            # Relative paths work when output/decoded is later copied into Godot.
+            scene.write_text(
+                '[gd_scene load_steps=2 format=3]\n\n'
+                '[ext_resource type="Script" path="player_armor.gd" id="1"]\n\n'
+                '[node name="chr1" type="Node3D"]\nscript = ExtResource("1")\n'
+                'characters_directory = "res://original_files/decoded/chara"\n',
+                encoding="utf-8")
+            if args.godot_project:
+                relative = scene.parent.relative_to(args.godot_project.resolve())
+                scene.write_text(scene.read_text().replace(
+                    'res://original_files/decoded/chara', 'res://' + relative.as_posix()),
+                    encoding="utf-8")
 
     if foliage_source is None:
         print(f"No *_ins table found in {source}; foliage export skipped.")

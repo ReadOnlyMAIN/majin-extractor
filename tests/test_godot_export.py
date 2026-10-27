@@ -98,6 +98,17 @@ class GodotExportTests(unittest.TestCase):
             self.assertIn("shader_parameter/detail_texture", tres)
             self.assertIn("shader_parameter/use_detail = true", tres)
 
+    def test_player_darkness_uses_height_shader_without_changing_clean_material(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            materials = [dict(index=0, name='T_body', textures=[]),
+                         dict(index=1, name='body', textures=[])]
+            result = write_godot_material_assets(out, materials, {}, asset_kind='character')
+            bindings = json.loads((out / result['manifest']).read_text())['materials']
+            self.assertEqual(bindings[0]['shader'], 'res://majin_utility/player_darkness.gdshader')
+            self.assertEqual(bindings[0]['material_type'], 'ShaderMaterial')
+            self.assertIsNone(bindings[1]['shader'])
+
     def _triangle(self, vertices, material_index, positions):
         base = len(vertices)
         for position in positions:
@@ -281,6 +292,28 @@ class GodotExportTests(unittest.TestCase):
             tres = (out / entry["material_resource"]).read_text()
             self.assertIn("majin_multitexture.gdshader", tres)
             self.assertIn("shader_parameter/secondary_texture", tres)
+
+    def test_custom_materials_keep_decoded_alpha_mode_and_utility_texture(self):
+        with tempfile.TemporaryDirectory() as root:
+            materials = [{
+                "index": index, "name": "plant" if index == 1 else f"material_{index}",
+                "render_state": {"mode": mode},
+                "textures": [
+                    {"role": "diffuse", "output": "textures/albedo.png"},
+                    {"role": "utility_mask", "output": "textures/utility.png"},
+                ],
+            } for index, mode in enumerate(("opaque", "alpha_scissor", "alpha_blend"))]
+            out = Path(root)
+            result = write_godot_material_assets(out, materials, {})
+            entries = json.loads((out / result["manifest"]).read_text())["materials"]
+            expected = ("majin_multitexture.gdshader", "majin_multitexture_cutout.gdshader",
+                        "majin_multitexture_alpha.gdshader")
+            for entry, shader in zip(entries, expected):
+                self.assertTrue(entry["shader"].endswith('/' + shader))
+                resource = (out / entry["material_resource"]).read_text()
+                self.assertIn(shader, resource)
+                self.assertIn("shader_parameter/utility_texture", resource)
+                self.assertTrue(entry["switches"]["use_utility_texture"])
 
     def test_cutout_foliage_uses_two_sided_albedo_only_shader(self):
         with tempfile.TemporaryDirectory() as root:
@@ -497,6 +530,9 @@ class GodotUtilityTests(unittest.TestCase):
                 "majin_foliage.gdshader",
                 "majin_material_common.gdshaderinc",
                 "majin_multitexture.gdshader",
+                "majin_multitexture_alpha.gdshader",
+                "majin_multitexture_cutout.gdshader",
+                "player_darkness.gdshader",
             ])
             shader = (destination / "majin_multitexture.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()

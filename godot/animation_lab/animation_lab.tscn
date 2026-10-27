@@ -1,0 +1,232 @@
+[gd_scene format=3 uid="uid://b0wjffh47kcap"]
+
+[ext_resource type="Script" uid="uid://cluiik6t67sp5" path="res://animation_lab/animation_lab.gd" id="1_0pbvb"]
+[ext_resource type="Theme" uid="uid://dho661awkafea" path="res://animation_lab/theme.tres" id="2_dxbl5"]
+
+[sub_resource type="Environment" id="Environment_asitr"]
+background_mode = 1
+background_color = Color(0.08235294, 0.11372549, 0.16862746, 1)
+ambient_light_source = 3
+ambient_light_color = Color(0.78431374, 0.8627451, 1, 1)
+ambient_light_energy = 0.7
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_0pbvb"]
+albedo_color = Color(0.16078432, 0.21176471, 0.2901961, 1)
+roughness = 0.9
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_dxbl5"]
+size = Vector2(200, 200)
+
+[node name="AnimationLab" type="Node3D" unique_id=132059287]
+script = ExtResource("1_0pbvb")
+
+[node name="ModelRoot" type="Node3D" parent="." unique_id=213243743]
+
+[node name="Camera" type="Camera3D" parent="." unique_id=2015038948]
+current = true
+fov = 42.0
+
+[node name="KeyLight" type="DirectionalLight3D" parent="." unique_id=1322567216]
+transform = Transform3D(0.87758255, 0.34391883, -0.334019, 0, 0.6967067, 0.7173561, 0.47942555, -0.6295392, 0.61141765, 0, 0, 0)
+light_energy = 1.4
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=556975136]
+environment = SubResource("Environment_asitr")
+
+[node name="Ground" type="MeshInstance3D" parent="." unique_id=1871567961]
+material_override = SubResource("StandardMaterial3D_0pbvb")
+mesh = SubResource("PlaneMesh_dxbl5")
+
+[node name="SkeletonOverlay" type="MeshInstance3D" parent="." unique_id=127790140]
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=55334129]
+
+[node name="Panel" type="PanelContainer" parent="UI" unique_id=949024477]
+custom_minimum_size = Vector2(380, 0)
+anchors_preset = 9
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 20.0
+offset_bottom = -20.0
+theme = ExtResource("2_dxbl5")
+
+[node name="Scroll" type="ScrollContainer" parent="UI/Panel" unique_id=1574275474]
+layout_mode = 2
+
+[node name="Margin" type="MarginContainer" parent="UI/Panel/Scroll" unique_id=1672723570]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 18
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 18
+
+[node name="Controls" type="VBoxContainer" parent="UI/Panel/Scroll/Margin" unique_id=707895480]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Title" type="Label" parent="UI/Panel/Scroll/Margin/Controls" unique_id=934100469]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "MAJIN  /  ANIMATION LAB"
+
+[node name="Character" type="OptionButton" parent="UI/Panel/Scroll/Margin/Controls" unique_id=2026574410]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Refresh" type="Button" parent="UI/Panel/Scroll/Margin/Controls" unique_id=838455003]
+layout_mode = 2
+text = "Refresh characters"
+
+[node name="Filter" type="LineEdit" parent="UI/Panel/Scroll/Margin/Controls" unique_id=87471547]
+layout_mode = 2
+placeholder_text = "Filter animations…"
+
+[node name="Unnamed" type="CheckButton" parent="UI/Panel/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Show unnamed segments"
+
+[node name="Animations" type="ItemList" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1425641310]
+custom_minimum_size = Vector2(320, 120)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Playback" type="HBoxContainer" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1012580622]
+layout_mode = 2
+
+[node name="Play" type="Button" parent="UI/Panel/Scroll/Margin/Controls/Playback" unique_id=1509567591]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Pause"
+
+[node name="Restart" type="Button" parent="UI/Panel/Scroll/Margin/Controls/Playback" unique_id=1711522008]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Restart"
+
+[node name="Timeline" type="HSlider" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1898182548]
+layout_mode = 2
+max_value = 1.0
+step = 0.001
+
+[node name="Time" type="Label" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1787679945]
+layout_mode = 2
+text = "0.00 / 0.00 s"
+
+[node name="Rate" type="HBoxContainer" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1479603614]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="UI/Panel/Scroll/Margin/Controls/Rate" unique_id=272615087]
+layout_mode = 2
+text = "Speed"
+
+[node name="Speed" type="SpinBox" parent="UI/Panel/Scroll/Margin/Controls/Rate" unique_id=1703104181]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 0.1
+max_value = 3.0
+step = 0.1
+value = 1.0
+suffix = "×"
+
+[node name="Options" type="HBoxContainer" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1302572127]
+layout_mode = 2
+
+[node name="Loop" type="CheckButton" parent="UI/Panel/Scroll/Margin/Controls/Options" unique_id=586960411]
+layout_mode = 2
+button_pressed = true
+text = "Loop"
+
+[node name="Bones" type="CheckButton" parent="UI/Panel/Scroll/Margin/Controls/Options" unique_id=268586683]
+layout_mode = 2
+text = "Skeleton"
+
+[node name="Follow" type="CheckButton" parent="UI/Panel/Scroll/Margin/Controls/Options" unique_id=134093429]
+layout_mode = 2
+text = "Follow"
+
+[node name="Frame" type="Button" parent="UI/Panel/Scroll/Margin/Controls" unique_id=458155346]
+layout_mode = 2
+text = "Frame character"
+
+[node name="Info" type="Label" parent="UI/Panel/Scroll/Margin/Controls" unique_id=1297950404]
+layout_mode = 2
+text = "Scanning for models…"
+autowrap_mode = 2
+
+[node name="Help" type="Label" parent="UI/Panel/Scroll/Margin/Controls" unique_id=2142946676]
+layout_mode = 2
+theme_override_font_sizes/font_size = 12
+text = "Right-drag: orbit · Wheel: zoom
+IK baked into exported animation tracks"
+
+[node name="ViewportTitle" type="Label" parent="UI" unique_id=2020695938]
+offset_left = 430.0
+offset_top = 24.0
+theme_override_font_sizes/font_size = 16
+text = "TRS DECODER  /  BAKED IK  /  30 FPS"
+
+[node name="Customization" type="PanelContainer" parent="UI"]
+visible = false
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -330.0
+offset_top = 20.0
+offset_right = -20.0
+theme = ExtResource("2_dxbl5")
+
+[node name="Margin" type="MarginContainer" parent="UI/Customization"]
+layout_mode = 2
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 18
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 18
+
+[node name="Controls" type="VBoxContainer" parent="UI/Customization/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+text = "CHR1 / CUSTOMIZATION"
+
+[node name="HeadLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+text = "Head"
+
+[node name="Head" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+
+[node name="TorsoLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+text = "Torso and arms"
+
+[node name="Torso" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+
+[node name="LegsLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+text = "Legs"
+
+[node name="Legs" type="OptionButton" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+
+[node name="HealthLabel" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+text = "Health: 100%"
+
+[node name="Health" type="HSlider" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+min_value = 0.0
+max_value = 1.0
+step = 0.01
+value = 1.0
+
+[node name="Note" type="Label" parent="UI/Customization/Margin/Controls"]
+layout_mode = 2
+custom_minimum_size = Vector2(260, 0)
+text = "Lower health raises darkness.\nCoverage is a reconstruction; original tar shading is still under study."
+autowrap_mode = 2

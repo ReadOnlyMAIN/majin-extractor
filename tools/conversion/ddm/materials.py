@@ -45,7 +45,9 @@ def parse_materials(data: bytes, end: int, expected_count: int):
     """Parse the observed material-name/texture-reference string skeleton.
 
     A material name is immediately followed by its first texture string. The
-    uint32 before the first material name is the material count.
+    uint32 before the first material name is the material count. The observed
+    JRIG_MT rig material (sometimes prefixed by an asset ID) has no texture
+    strings, but still occupies a material index in player equipment files.
     """
     strings = extract_length_prefixed_strings(data, end)
     if expected_count <= 0:
@@ -54,7 +56,8 @@ def parse_materials(data: bytes, end: int, expected_count: int):
     first_string_index = None
     for i in range(len(strings) - 1):
         item = strings[i]
-        if item["end"] != strings[i + 1]["offset"]:
+        if (item["end"] != strings[i + 1]["offset"]
+                and not item["text"].endswith("JRIG_MT")):
             continue
         if item["offset"] < 4:
             continue
@@ -67,7 +70,8 @@ def parse_materials(data: bytes, end: int, expected_count: int):
 
     material_string_indices = []
     for i in range(first_string_index, len(strings) - 1):
-        if strings[i]["end"] == strings[i + 1]["offset"]:
+        if (strings[i]["end"] == strings[i + 1]["offset"]
+                or strings[i]["text"].endswith("JRIG_MT")):
             material_string_indices.append(i)
             if len(material_string_indices) == expected_count:
                 break

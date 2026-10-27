@@ -53,19 +53,18 @@ def _skinned_first_vertex_weight_sum(data, offset, vertices, indices, palette_si
 
 
 def find_skinned_geometry_header(data: bytes):
-    """Identify the observed eight-attribute character layout.
+    """Find a skin group beginning with a rigid (7) or weighted (8) section.
 
-    Unlike the supported static layout, this header begins with the buffer
-    count and includes an explicit vertex stride. Detection is deliberately
-    strict so arbitrary metadata is never mislabeled as skinned geometry. The
-    attribute-count word also appears inside real vertex data, so a candidate is
-    only accepted when its first vertex keeps the 255-sum weight invariant; this
-    rejects false positives such as chr500's first ``u32 == 8``.
+    Rigid vertices have a little-endian u32 palette index and implicit unit
+    weight. Weighted vertices have four byte indices and weights summing to
+    255. Missing the rigid layout can select a later section and mistake the
+    preceding bone-list entry for the group section count (notably chr1xx).
     """
-    signature = struct.pack(">I", 8)
+    signature = (struct.pack(">I", 7), struct.pack(">I", 8))
     search = 8
     while True:
-        attribute_offset = data.find(signature, search)
+        candidates = [data.find(value, search) for value in signature]
+        attribute_offset = min((value for value in candidates if value >= 0), default=-1)
         if attribute_offset < 0:
             return None
         search = attribute_offset + 1
@@ -78,16 +77,21 @@ def find_skinned_geometry_header(data: bytes):
         if (
             1 <= sections <= 64
             and 1 <= submeshes <= 64
-            and attributes == 8
+            and attributes in (7, 8)
             and 3 <= vertices <= 1_000_000
             and 1 <= palette_size <= 256
             and 3 <= indices <= 10_000_000
-            and offset + 24 + indices * 2 + vertices * 44 <= len(data)
+            and offset + 24 + indices * 2 + vertices * (40 if attributes == 7 else 44) <= len(data)
         ):
             weight_sum = _skinned_first_vertex_weight_sum(
                 data, offset, vertices, indices, palette_size,
             )
-            if weight_sum != 255:
+            if attributes == 7:
+                cursor = offset + 24 + indices * 2 + vertices * 16
+                rigid_index = int.from_bytes(data[cursor + 20:cursor + 24], "little")
+                if rigid_index >= palette_size:
+                    continue
+            elif weight_sum != 255:
                 continue
             return {
                 "offset": offset,
@@ -96,7 +100,7 @@ def find_skinned_geometry_header(data: bytes):
                 "vertex_attribute_count": attributes,
                 "vertex_count": vertices,
                 "bone_palette_count": palette_size,
-                "vertex_stride": 28,
+                "vertex_stride": 24 if attributes == 7 else 28,
                 "index_count": indices,
             }
 
@@ -207,7 +211,7 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
 
 
 def decode_skinned_geometry(data: bytes, header, skeleton):
-    """Decode all 8-attribute sections following a skinned geometry group."""
+    """Decode mixed rigid and weighted sections in a skinned geometry group."""
     group_offset = header["offset"]
     section_count = be_u32(data, group_offset)
     if not 1 <= section_count <= 64:
@@ -230,7 +234,7 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
         )
         section_offset = cursor
         cursor += 20
-        if attributes != 8 or not vertex_count or not index_count:
+        if attributes not in (7, 8) or not vertex_count or not index_count:
             raise RuntimeError(
                 f"Unsupported skinned section layout at 0x{section_offset:X}."
             )
@@ -245,14 +249,18 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
         position_offset = cursor
         section_vertices = []
         for local_index in range(vertex_count):
-            offset = cursor + local_index * 28
-            if offset + 28 > len(data):
+            stride = 24 if attributes == 7 else 28
+            offset = cursor + local_index * stride
+            if offset + stride > len(data):
                 raise RuntimeError("Skinned vertex buffer exceeds the file.")
             position = struct.unpack_from(">3f", data, offset)
             color = be_u32(data, offset + 12)
             uv = decode_half2_be(data, offset + 16)
             palette_indices = tuple(data[offset + 20:offset + 24])
             raw_weights = tuple(data[offset + 24:offset + 28])
+            if attributes == 7:
+                palette_indices = (int.from_bytes(data[offset + 20:offset + 24], "little"), 0, 0, 0)
+                raw_weights = (255, 0, 0, 0)
             if sum(raw_weights) != 255:
                 raise RuntimeError(
                     f"Skinned vertex {local_index} weights sum to {sum(raw_weights)}."
@@ -268,7 +276,7 @@ def decode_skinned_geometry(data: bytes, header, skeleton):
                 "joint_palette_indices": palette_indices,
                 "weights": tuple(value / 255.0 for value in raw_weights),
             })
-        cursor += vertex_count * 28
+        cursor += vertex_count * (24 if attributes == 7 else 28)
         if cursor + palette_count * 4 > len(data):
             raise RuntimeError("Skinned bone palette exceeds the file.")
         palette_ids = struct.unpack_from(">" + "I" * palette_count, data, cursor)
@@ -410,6 +418,13 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             }
             for index in range(material_count)
         ]
+    if uses_godot_materials(args):
+        try:
+            from ..player_armor import is_player_asset, partition_player_parts
+        except ImportError:
+            from player_armor import is_player_asset, partition_player_parts
+        if is_player_asset(path.stem):
+            mesh_parts = partition_player_parts(vertices, mesh_parts, skeleton, materials)
     image_data = {}
     if not args.no_textures:
         with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:

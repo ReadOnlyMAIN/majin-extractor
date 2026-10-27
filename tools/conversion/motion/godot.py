@@ -129,23 +129,66 @@ def _update_parameters(body, frame_rate):
     return body + '\n_subresources=' + updated + '\n'
 
 
-def write_animation_import_settings(glb_path: Path, frame_rate: float = 30.0) -> dict:
-    """Seed Godot's import config without simplifying baked joint constraints.
+def _project_scene_preset(glb_path, project_path=None):
+    if project_path is None:
+        project_path = next((parent for parent in Path(glb_path).resolve().parents
+                             if (parent / 'project.godot').is_file()), None)
+    if project_path is None:
+        return None
+    project_file = Path(project_path) / 'project.godot'
+    text = project_file.read_text(encoding='utf-8')
+    section = re.search(r'^\[importer_defaults\][ \t]*\n(.*?)(?=^\[|\Z)',
+                        text, re.MULTILINE | re.DOTALL)
+    if section is None:
+        return None
+    match = re.search(r'^scene\s*=\s*', section[1], re.MULTILINE)
+    if match is None:
+        return None
+    start = match.end()
+    if section[1][start:start+1] != '{':
+        raise ValueError(f'expected scene import preset dictionary in {project_file}')
+    raw = section[1][start:_container_end(section[1], start)]
+    entries = _dictionary_entries(raw)
+    body = '\n' + '\n'.join(f'{key}={raw[a:b]}' for key, (a, b) in entries.items()) + '\n'
+    return body
 
-    Godot fills UID/cache paths itself on first import. Existing project import
-    settings are preserved, including material scripts and external resources.
-    Copy this companion with the GLB when importing into a fresh project.
-    """
-    destination = Path(str(glb_path) + ".import")
+
+def _write_import_parameters(glb_path, update):
+    destination = Path(str(glb_path) + '.import')
     existed = destination.exists()
     text = destination.read_text(encoding='utf-8') if existed else (
         '[remap]\nimporter="scene"\ntype="PackedScene"\n\n[params]\n')
     section = re.search(r'^\[params\][ \t]*\n(.*?)(?=^\[|\Z)', text, re.MULTILINE | re.DOTALL)
     if section is None:
         raise ValueError(f'missing params section in {destination}')
-    updated = _update_parameters(section[1], frame_rate)
-    result = text[:section.start(1)] + updated + text[section.end(1):]
+    result = text[:section.start(1)] + update(section[1]) + text[section.end(1):]
     if result != text:
         destination.write_text(result, encoding='utf-8')
     return {"file": destination.name, "created": not existed,
             "updated": existed and result != text, "preserved_existing": existed}
+
+
+def apply_scene_import_preset(glb_path: Path, project_path=None) -> dict | None:
+    """Apply the project's complete scene preset, retaining resource identity.
+
+    Values are copied as Godot Variants, including UID references and native
+    subresources. No animation overrides are added to an explicit user preset.
+    """
+    preset = _project_scene_preset(glb_path, project_path)
+    if preset is None:
+        return None
+    result = _write_import_parameters(glb_path, lambda _body: preset)
+    result.update(preset='importer_defaults/scene', preserved_existing=False)
+    return result
+
+
+def write_animation_import_settings(glb_path: Path, frame_rate: float = 30.0) -> dict:
+    """Seed Godot's import config without simplifying baked joint constraints.
+
+    An explicit project preset takes precedence over decoder recommendations.
+    Without one, preserve existing customizations and disable simplification.
+    """
+    preset = apply_scene_import_preset(glb_path)
+    if preset is not None:
+        return preset
+    return _write_import_parameters(glb_path, lambda body: _update_parameters(body, frame_rate))

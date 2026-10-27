@@ -263,7 +263,7 @@
             "id": "animatedGlb",
             "type": "promptString",
             "description": "Exported GLB with adjacent .motion.json report",
-            "default": "/mnt/ssd990pro/Projects/Godot/majin-godot/original_files/decoded/animation_validation_20261027/chr301/chr301.glb"
+            "default": "/mnt/ssd990pro/Projects/Godot/majin-godot/original_files/decoded/chara/chr301/chr301.glb"
         },
         {
             "id": "godotExecutable",
