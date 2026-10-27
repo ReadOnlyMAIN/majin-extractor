@@ -118,8 +118,13 @@ func _ready() -> void:
 		push_warning("Player armor requires an exported chr100 in " + characters_directory)
 		return
 	_load_tar_globals()
-	_base = (load(_catalog["chr100"]) as PackedScene).instantiate()
-	add_child(_base)
+	# The serialized rig exposes its AnimationPlayer to AnimationTree's editor.
+	# Keep the fallback for scenes generated before AnimationRig was included.
+	_base = get_node_or_null("AnimationRig") as Node3D
+	if _base == null:
+		_base = (load(_catalog["chr100"]) as PackedScene).instantiate()
+		_base.name = "AnimationRig"
+		add_child(_base)
 	_skeleton = _find_skeleton(_base)
 	for mesh in _base.find_children("*", "MeshInstance3D", true, false):
 		mesh.hide()
@@ -159,9 +164,14 @@ func available_armor() -> Array[String]:
 
 
 func get_animation_player() -> AnimationPlayer:
-	if _base == null:
+	var rig := _base if is_instance_valid(_base) else get_node_or_null("AnimationRig")
+	if rig == null:
 		return null
-	return _base.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	return rig.find_child("AnimationPlayer", true, false) as AnimationPlayer
+
+
+func get_animation_tree() -> AnimationTree:
+	return get_node_or_null("AnimationTree") as AnimationTree
 
 
 func _find_skeleton(root: Node) -> Skeleton3D:

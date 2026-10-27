@@ -92,6 +92,11 @@ class ExportFolderToGodotTests(unittest.TestCase):
                               for command in commands], ['all', 'none', 'none', 'none', 'none'])
             self.assertTrue((output / 'chara/chr1.tscn').is_file())
             self.assertTrue((output / 'chara/player_armor.gd').is_file())
+            scene = (output / 'chara/chr1.tscn').read_text()
+            self.assertIn('path="chr100/chr100.glb"', scene)
+            self.assertIn('[node name="AnimationRig"', scene)
+            self.assertIn('[node name="AnimationTree"', scene)
+            self.assertIn('anim_player = NodePath("../AnimationRig/AnimationPlayer")', scene)
 
     def test_destination_can_be_a_selected_godot_project(self):
         with tempfile.TemporaryDirectory() as directory:

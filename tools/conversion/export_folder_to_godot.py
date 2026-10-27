@@ -122,12 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             script = PROJECT_ROOT / "godot/utility/player_armor.gd"
             shutil.copyfile(script, scene.with_name("player_armor.gd"))
             # Relative paths work when output/decoded is later copied into Godot.
-            scene.write_text(
-                '[gd_scene load_steps=2 format=3]\n\n'
-                '[ext_resource type="Script" path="player_armor.gd" id="1"]\n\n'
-                '[node name="chr1" type="Node3D"]\nscript = ExtResource("1")\n'
-                'characters_directory = "res://original_files/decoded/chara"\n',
-                encoding="utf-8")
+            shutil.copyfile(PROJECT_ROOT / "godot/utility/chr1.tscn", scene)
             if args.godot_project:
                 relative = scene.parent.relative_to(args.godot_project.resolve())
                 scene.write_text(scene.read_text().replace(

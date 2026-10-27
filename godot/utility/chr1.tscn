@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="player_armor.gd" id="1"]
+[ext_resource type="PackedScene" path="chr100/chr100.glb" id="2_rig"]
+
+[sub_resource type="AnimationNodeStateMachine" id="StateMachine"]
+
+[node name="chr1" type="Node3D"]
+script = ExtResource("1")
+characters_directory = "res://original_files/decoded/chara"
+
+[node name="AnimationRig" parent="." instance=ExtResource("2_rig")]
+visible = false
+
+[node name="AnimationTree" type="AnimationTree" parent="."]
+root_node = NodePath("../AnimationRig")
+tree_root = SubResource("StateMachine")
+anim_player = NodePath("../AnimationRig/AnimationPlayer")
+active = false
