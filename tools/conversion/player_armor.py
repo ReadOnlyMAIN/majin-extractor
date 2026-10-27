@@ -70,3 +70,20 @@ def partition_player_render_parts(parts, materials, vertices=None, bracelets=Fal
         else:
             result.append(dict(part, armor_slot="body" + suffix))
     return result
+
+
+def apply_player_material_policy(materials, asset_name):
+    """Do not treat an unconfirmed legacy triplet as a textured player tint.
+
+    KbBaseP28 shader reflection exposes no diffuse-color uniform. The source
+    triplet differs between gameplay and cinematic bodies even with identical
+    albedo images (chr100/101, chr110/111). Preserve it as evidence, not a tint.
+    """
+    if not is_player_asset(asset_name):
+        return
+    for material in materials:
+        estimate = material.get('pbr_estimate')
+        if estimate and material.get('texture_references'):
+            estimate['legacy_diffuse_candidate'] = estimate.get('diffuse')
+            estimate['diffuse'] = [1.0, 1.0, 1.0]
+            estimate['diffuse_source'] = 'player_texture_rgb_without_unverified_legacy_tint'

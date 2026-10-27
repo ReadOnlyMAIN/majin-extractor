@@ -341,7 +341,7 @@ func _sync_poses() -> void:
 		if key != "body":
 			# Keep accessory axes aligned with the model at rest, then follow the
 			# attachment bone's deformation rather than copying its bind axes.
-			var bone_name := "bone_101" if key == "head" else ("bone_013" if key == "bracelets_positive" else "bone_043")
+			var bone_name := "bone_110" if key == "head" else ("bone_013" if key == "bracelets_positive" else "bone_043")
 			var bone := _skeleton.find_bone(bone_name)
 			if bone >= 0:
 				var rest := _skeleton.get_bone_global_rest(bone)

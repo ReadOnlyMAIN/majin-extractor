@@ -423,6 +423,11 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             }
             for index in range(material_count)
         ]
+    try:
+        from ..player_armor import apply_player_material_policy
+    except ImportError:
+        from player_armor import apply_player_material_policy
+    apply_player_material_policy(materials, path.stem)
     if uses_godot_materials(args):
         try:
             from ..player_armor import is_player_asset, is_player_accessory, partition_player_render_parts

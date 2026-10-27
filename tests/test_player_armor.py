@@ -9,6 +9,33 @@ from tools.conversion.player_armor import partition_player_parts, is_player_asse
 
 
 class PlayerArmorTests(unittest.TestCase):
+    def test_player_texture_color_does_not_use_unverified_legacy_tint(self):
+        from copy import deepcopy
+        from tools.conversion.player_armor import apply_player_material_policy
+        for asset, tint in [('chr100', [0, 0, 0]), ('chr110', [0, 0, 1])]:
+            material = dict(texture_references=['cloth_c02'],
+                            phong=dict(diffuse=tint),
+                            pbr_estimate=dict(diffuse=tint, roughness=0.4))
+            source = deepcopy(material)
+            apply_player_material_policy([material], asset)
+            self.assertEqual(material['pbr_estimate']['diffuse'], [1, 1, 1])
+            self.assertEqual(material['pbr_estimate']['legacy_diffuse_candidate'], tint)
+            self.assertEqual(material['phong'], source['phong'])
+            self.assertEqual(material['pbr_estimate']['roughness'], 0.4)
+            untouched = deepcopy(source)
+            apply_player_material_policy([untouched], 'chr200')
+            self.assertEqual(untouched, source)
+
+    def test_cape_partition_preserves_only_authored_tar_surfaces(self):
+        parts = [dict(material_index=i, triangles=[(i * 3, i * 3 + 1, i * 3 + 2)])
+                 for i in range(3)]
+        materials = [dict(index=i, name=name) for i, name in
+                     enumerate(['mant', 'body', 'tar_body'])]
+        result = partition_player_render_parts(parts, materials)
+        self.assertEqual(len(result), len(parts))
+        self.assertEqual([p['triangles'] for p in result], [p['triangles'] for p in parts])
+        self.assertEqual([p['armor_slot'] for p in result], ['body', 'body', 'body_darkness'])
+
     def test_partition_keeps_each_triangle_and_uses_bone_ancestry(self):
         skeleton = {'joints': [
             {'index': 0, 'global_id': 0, 'parent': None},
