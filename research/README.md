@@ -1,5 +1,12 @@
 # Research and prototypes
 
+Current motion probes: `transform_layout_probe.py` (4,436-block compact TRS grammar,
+DDM rotation anchors and five sequence indices) and `pose_program_probe.py`
+(whole-pose/IK sampling; `--all-blocks` covers the full corpus). Evidence is in
+[TRANSFORM_LAYOUT_FINDINGS.md](TRANSFORM_LAYOUT_FINDINGS.md). Earlier anatomical,
+flat-base and carry interpretations below are historical; archived paths are
+not supported commands.
+
 `legacy/` contains historical material that is not part of the maintained
 pipeline:
 

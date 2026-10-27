@@ -13,7 +13,10 @@ Verified structure (REVERSE_MOTION.md):
   - ``[name ASCII + NUL]`` — full path ``KB/motionSequence/<name>/<clip>``,
   - ``[qstm block]`` — the state machine block attached to the record.
 
-Records are stored in alphabetical name order.
+Five counts at +0x80 precede five sparse u32 record-index tables at +0x94.
+Their flattened nonempty entries are exactly 0..record_count-1. Table slots
+address package table slots (the skeleton occupies slot zero), not the compact
+list of nonempty curve blocks. Records follow in table traversal order.
 """
 from __future__ import annotations
 
@@ -60,6 +63,38 @@ class QstmBlock:
     filetime: int
     duration_frames: int | None  # u32 at +0x80, see REVERSE_MOTION.md
     raw: bytes                   # whole block for further research
+
+
+@dataclass(frozen=True)
+class SequenceIndex:
+    tables: tuple[tuple[int, ...], ...]
+
+    def records_for_slot(self, slot: int) -> tuple[int, ...]:
+        return tuple(table[slot] for table in self.tables
+                     if slot < len(table) and table[slot] != 0xFFFFFFFF)
+
+
+def parse_sequence_index(path: Path) -> SequenceIndex:
+    """Parse five sparse tables, verifying their exact boundary and record ids."""
+    data = Path(path).read_bytes()
+    read_header(data, expected_magic=SEQUENCE_MAGIC, source="motionSequence")
+    if len(data) < 0x94:
+        raise UnsupportedMotion("truncated motionSequence index counts")
+    counts = struct.unpack_from('>5I', data, 0x80)
+    table_end = 0x94 + 4 * sum(counts)
+    hits = _scan_records(data)
+    expected = hits[0][1] if hits else len(data)
+    if table_end != expected:
+        raise UnsupportedMotion("motionSequence index boundary mismatch")
+    cursor = 0x94
+    tables = []
+    for count in counts:
+        tables.append(struct.unpack_from(f'>{count}I', data, cursor))
+        cursor += count * 4
+    indices = [index for table in tables for index in table if index != 0xFFFFFFFF]
+    if indices != list(range(len(hits))):
+        raise UnsupportedMotion("motionSequence record index order mismatch")
+    return SequenceIndex(tuple(tables))
 
 
 _NAME_HEAD = "KB/motionSequence/"
@@ -145,12 +180,12 @@ def parse_motion_sequence(path: Path) -> tuple[ResourceHeader, list[SequenceReco
         full = name
         qstm_offset = data.find(b"qstm", guid + 16 + name_len)
         end_of_qstm = None
-        next_guid = hits[index + 1][1] + 4 if index + 1 < len(hits) else len(data)
+        next_record = hits[index + 1][1] if index + 1 < len(hits) else len(data)
         short = NAME_PATH_PATTERN.sub("", full)
         qstm = None
-        if qstm_offset >= 0 and qstm_offset < next_guid:
+        if qstm_offset >= 0 and qstm_offset < next_record:
             try:
-                qstm = parse_qstm(data, qstm_offset, next_guid)
+                qstm = parse_qstm(data, qstm_offset, next_record)
             except UnsupportedMotion:
                 qstm = None
         records.append(SequenceRecord(

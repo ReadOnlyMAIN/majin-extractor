@@ -1,31 +1,14 @@
-"""Curve-block decoding primitives (Phase 2 research, REVERSE_MOTION.md).
+"""Lossless scalar storage for compact motion transform programs.
 
-Model confirmed on gim103 / chr300 / chr370 / chr540 data:
+The two u16 header fields give descriptor/sample counts. Eight 3-bit codes
+occupy each big-endian 24-bit word, least-significant code first. Modes 5/6/7
+store constant, linear and Hermite scalar payloads; mode 1 marks an implicit
+whole transform group, interpreted by layout.py. The active export uses
+layout.py, transforms.py and pose.py, not arithmetic scalar-to-bone bases.
 
-- Curve blocks start with two big-endian u16 values.  The first is the exact
-  number of 3-bit descriptors at the start of the body. Eight descriptors are
-  read least-significant-first inside each big-endian 24-bit word. Treating
-  its high byte as a curve ``type`` was wrong (large rigs simply have more
-  than 255 descriptors).  The second value is sample-count-like and equals
-  the qstm duration candidate + 1 for most mappable blocks.
-- Lossless scalar storage per descriptor: mode 5 = constant (1 f32),
-  mode 6 = dated keys (u8/u16 counts and times), mode 7 = keys plus a
-  per-second tangent (cubic Hermite); modes 0-4 store no payload.
-- Blocks are animation *segments*: consecutive blocks chain through the
-  carry oracle (:func:`carry_fidelity`, :func:`carry_chains`) — a
-  payload-free channel of a following block holds the value the previous
-  segment ended with.
-- One scalar = one transform component, grouped in 7-scalar-per-bone runs
-  anchored per package (:func:`resolve_scalar_channel_base`). The mapping
-  carries *translations* (verified against the motion bind pose) but its
-  rotation reading is refuted: the Phase 2.2 probes measured quaternion
-  norms 38..2002 on chr540 and zero unit quaternions corpus-wide, so
-  :func:`decode_scalar_clip` gates every emitted channel on a pose oracle
-  and refuses blocks that would fabricate poses.
-
-This module exposes only what survives probes; the humanoid channel
-program (root prefix + euler triplets, REVERSE_MOTION.md 2.2) is still
-Phase 2 research — see research/humanoid_layout_probe.py.
+Historical flat-base and carry-correlation helpers below remain solely to
+reproduce the rejected 2026-10-14 experiments. Their candidate channels do not
+represent the actual transform program; see TRANSFORM_LAYOUT_FINDINGS.md.
 """
 from __future__ import annotations
 
@@ -253,31 +236,11 @@ BASE_CONSENSUS = 0.8
 
 
 def resolve_scalar_channel_base(package) -> int | None:
-    """Derive the per-package 7-scalar-per-bone channel base from evidence.
+    """Historical flat-layout anchor vote, retained for research regressions.
 
-    Proven layout (REVERSE_MOTION.md 2.2): every bone owns 7 consecutive
-    scalar indices ``T.x,T.y,T.z,R.x,R.y,R.z,R.w`` so that
-    ``bone = (scalar + base) // 7``. The base is anchored on curve
-    constants (mode 5) that byte-equal exactly ONE non-zero bind component
-    (identities shared by several bones or border components are excluded
-    as ambiguous). Returns the winning base when at least two anchors vote
-    for it, every animated scalar then stays inside the rig, and the vote
-    is near-unanimous (:data:`BASE_CONSENSUS` of all anchors) — else
-    ``None`` — no guessed mapping is produced.
-
-    The consensus gate is measured, not cosmetic (Phase 2.2 probes):
-    gim103 votes 5/5 for base 21, while chr540's 57 anchors split across
-    bases 205/181/317/… (top share 0.28) because its blocks cover several
-    channel sections with different offsets — a single base cannot describe
-    them, and exporting through the plurality winner fabricated garbage
-    rotations (quaternion norms 38..2002).
-
-    Scope note: the anchor evidence covers the *translation* components;
-    the same 7-scalar reading applied to the rotation components yields
-    non-unit quaternions, which is why :func:`decode_scalar_clip` gates
-    rotations on a unit-length pose oracle instead of trusting this base
-    blindly.
-    """
+    Superseded: a block is a variable-width TRS program, not seven scalars per
+    bone. An anchor majority only aligns an expanded region by coincidence.
+    Active export must use decode_transform_layout / decode_transform_clip."""
     skeleton = package.skeleton
     if skeleton is None or not package.curve_blocks:
         return None
@@ -327,28 +290,11 @@ QUAT_NORM_TOLERANCE = 1e-3
 
 def decode_scalar_clip(package, block: CurveBlock, base: int,
                        frame_rate: float = 60.0) -> dict | None:
-    """Build a partial glTF clip dict from one verified curve block.
+    """Historical flat-layout candidate export; not used by the pipeline.
 
-    Returns ``None`` (never a guessed clip) when the block's channel layout
-    does not resolve strictly inside the package rig. Mapping (proven,
-    REVERSE_MOTION.md 2.2/2.3): one scalar = one component, grouped in
-    7-scalar-per-bone runs with the package channel base; mode 5 = the
-    constant channel key, modes 6/7 = dated keys (u8/u16 frames).
-    A bone contributes a translation channel only when its three
-    translation scalars share one strictly-increasing grid, a rotation
-    channel only when its four quaternion scalars do; everything else is
-    skipped conservatively (no reconstructed pose).
-
-    Pose oracles (Phase 2.2 empirical, REVERSE_MOTION.md): a rotation
-    channel is accepted only when every emitted quaternion is unit-length
-    within :data:`QUAT_NORM_TOLERANCE` (the stored components are emitted
-    normalised). An unmet oracle cancels the whole block — the Phase 2.2
-    probes measured chr540 rotation channels built this way at quaternion
-    norms 38..2002, i.e. the 7-scalar mapping does not carry rotations,
-    and a guessed pose is worse than no clip. Translation channels carry
-    no per-block oracle: mid-chain segments legitimately hold carried
-    values that differ from the bind pose (verified on gim103 blocks 1/2/6/7).
-    """
+    This preserves the old unit-quaternion rejection and translation-only
+    diagnostics. Use pose.decode_transform_clip for actual Euler rotations,
+    implicit reference groups and the generic skeleton-order TRS mapping."""
     decoded = decode_curve_block(block)
     bones = package.skeleton.bone_count
     grids = defaultdict(dict)
@@ -433,15 +379,11 @@ def block_constants(decoded) -> dict[int, float]:
 
 
 def carry_fidelity(previous, following) -> tuple[int, int]:
-    """Measure the segment-chain oracle between two consecutive blocks.
+    """Historical equality score at raw scalar positions (hits, comparisons).
 
-    Verified structure (Phase 2.4, REVERSE_MOTION.md): curve blocks are
-    animation *segments* — a following block whose channel was left
-    payload-free (modes 0-4) holds the value the previous segment ended
-    with, and whenever that channel is stored as a mode-5 constant the two
-    floats agree byte-close. Returns ``(hits, comparisons)`` over the
-    scalars that are constants in ``following`` and valued in ``previous``.
-    """
+    This counts similarities between constants and preceding endpoint values.
+    It does not prove carry semantics: compact groups can shift scalar indices,
+    modes 0/2/3/4 are constants, and mode 1 selects a reference transform."""
     end_values = block_end_values(previous)
     constants = block_constants(following)
     hits = 0

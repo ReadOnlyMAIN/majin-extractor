@@ -1,17 +1,11 @@
-"""Bridge between the clean motion package and the DDM export pipeline.
-
-Phase 3 of REVERSE_MOTION.md wires curve decoding here; until that
-research lands the bridge exports **no** animation (Evidence over
-guessing): it only exposes the verified facts — clip names/durations and
-the motion skeleton's bone ids in DDM transform order.
-"""
+"""Bridge from parsed motion resources to physical TRS animation segments."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from .package import parse_motion_package
 from .resource import UnsupportedMotion, discover_motion_paths
-from .sequence import duration_frames_of, parse_motion_sequence
+from .sequence import duration_frames_of, parse_motion_sequence, parse_sequence_index
 
 FPS_FALLBACK = 30  # verified clock: mode-7 tangents are per-second derivatives
 # and the (v1-v0)/tangent ratio over one-frame key gaps measures 1/30 on the
@@ -21,14 +15,10 @@ FPS_FALLBACK = 30  # verified clock: mode-7 tangents are per-second derivatives
 
 def decode_motion_baseline_clips(model_path: Path,
                                  frame_rate: float = FPS_FALLBACK) -> list[dict]:
-    """Export glTF animation dicts for every named clip of an asset.
+    """Diagnostic frozen references, explicitly distinct from decoded motion.
 
-    Practical variant (documented in REVERSE_MOTION.md 'Risques'):
-    while the quantized curve stream resists decoding, each clip exports a
-    *frozen baseline* — the joints hold the verified motion-skeleton bind
-    pose over the duration hypothesis (u32 at qstm+128). Output dict keys
-    match ``write_skinned_glb``'s glTF ``animations`` API, so the GLB
-    cycle-check must never fail: full (valid) tracks per joint.
+    Kept only for --animations-mode baseline comparisons. These animations
+    do not decode the physical curve or reconstruct a composite named state.
     """
     motion_info = discover_character_motion(model_path)
     if not motion_info or not motion_info.get("clip_count"):
@@ -40,7 +30,8 @@ def decode_motion_baseline_clips(model_path: Path,
     if package.skeleton is None:
         return []
     skeleton = package.skeleton
-    quats = list(skeleton.rotations)
+    from .transforms import local_reference_rotations
+    quats = local_reference_rotations(skeleton)
     translations = list(skeleton.translations)
     animations = []
     for record in records:
@@ -123,75 +114,72 @@ def parse_clip_records(sequence_path: Path):
     return parse_motion_sequence(sequence_path)
 
 
-def decode_character_animations(motion_info, skeleton, clip_indices=None,
-                                *args, **kwargs) -> list[dict]:
-    """Decode the selected clips as glTF animation dicts (Phase 3).
+def decode_character_animations(motion_info, skeleton=None, clip_indices=None,
+                                *legacy_options, **kwargs) -> list[dict]:
+    """Export physical curve segments through the compact TRS program.
 
-    Evidence-gated twice.  First, the package channel base is derived from
-    bind-pose anchors under a consensus gate
-    (``curves.resolve_scalar_channel_base``): a base only survives when it
-    explains nearly every unique-anchor vote (gim103 passes 5/5; chr540's
-    split vote 205/181/317 fails, so its packages export nothing rather
-    than a guessed pose).  Second, a curve block becomes a clip only when
-    ``sample_count - 1`` equals a record's duration candidate (u32 at
-    qstm+128) and every record/block pairing stays bijective.
-    Unanimated joints keep their bind pose in the GLB scene, so partial
-    channels stay valid for Godot.
+    Five sparse sequence tables address package slots directly. A named state
+    is exported as one segment when that slot has the same duration. Composite
+    and missing states stay explicit in diagnostics; anonymous helpers retain
+    stable segment names rather than inheriting another state's name.
     """
-    from .curves import decode_scalar_clip, resolve_scalar_channel_base
-    if not motion_info or not motion_info.get("clip_count"):
+    from fnmatch import fnmatchcase
+    from .pose import decode_transform_clip
+    if not motion_info:
         return []
-    sequence_path = Path(motion_info["sequence_path"])
-    package_path = Path(motion_info["package_path"])
-    package = parse_motion_package(package_path)
-    if package.skeleton is None or not package.curve_blocks:
+    selection = kwargs.get('animations', 'all')
+    if selection in ('none', 'off'):
         return []
-    base = resolve_scalar_channel_base(package)
-    if base is None:
-        return []
-    _header, records = parse_motion_sequence(sequence_path)
-    frame_rate = kwargs.get("frame_rate", FPS_FALLBACK)
-    clip_indices = clip_indices or None
-    selections = [
-        record for record in records
-        if (duration_frames_of(record) or 0) > 0
-        and (clip_indices is None
-             or record.index in clip_indices)
-    ]
-    usable = []
-    for record in selections:
-        duration = duration_frames_of(record)
-        if len(record.qstm.raw) < 132 and duration is None:
-            duration = None
-        usable.append((record, duration))
-    primary_by_duration: dict[int, list] = {}
-    for block in package.curve_blocks:
-        try:
-            decoded = decode_scalar_clip(package, block, base, frame_rate)
-        except (UnsupportedMotion, ValueError):
-            decoded = None
-        if decoded is None:
-            continue
-        sample_minus_one = decoded["sample_count"] - 1
-        primary_by_duration.setdefault(sample_minus_one, []).append(decoded)
+    package = parse_motion_package(Path(motion_info['package_path']))
+    _header, records = parse_motion_sequence(Path(motion_info['sequence_path']))
+    index = parse_sequence_index(Path(motion_info['sequence_path']))
+    frame_rate = kwargs.get('frame_rate', FPS_FALLBACK)
+    ik_mode = kwargs.get('ik_mode', 'bake')
+    diagnostics = dict(mapping='compact_trs_program', rotation='Rz Ry Rx, radians, local absolute',
+                       source_package=str(Path(motion_info['package_path']).resolve()),
+                       source_sequence=str(Path(motion_info['sequence_path']).resolve()),
+                       state_index_decoded=True, segments=[], rejected=[],
+                       unresolved_states=[],
+                       rig_controls_raw=[record.hex() for record in package.rig_controls.records]
+                       if package.rig_controls else [])
+    motion_info['export_diagnostics'] = diagnostics
     animations = []
-    used: set[int] = set()
-    for record, duration in usable:
-        if duration is None:
+    patterns = [value.strip() for value in selection.split(',') if value.strip()]
+    selected_slots = set(clip_indices) if clip_indices is not None else None
+    resolved_records = set()
+    for block in package.curve_blocks:
+        slot = block.slot_index - 1
+        name = f'segment_{slot:03d}'
+        if selected_slots is not None and slot not in selected_slots:
             continue
-        pool = primary_by_duration.get(duration, [])
-        while len(pool) and id(pool[0]) in used:
-            pool = pool[1:]
-        if not pool:
-            return []  # bijective pairing broken: no partial export
-        clip = pool[0]
-        used.add(id(clip))
-        animations.append({
-            "name": record.short_name,
-            "duration": duration / frame_rate,
-            "frame_rate": frame_rate,
-            "channels": clip["channels"],
-            "scalar_mapping": "resolved_from_bind_anchors_consensus",
-            "resampled": clip["resampled"],
-        })
+        related = [records[i] for i in index.records_for_slot(block.slot_index)]
+        duration = int.from_bytes(block.header[2:], 'big') - 1
+        named = [record for record in related if duration_frames_of(record) == duration]
+        names = [record.short_name for record in named] or [name]
+        chosen = names if selection == 'all' else [
+            candidate for candidate in names if any(
+                fnmatchcase(candidate, pattern) or fnmatchcase(name, pattern)
+                or str(slot) == pattern for pattern in patterns)]
+        if not chosen:
+            continue
+        try:
+            clip = decode_transform_clip(package, block, skeleton=skeleton,
+                                         frame_rate=frame_rate, ik_mode=ik_mode)
+        except (UnsupportedMotion, ValueError) as exc:
+            diagnostics['rejected'].append(dict(slot=slot, reason=str(exc)))
+            continue
+        for record in named:
+            resolved_records.add(record.index)
+        for chosen_name in chosen:
+            output = dict(clip, name=chosen_name, name_source=(
+                'sequence_slot_index_and_duration' if named else 'physical_segment'))
+            animations.append(output)
+            diagnostics['segments'].append({key: value for key, value in output.items()
+                                            if key != 'channels'})
+    for record in records:
+        if record.index not in resolved_records:
+            diagnostics['unresolved_states'].append(dict(
+                record=record.index, name=record.short_name,
+                duration_frames=duration_frames_of(record),
+                reason='not selected, absent segment, or composite duration'))
     return animations

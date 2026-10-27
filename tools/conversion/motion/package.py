@@ -19,6 +19,7 @@ Verified structure (REVERSE_MOTION.md):
 """
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,12 +41,16 @@ def align4(offset: int) -> int:
 
 @dataclass
 class MotionSkeleton:
-    """Skeleton block of a motionPackage (bind pose in DDM transform order)."""
+    """Reference rig in DDM transform order: local T, global reference R.
+
+    Constraint/helper reference rotations can differ from the independent DDM
+    rest pose. Export uses the DDM's local rest transform when available.
+    """
 
     bone_count: int
     chain_count: int                    # candidate IK chain count
-    parent_indices: list[int]           # 0-based parent transform index
-    parent_flags: list[int]             # per-bone flag byte
+    parent_indices: list[int | None]    # one per bone; root has no parent
+    parent_flags: list[int]             # one per bone; root flag is zero
     bone_ids: list[int]                 # global ids, DDM transform order
     translations: list[tuple[float, float, float]]
     rotations: list[tuple[float, float, float, float]]
@@ -144,8 +149,8 @@ class Slice:
 def parse_skeleton(block: bytes) -> MotionSkeleton | None:
     """Decode the skeleton block when the verified layout fits exactly.
 
-    Layout: ``[u8 bone_count][u8 chain_count][u8 0][u8 0]`` then
-    ``(bone_count - 2)`` ``(parent, flag)`` byte pairs, then ``bone_count``
+    Layout: ``[u8 bone_count][u8 chain_count]`` then
+    ``(bone_count - 1)`` ``(parent, flag)`` byte pairs, then ``bone_count``
     bone-id bytes, padding to a 4-byte boundary, then ``bone_count`` bind
     entries of ``[translation 3*f32][rotation 4*f32]`` (big-endian).
     """
@@ -153,18 +158,18 @@ def parse_skeleton(block: bytes) -> MotionSkeleton | None:
         return None
     bone_count = block[0]
     chain_count = block[1]
-    if block[2] != 0 or block[3] != 0 or not 1 <= bone_count <= 1023:
+    if not 1 <= bone_count <= 255:
         return None
-    body_size = 4 + max(0, bone_count - 2) * 2 + bone_count
+    body_size = 2 + (bone_count - 1) * 2 + bone_count
     floats_start = align4(body_size)
     if floats_start + bone_count * 28 != len(block):
         return None  # a different block layout; never guess
-    cursor = 4
-    parent_indices: list[int] = []
-    parent_flags: list[int] = []
-    for _ in range(max(0, bone_count - 2)):
+    cursor = 2
+    parent_indices: list[int | None] = [None]
+    parent_flags: list[int] = [0]
+    for index in range(1, bone_count):
         parent, flag = block[cursor], block[cursor + 1]
-        if parent >= bone_count:
+        if parent >= index:
             return None
         parent_indices.append(parent)
         parent_flags.append(flag)
@@ -178,6 +183,8 @@ def parse_skeleton(block: bytes) -> MotionSkeleton | None:
         base = floats_start + index * 28
         translation = struct.unpack_from(">3f", block, base)
         rotation = struct.unpack_from(">4f", block, base + 12)
+        if not all(math.isfinite(v) for v in (*translation, *rotation)):
+            return None
         norm = sum(c * c for c in rotation) ** 0.5
         if not 0.98 <= norm <= 1.02:
             return None

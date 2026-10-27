@@ -43,7 +43,7 @@ class ExportFolderToGodotTests(unittest.TestCase):
             source.mkdir()
             self.assertIsNone(foliage_source_for(source))
 
-    def test_pipeline_enables_godot_character_ik_export(self):
+    def test_pipeline_enables_generic_trs_and_baked_ik(self):
         with tempfile.TemporaryDirectory() as directory:
             kb_root = Path(directory) / "KB"
             source = kb_root / "chara" / "chr300"
@@ -56,40 +56,38 @@ class ExportFolderToGodotTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
 
             command = stdout.getvalue()
-            self.assertIn("--experimental-root-motion", command)
-            self.assertIn("--experimental-rotation-joints all", command)
-            self.assertIn(
-                "--experimental-rotation-model local_delta_post", command,
-            )
-            self.assertNotIn(
-                "--experimental-rotation-model global_delta", command,
-            )
-            self.assertIn(
-                "--experimental-root-rotation-source local", command,
-            )
-            self.assertNotIn("--experimental-rotation-reference-clip", command)
-            self.assertIn("--experimental-humanoid-ik-mode godot", command)
-            self.assertIn("--experimental-ik-target-orientation none", command)
+            self.assertIn("--animations all", command)
+            self.assertIn("--ik bake", command)
+            self.assertNotIn("--experimental-", command)
 
-    def test_vscode_animation_launch_uses_corrected_fk_defaults(self):
+    def test_vscode_animation_launch_uses_generic_decoder(self):
         launch = json.loads(Path(".vscode/launch.json").read_text("utf-8"))
         configuration = next(
             item for item in launch["configurations"]
-            if item["name"] == "DDM: experimental animation"
+            if item["name"] == "DDM: export model with animations"
         )
         arguments = configuration["args"]
-        self.assertIn("--experimental-rotation-model", arguments)
-        model = arguments[arguments.index("--experimental-rotation-model") + 1]
-        self.assertEqual(model, "local_delta_post")
-        self.assertIn("--experimental-root-rotation-source", arguments)
-        source = arguments[
-            arguments.index("--experimental-root-rotation-source") + 1
-        ]
-        self.assertEqual(source, "local")
+        self.assertIn("--animations", arguments)
+        self.assertIn("--ik", arguments)
+        self.assertFalse(any(arg.startswith("--experimental-") for arg in arguments))
 
         inputs = {item["id"]: item for item in launch["inputs"]}
-        self.assertEqual(inputs["ddmRotationJoints"]["default"], "all")
-        self.assertEqual(inputs["ddmRotationUnits"]["default"], "radians")
+        self.assertEqual(inputs["ddmAnimations"]["default"], "all")
+        self.assertEqual(inputs["ddmIK"]["default"], "bake")
+
+    def test_destination_can_be_a_selected_godot_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'KB/chara/asset'
+            source.mkdir(parents=True)
+            project = root / 'godot-project'
+            project.mkdir()
+            (project / 'project.godot').write_text('config_version=5\n')
+            with mock.patch('tools.conversion.export_folder_to_godot.run') as execute, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main([str(source), '--godot-project', str(project), '--dry-run']), 0)
+            arguments = execute.call_args_list[0].args[0]
+            self.assertIn(str(project / 'original_files/decoded/chara'), arguments)
 
 
 if __name__ == "__main__":

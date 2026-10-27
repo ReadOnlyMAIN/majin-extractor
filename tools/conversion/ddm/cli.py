@@ -79,23 +79,28 @@ def main():
     ap.add_argument("output", type=Path, help="Output directory")
     ap.add_argument(
         "--animations-mode",
-        choices=("off", "baseline"),
+        choices=("off", "decoded", "baseline"),
         default="off",
         help=(
             "Animation export mode. 'off' (default) exports no animation. "
-            "'baseline' exports one glTF animation per named motion clip: "
-            "while the quantized curve stream is still being reverse-"
-            "engineered, each clip is an explicitly tagged frozen bind-pose "
-            "baseline (duration from the clip's qstm state block)."
+            "'decoded' exports physical TRS segments with baked IK. "
+            "'baseline' is a diagnostic frozen reference pose per named state, "
+            "not decoded motion. Prefer --animations all."
         ),
+    )
+    ap.add_argument(
+        "--animations", default=None,
+        help="Export decoded segments: all, none, or comma-separated segment names/globs/slot indices.",
+    )
+    ap.add_argument(
+        "--ik", choices=("bake", "off"), default="bake",
+        help="Bake flag-declared two-bone IK into GLB joint rotations (default: bake).",
     )
     ap.add_argument(
         "--animation-frame-rate",
         type=float,
-        default=60.0,
-        help=("Frames per second used to convert clip frame counts into "
-              "seconds in --animations-mode baseline. 60 is the shipped "
-              "default; some families may be authored at 30."),
+        default=30.0,
+        help="Source frame rate used for sampling and Hermite tangents (measured default: 30).",
     )
 
     ap.add_argument(
@@ -174,8 +179,8 @@ def main():
         "--animation-clips",
         type=lambda value: [int(index.strip()) for index in value.split(",") if index.strip()],
         help=(
-            "Inspect only these zero-based motion clip indices, e.g. 71,72,73. "
-            "Scalar curves are validated but rig binding remains unsupported."
+            "Limit decoded export to these zero-based physical curve slots. "
+            "Prefer --animations with names, globs or slot indices."
         ),
     )
     ap.add_argument(
@@ -372,6 +377,15 @@ def main():
         ap.error("--experimental-rotation-joints requires --experimental-root-motion")
     if not math.isfinite(args.scale) or args.scale <= 0.0:
         ap.error("--scale must be a finite number greater than zero.")
+    if not math.isfinite(args.animation_frame_rate) or args.animation_frame_rate <= 0:
+        ap.error("--animation-frame-rate must be finite and greater than zero")
+    if args.animations_mode == "baseline" and args.animations is not None:
+        ap.error("--animations cannot be combined with the frozen baseline mode")
+    if args.experimental_root_motion:
+        print("[MOTION] Legacy experiment flags are retired; using the compact TRS decoder. "
+              "Use --animations all --ik bake; old rotation overrides do not apply.")
+        if args.animations is None:
+            args.animations = "all"
     if args.roughness is not None and (
         not math.isfinite(args.roughness) or not 0.0 <= args.roughness <= 1.0
     ):

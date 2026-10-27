@@ -1,5 +1,10 @@
 # DDM format reverse engineering — analysis status
 
+> Animation update, 2026-10-27: the compact TRS grammar supersedes the historical
+> scalar layouts and FK/IK interpretations in section 28. See
+> [REVERSE_MOTION.md](REVERSE_MOTION.md) and
+> [the corpus evidence](research/TRANSFORM_LAYOUT_FINDINGS.md).
+
 ## 1. Context
 
 Goal: reconstruct the 3D models stored in a PS3 game's `.ddm` files from the

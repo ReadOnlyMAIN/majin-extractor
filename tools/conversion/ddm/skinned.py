@@ -21,6 +21,7 @@ try:
     from ..blend_mask import DEFAULT_BLEND_RADIUS
     from ..glb_export import write_skinned_glb
     from ..godot_export import write_godot_material_assets
+    from ..motion.godot import write_animation_import_settings
     from ..motion.export import (
         decode_character_animations, decode_motion_baseline_clips,
         discover_character_motion,
@@ -29,6 +30,7 @@ except ImportError:
     from blend_mask import DEFAULT_BLEND_RADIUS
     from glb_export import write_skinned_glb
     from godot_export import write_godot_material_assets
+    from motion.godot import write_animation_import_settings
     from motion.export import (
         decode_character_animations, decode_motion_baseline_clips,
         discover_character_motion,
@@ -355,40 +357,20 @@ def analyze_skinned_file(path, data, out_dir, args, header):
     )
     skeleton = decode_skinned_skeleton(data, transform_bone_ids)
     geometry = decode_skinned_geometry(data, header, skeleton)
-    deforming_bone_ids = {
-        bone_id
-        for section in geometry["sections"]
-        for bone_id in section["palette_ids"]
-    }
-    deforming_joint_indices = [
-        joint["index"] for joint in skeleton.get("joints", [])
-        if joint["global_id"] in deforming_bone_ids
-    ]
-    rotation_joints = getattr(args, "experimental_rotation_joints", None)
-    if rotation_joints == "all":
-        rotation_joints = list(range(len(skeleton.get("joints", []))))
+    animation_mode = getattr(args, "animations_mode", "off")
+    animation_selection = getattr(args, "animations", None)
+    if animation_selection is None:
+        animation_selection = "all" if animation_mode == "decoded" else "none"
     animations = decode_character_animations(
         external_motion, skeleton, getattr(args, "animation_clips", None),
-        getattr(args, "experimental_root_motion", False),
-        rotation_joints,
-        getattr(args, "experimental_rotation_units", "radians"),
-        deforming_joint_indices,
-        getattr(args, "experimental_rotation_axes", "xyz"),
-        getattr(args, "experimental_rotation_signs", "+++"),
-        getattr(args, "experimental_rotation_model", "local_delta_post"),
-        getattr(args, "experimental_rotation_reference_clip", None),
-        getattr(args, "experimental_rotation_reference_frame", "end"),
-        getattr(args, "experimental_root_rotation_source", "local"),
-        getattr(args, "experimental_deforming_rotations_only", False),
-        getattr(args, "experimental_humanoid_ik", False),
-        getattr(args, "experimental_export_ik_targets", False),
-        getattr(args, "experimental_ik_target_orientation", "source-row"),
+        animations=animation_selection,
+        frame_rate=getattr(args, "animation_frame_rate", 30),
+        ik_mode=getattr(args, "ik", "bake"),
     )
-    animation_mode = getattr(args, "animations_mode", "off")
-    if animation_mode == "baseline" and not animations:
+    if animation_mode == "baseline":
         animations = decode_motion_baseline_clips(
             path,
-            frame_rate=getattr(args, "animation_frame_rate", 60),
+            frame_rate=getattr(args, "animation_frame_rate", 30),
         )
     animations = list(animations)
     ik_control_indices = {}
@@ -504,19 +486,21 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         ),
         "animations": animations,
         "animation_note": (
-            "The selected clips export verified root motion plus an experimental "
-            "XYZ Euler deltas composed in local bind space for structurally bound humanoid joints"
-            + ("; matching unskinned duplicate controllers are baked onto deforming joints."
-               if getattr(args, "experimental_controller_bake", False) else ".")
-            if animations and rotation_joints else
-            "Only the selected clips' verified root translation and complete bone_000 rotation are exported; "
-            "joint rotations remain unresolved and omitted."
-            if animations else
-            "External scalar curves are decoded and validated, but their association "
-            "with joint transforms remains unresolved. No guessed animation is exported."
-            if external_motion else "No matching external motion resource was found."
+            "Physical TRS segments; absolute local XYZ Euler radians; sampled at source frames. "
+            "IK uses the FK bend plane, with residuals in the motion report. "
+            "Named-state composition and secondary rig-control semantics remain unresolved."
+            if animations and animation_mode != "baseline" else
+            "Frozen reference poses, not decoded motion." if animations else
+            "No decoded animation selected or available."
         ),
     }
+    diagnostics = external_motion.get("export_diagnostics") if external_motion else None
+    if diagnostics is not None:
+        diagnostics['export_scale'] = args.scale
+        diagnostics['godot_import_settings'] = write_animation_import_settings(
+            mesh_path, getattr(args, "animation_frame_rate", 30))
+        (out_dir / f"{path.stem}.motion.json").write_text(
+            json.dumps(diagnostics, indent=2) + "\n", encoding="utf-8")
     if not args.final:
         with (out_dir / "analysis.json").open("w", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
@@ -539,11 +523,19 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             f"  animations       : {len(animations)} exported; "
             f"{external_motion['clip_count']} external clips detected"
         )
+        if diagnostics and diagnostics['rig_controls_raw']:
+            print(f"  motion warning   : {len(diagnostics['rig_controls_raw'])} secondary rig controls unresolved")
+        if diagnostics and diagnostics['rejected']:
+            print(f"  motion warning   : {len(diagnostics['rejected'])} segments rejected; see motion report")
+        if diagnostics and diagnostics['unresolved_states']:
+            print(f"  motion states    : {len(diagnostics['unresolved_states'])} not exported (selection, missing segment or composition)")
+        if diagnostics:
+            print(f"  Godot import     : {mesh_path.name}.import (preserve with the GLB)")
     elif external_motion and external_motion["clip_count"]:
         print(
             "  animations       : 0 exported; "
             f"{external_motion['clip_count']} external clips detected "
-            "(scalar curves decoded; rig binding pending)"
+            "(no selected decodable animation; use --animations all)"
         )
     else:
         print("  animations       : 0 embedded")

@@ -19,14 +19,19 @@ reverse-engineering notes.
 
 ## Current status
 
+Animation status updated 2026-10-27: the compact TRS program supersedes the old
+anatomical/per-clip offset experiments below. Current evidence and remaining
+work are in [CURRENT_WORK.md](CURRENT_WORK.md) and
+[REVERSE_MOTION.md](REVERSE_MOTION.md).
+
 | Area | Status | Notes |
 | --- | --- | --- |
 | PAK extraction | Stable | Indexed `0x120` records; stored + deflate blocks |
 | XET → PNG | Stable | Lossless |
 | DDS → PNG | Stable | DXT1 / DXT5 |
 | DDM → GLB (geometry, UV, normals, materials) | Working (experimental) | DDM v3 layouts only |
-| DDM skinned characters (skeleton, skin) | Working, **known ordering bug** | GLB `JOINTS_0`/`WEIGHTS_0` validated, but `decode_skinned_skeleton` without a motion resource pairs transforms with 4-block-reversed ids (REVERSE_DDM.md §28.2) → scrambled bind pose for the ~44 no-motion bundles |
-| DDM → glTF animations | Partial, **layout root cause found** | Root translation + heading verified; joint rotations blocked by per-clip scalar layouts (REVERSE_DDM.md §28.5) and mid-stream insertions ignored by the contiguous binder (hand effector at scalar 184 vs binder's 182) |
+| DDM skinned characters (skeleton, skin) | Working | Self-contained DDM storage-order correction; motion resources cross-check the rig |
+| DDM → glTF animations | Generic TRS and baked IK working on supported character layouts | 4,436 blocks mapped; five sequence tables; Euler radians proven; secondary controls, composite states and unsupported geometry remain open |
 | RSX shader → Godot PBR material | Approximation | `godot` shader + `.tres` + blend maps |
 | Matcap/mask → PBR estimator | Placeholder | Research API only; not active |
 | Engine-specific sky | Out of scope | Reproduce with a native Godot `Sky` |

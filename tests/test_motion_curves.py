@@ -1,9 +1,8 @@
-"""Phase 3 tests — scalar-clip decoding evidence-gated (REVERSE_MOTION.md).
+"""Historical flat-base diagnostics retained to reproduce rejected hypotheses.
 
-Skip unless the corpus is present.  The goldens pin the Phase 2.2 probe
-results: gim103 is the only package whose 7-scalar channel base survives
-the consensus gate, and its exported clips are translation-only because
-the rotation reading is refuted corpus-wide (zero unit quaternions).
+These tests pin old candidate outputs and rejection gates, not the active
+animation pipeline. Compact TRS, real Euler rotations and IK regressions are
+in test_motion_transforms.py. Raw scalar-position correlation is not carry.
 """
 from __future__ import annotations
 
@@ -137,7 +136,7 @@ class TestChr540LayoutRefuted(unittest.TestCase):
 
 @unittest.skipUnless(CHR300.is_file(), "chr300 corpus absent")
 class TestCarryChains(unittest.TestCase):
-    """Blocks are animation segments chained by the carry oracle."""
+    """Historical raw-position correlations, without transform semantics."""
 
     @classmethod
     def setUpClass(cls):

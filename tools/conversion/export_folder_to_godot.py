@@ -52,14 +52,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("source", type=Path, help="Folder below game_files/.../KB")
     parser.add_argument(
-        "--output-root", type=Path, default=Path("output/decoded"),
-        help="Root mirroring the folder layout below KB (default: output/decoded).",
+        "--output-root", type=Path,
+        help="Root mirroring KB (default: PROJECT/original_files/decoded, or output/decoded).",
     )
+    parser.add_argument("--godot-project", type=Path,
+                        help="Godot project receiving the export under original_files/decoded")
     parser.add_argument("--dry-run", action="store_true", help="Print commands only.")
+    parser.add_argument("--animations", default="all",
+                        help="all, none, or comma-separated animation names/globs/segment indices")
+    parser.add_argument("--ik", choices=("bake", "off"), default="bake")
     args = parser.parse_args(argv)
 
     source = args.source.resolve()
-    output_root = args.output_root.resolve()
+    if args.godot_project and not (args.godot_project / 'project.godot').is_file():
+        parser.error(f"no project.godot found in {args.godot_project}")
+    output_root = (args.output_root or (
+        args.godot_project / 'original_files/decoded'
+        if args.godot_project else Path('output/decoded'))).resolve()
     if not source.is_dir():
         parser.error(f"source folder does not exist: {args.source}")
     try:
@@ -76,20 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         "--recursive", "--final", "--material-mode", "godot",
         "--object-mode", "auto", "--scale", "0.01",
         "--texture-root", str(kb_root),
-        "--experimental-root-motion",
-        # Export the complete FK pose first; Godot's runtime IK modifiers then
-        # solve the four limbs on top of those animated joint rotations.
-        "--experimental-rotation-joints", "all",
-        # Controller Euler axes live in each joint's DDM bind frame. Compose
-        # there so, for example, the chr30x head's local Z curve becomes its
-        # model-space X flexion instead of the old sideways model-Z tilt.
-        "--experimental-rotation-model", "local_delta_post",
-        "--experimental-root-rotation-source", "local",
-        "--experimental-humanoid-ik-mode", "godot",
-        # Positions are established, but these orientation triplets have not
-        # been proven to share the HSC instance row-vector convention. Keep
-        # the terminal FK rotations instead of overriding them in Godot.
-        "--experimental-ik-target-orientation", "none",
+        "--animations", args.animations, "--ik", args.ik,
     ], dry_run=args.dry_run)
 
     if foliage_source is None:

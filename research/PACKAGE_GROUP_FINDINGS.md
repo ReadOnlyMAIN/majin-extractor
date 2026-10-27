@@ -1,5 +1,9 @@
 # PACKAGE_GROUP_FINDINGS (probe auto-generated)
 
+> Historical interpretation (2026-10-14): flat scalar mapping and carry claims
+> are superseded by [the compact TRS program](TRANSFORM_LAYOUT_FINDINGS.md),
+> verified 2026-10-27. Raw measurements below remain for traceability.
+
 ## shared skeleton, 56 assets: gim101, gim104, gim114, gim117, gim118, gim119, gim120, gim123, gim125, gim128, gim131, gim134, gim135, gim141, gim142, gim144, gim146, gim203, gim209, gim215, gim216, gim218, gim222, gim224, gim225, gim240, gim300, gim305, gim306, gim311, gim312, gim313, gim323, gim327, gim401, gim409, gim410, gim417, gim419, gim429, gim434, gim502, gim504, gim505, gim510, gim526, gim530, gim531, gim532, gim535, gim606, gim607, gim664, gim665, gim666, gim667
 - bones=2
   - gim101: no unique-anchor votes

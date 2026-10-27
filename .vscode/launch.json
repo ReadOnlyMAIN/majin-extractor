@@ -62,7 +62,13 @@
             "request": "launch",
             "program": "${workspaceFolder}/tools/conversion/export_folder_to_godot.py",
             "args": [
-                "${input:godotExportSource}"
+                "${input:godotExportSource}",
+                "--animations",
+                "${input:ddmAnimations}",
+                "--ik",
+                "${input:ddmIK}",
+                "--godot-project",
+                "${input:godotProject}"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -72,7 +78,7 @@
             }
         },
         {
-            "name": "DDM: experimental animation",
+            "name": "DDM: export model with animations",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/tools/conversion/ddm_to_3d.py",
@@ -81,19 +87,29 @@
                 "${input:modelOutput}",
                 "--material-mode",
                 "${input:ddmMaterialMode}",
-                "--animation-clips",
-                "${input:ddmAnimationClips}",
-                "--experimental-root-motion",
-                "--experimental-rotation-joints",
-                "${input:ddmRotationJoints}",
-                "--experimental-rotation-units",
-                "${input:ddmRotationUnits}",
-                "--experimental-rotation-model",
-                "local_delta_post",
-                "--experimental-root-rotation-source",
-                "local",
+                "--animations",
+                "${input:ddmAnimations}",
+                "--ik",
+                "${input:ddmIK}",
                 "--scale",
                 "${input:ddmExportScale}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "Godot: validate animated GLB",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/validation/check_godot_animation.py",
+            "args": [
+                "${input:animatedGlb}",
+                "--godot",
+                "${input:godotExecutable}"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -171,7 +187,7 @@
         {
             "id": "ddmCharacterSource",
             "type": "promptString",
-            "description": "Skinned character DDM used for animation experiments",
+            "description": "DDM model to export with decoded animation segments",
             "default": "game_files/decompressed/KB/chara/chr300/chr300"
         },
         {
@@ -204,29 +220,6 @@
             "default": "0.01"
         },
         {
-            "id": "ddmAnimationClips",
-            "type": "promptString",
-            "description": "Comma-separated motion clip indices",
-            "default": "71,72,73"
-        },
-        {
-            "id": "ddmRotationJoints",
-            "type": "promptString",
-            "description": "Comma-separated experimental rotation joint indices",
-            "default": "all"
-        },
-        {
-            "id": "ddmRotationUnits",
-            "type": "pickString",
-            "description": "Experimental rotation angle units",
-            "options": [
-                "degrees",
-                "radians",
-                "auto"
-            ],
-            "default": "radians"
-        },
-        {
             "id": "ddmVertexCount",
             "type": "promptString",
             "description": "Manual vertex count",
@@ -249,6 +242,40 @@
             "type": "promptString",
             "description": "Manual uint16 index count",
             "default": "948"
+        },
+        {
+            "id": "ddmAnimations",
+            "type": "promptString",
+            "description": "all, none, or comma-separated animation names/globs/physical segment indices",
+            "default": "all"
+        },
+        {
+            "id": "ddmIK",
+            "type": "pickString",
+            "description": "Bake declared IK chains into portable GLB animations, or export FK only",
+            "options": [
+                "bake",
+                "off"
+            ],
+            "default": "bake"
+        },
+        {
+            "id": "animatedGlb",
+            "type": "promptString",
+            "description": "Exported GLB with adjacent .motion.json report",
+            "default": "/mnt/ssd990pro/Projects/Godot/majin-godot/original_files/decoded/animation_validation_20261027/chr301/chr301.glb"
+        },
+        {
+            "id": "godotExecutable",
+            "type": "promptString",
+            "description": "Godot 4 executable path or command available in PATH",
+            "default": "/mnt/ssd990pro/Software/godot/Godot_v4.8-dev7_linux.x86_64"
+        },
+        {
+            "id": "godotProject",
+            "type": "promptString",
+            "description": "Destination Godot project (exports to original_files/decoded)",
+            "default": "/mnt/ssd990pro/Projects/Godot/majin-godot"
         }
     ]
 }

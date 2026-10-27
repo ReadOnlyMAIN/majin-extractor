@@ -81,48 +81,32 @@ script for maps, ordinary models, and characters; it detects character IK from
 the exported control-bone names and otherwise performs no character-specific
 work.
 
-## Experimental humanoid IK
+## Animated models and baked IK
 
-Convert a humanoid with `--experimental-humanoid-ik-mode godot` in addition to
-the experimental animation options. Unlike `bake`, this preserves the FK limb
-rotations for Godot and adds four unweighted animated control
-bones named `ik_hand_l_target`, `ik_hand_r_target`,
-`ik_foot_l_target`, and `ik_foot_r_target`. Select the GLB in Godot's Import
-tab, set the same `res://majin_utility/assign_materials.gd` as its Import
-Script, and reimport it. The script assigns the character materials, then
-creates `ModifierBoneTarget3D` adapters for four targets plus one `TwoBoneIK3D`
-modifier after the animation system. Because that
-solver ignores target rotation, a following `CopyTransformModifier3D` copies
-only the target rotations onto the four end bones; their IK-solved positions
-remain intact.
+Use the VS Code launch **DDM: export model with animations** or **Godot: export
+selected folder**. Both use the generic compact TRS decoder with `--animations
+all --ik bake` by default. Explicit Euler rotations replace local joint
+rotations; they are not bind deltas. IK chains are read from skeleton flags,
+then baked into regular glTF joint tracks. No runtime IK classes, target-bone
+names, anatomical poles or extra import script are needed for playback.
 
-The maintained folder exporter enables all structurally bound rotations with
-`local_delta_post`, radians, and bone_000's complete slots 5–7 rotation. These choices are
-made while building the GLB; the Godot import script preserves them and does
-not reinterpret FK axes. Large undeclared controller triplets remain omitted
-instead of being treated as rotations or IK positions.
+Keep the generated `<model>.glb.import` companion when copying the GLB into
+Godot. It disables animation simplification that moves baked IK endpoints;
+re-export preserves the UID, material scripts and unrelated import settings.
 
-The `godot` IK mode does not run the offline two-bone solver and does not mark
-any limb channel as `ik_baked`. It exports the original decoded FK channels
-plus the four animated targets; `TwoBoneIK3D` is therefore the only IK solve.
-Use the separate `bake` mode only when a portable GLB with no runtime solver is
-required.
+The material post-import script can still assign shaders and textures. Its
+legacy humanoid IK hook only applies to older GLBs containing synthetic target
+bones; the current exporter does not create those bones and is not solved twice.
 
-The four fallback pole offsets are expressed in the original DDM units. The
-export manifest records `model_scale`, and the import script applies that same
-factor before adding an offset to the scaled skeleton rest pose. With the
-standard `--scale 0.01`, `(0,-50,25)` therefore becomes `(0,-0.5,0.25)` in
-Godot units. Pole bones, if a future decoder exports them explicitly, continue
-to take precedence over these synthetic fallbacks.
+`<model>.motion.json` records residuals, unreachable targets, source-state names,
+missing/composite states and secondary rig controls that remain unresolved. The
+current geometric solver preserves the incoming FK bend plane; equality with
+HexaEngine's exact twist, stretch and helper-control rules is not yet certified.
 
-Elbows and knees use the same editable anatomical fallback poles.
-By default, target orientations use the source engine's row-vector convention,
-transposed into Godot space and made relative to the selected reference pose.
-Use `--experimental-ik-target-orientation none` for the position-only control
-comparison.
-
-Nothing here is DDM-specific beyond the shader uniforms; the shader and the
-import script can be reused across every converted model.
+Use **Godot: validate animated GLB** in VS Code, or
+`python tools/validation/check_godot_animation.py MODEL.glb --godot GODOT_PATH`,
+to import in a temporary project and verify the animations and IK endpoints in
+the real engine. See [REVERSE_MOTION.md](../REVERSE_MOTION.md) for evidence.
 
 ## Extracting reusable instance meshes
 

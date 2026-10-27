@@ -507,7 +507,7 @@ class MapGeometryTests(unittest.TestCase):
         corpus = Path(__file__).resolve().parent.parent / \
             'game_files/decompressed/KB'
         sequence = corpus / 'motionSequence/gim103/gim103'
-        model = corpus / 'chara/gim103/gim103'
+        model = corpus / 'gimmick/gim103/gim103'
         if not sequence.is_file() or not model.is_file():
             self.skipTest('KB corpus motionSequence/motionPackage unavailable')
         result = motion_decode.discover_character_motion(model)

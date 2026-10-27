@@ -1,5 +1,9 @@
 # CHANNEL_BASE_FINDINGS (probe auto-generated)
 
+> Historical interpretation (2026-10-14): flat scalar mapping and carry claims
+> are superseded by [the compact TRS program](TRANSFORM_LAYOUT_FINDINGS.md),
+> verified 2026-10-27. Raw measurements below remain for traceability.
+
 ## gim103
 
 | base | in-rig | out-of-rig | quat bones | |q|≈1 | covered bones |

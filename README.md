@@ -44,7 +44,7 @@ tools/
     godot_export.py        Godot 4 native/custom material assets
     blend_mask.py          submesh seam blend-map generation
     material_pbr_estimator.py  Reserved matcap/mask-to-PBR research API
-    motion_decode.py       Character motion discovery and track decoding
+    motion/                Generic compact TRS animation decoding and baked IK
   research/
     shader_inspect.py      PS3 shader sampler-binding inspection
     rsx_fp_disasm.py       RSX fragment program disassembler
@@ -129,198 +129,74 @@ python tools/research/shader_inspect.py game_files/decompressed/KB/shader/KbBase
   --dump-programs output/shaders
 ```
 
-DDM conversion remains experimental. It exports GLB scenes with geometry,
-UVs, normals, vertex colors, material estimates and embedded XET textures for
-supported DDM v3 layouts. Character DDMs also export their skeleton, skinning
-weights and bone hierarchy. **Known ordering bug (2026-10-09):** without a
-motion resource the bind-skeleton arrays are read with a 4-byte-block-reversed
-id order (`REVERSE_DDM.md` §28.2), so the ~44 skinned characters that carry no
-`motionPackage` currently export a scrambled bind pose; bundles with a motion
-resource (34 characters) are validated and unaffected. Character animations
-live in separate proprietary
-`motionSequence`/`motionPackage` resources; the converter detects and reports
-those clips and validates their constant, linear and tangent scalar curves.
-The root translation and complete bone_000 rotation bindings are established. Joint rotation
-research is available behind explicit experimental options; it is not enabled by
-default. Those options are diagnostic and do not yet produce a correctly posed
-full character animation. Recursive scans skip non-DDM files and report
-unsupported variants without creating per-file output directories. A DDM that
-is valid but uses a layout the converter does not implement is reported as
-`[UNSUPPORTED]` with the detected variant family, its raw version word, and the
-reason (for example `v3 (map/static + skinned character), version=3: no submesh
-descriptor found for this layout`). These differ from `[ERROR]` lines, which
-flag genuinely corrupt, truncated or unreadable files. Empty directories
-created before a later conversion error are pruned, while nonempty output is
-retained. Findings are recorded in [`REVERSE_DDM.md`](REVERSE_DDM.md).
+DDM conversion supports geometry, UVs, normals, materials and embedded textures
+for the implemented DDM v3 layouts. Supported character files also include their
+skeleton and skin. Skeleton storage order is decoded from the DDM itself; a
+motion package is not required to recover its bind pose. Unsupported geometry
+variants are reported as `[UNSUPPORTED]`, separately from corrupt data.
 
-Motion parsing is isolated in `motion_decode.py`. It can inspect a character
-independently, while `ddm_to_3d.py` calls its API for skinned characters and
-passes proven channels to the GLB exporter. The exporter already accepts
-translation, rotation and scale channels; identifying the curve-to-joint and
-transform conventions remains the missing stage.
+### Animated models and Godot 4
 
-For focused motion research, dump complete decoded tracks for a few clips:
+In VS Code, run **DDM: export model with animations** for one model, or
+**Godot: export selected folder** for a recursive export. Select the input path,
+output directory, animation names/globs (default `all`) and IK mode (default
+`bake`). The decoder follows binary structure, without character-name branches.
 
 ```bash
-python tools/conversion/motion_decode.py \
-  game_files/decompressed/KB/chara/chr300/chr300 \
-  --clips 0,1,2 --dump-tracks output/chr300-motion-tracks.json
+python tools/conversion/ddm_to_3d.py PATH_TO_DDM output/decoded \
+  --animations all --ik bake --scale 0.01 --final
+python tools/conversion/export_folder_to_godot.py PATH_TO_FOLDER_UNDER_KB \
+  --godot-project PATH_TO_GODOT_PROJECT
 ```
 
-Scalar positions can also be compared across several named motions. The
-4-scalar-count variants (chr300: 247/249/251/253; chr301: 332/334/336/338) are
-**not** a simple prefix-coded scale-down of one table: per-clip probes show
-channel blocks inserted or omitted at several points of the stream, two clips
-of the same total count can place the same channel at different positions, and
-the verified IK effector channel sits mid-stream (chr301 left-hand target at
-scalar 184, not at the binder's arithmetic 182). See
-[`REVERSE_DDM.md` §28.5](REVERSE_DDM.md) and
-[`research/MOTION_ANALYSIS.md`](research/MOTION_ANALYSIS.md):
+`--animations` accepts `all`, `none`, comma-separated names/globs, or zero-based
+physical curve-slot indices. For example, `--animations '*move*,*turn*'` selects
+named locomotion states. Anonymous helper segments retain `segment_NNN` names.
+Alias names declared by the sequence are preserved. Named states without a
+matching standalone segment remain explicitly unresolved in the motion report.
+
+The compact transform program is verified on **4,436 curve blocks across 193
+packages**. It resolves variable-width translation/rotation/scale groups in
+skeleton order. Explicit rotations are absolute local XYZ Euler values in
+radians (`Rz Ry Rx`), independently checked against DDM bind quaternions.
+Linear and Hermite source curves are sampled at the measured 30 Hz clock;
+glTF interpolates those samples. IK chains come from parent/flag metadata and
+are calculated into ordinary glTF joint rotations, so playback requires no
+Godot IK addon. `--ik off` exports the FK comparison.
+
+Each animated model writes `<name>.glb`, `<name>.glb.import` and `<name>.motion.json`, including with
+`--final`. The latter records source slots, named-state bindings, rejected or
+missing states, IK residuals/clamped targets and unresolved secondary controls.
+Copy the `.glb.import` companion with the model: it disables Godot animation
+simplification that would otherwise move baked IK endpoints. Existing UID,
+material scripts and unrelated import settings are preserved on re-export.
+The larger `analysis.json` is omitted with `--final`. Positions are scaled by
+0.01 to meter-like units; `--scale` overrides this.
+
+**Remaining limits:** secondary rig controls and exact source-engine IK
+pole/twist/stretch rules still need verification. Composite qstm states and
+several geometry variants, including the rigid gim103 DDM, remain unsupported.
+The pipeline now exports full skeletal motion on supported character layouts;
+complete fidelity for every game model is still a research goal.
+
+Validate an export in an actual Godot 4 project, either with the VS Code launch
+**Godot: validate animated GLB**, or:
 
 ```bash
-python tools/conversion/motion_decode.py \
-  game_files/decompressed/KB/chara/chr300/chr300 \
-  --clips 0,7,8,15,20,38,40,42,44,46,78,109 \
-  --dump-layout output/chr300/motion_layout_compare.json
+python tools/validation/check_godot_animation.py PATH_TO_GLB --godot PATH_TO_GODOT
 ```
 
-Use `--all-clips` with `--dump-layout` to compare all 150 clips. Nonzero bytes
-retained in key-table alignment gaps are reported but are not rejected; after
-accounting for this writer behavior, every `chr300` scalar segment decodes to
-its exact boundary.
+This uses a temporary project and the normal editor importer, then samples each
+animation's start/middle/end, checks finite poses and compares imported IK
+endpoints to the source targets with the documented reach limits. The adjacent
+motion report and original source package must remain available for this check.
 
-An opt-in first animation milestone exports the validated root translation and
-rotation of selected clips. Scalar 0 contains a redundant Y-heading projection,
-scalar 1 is reserved zero, scalars 2–4 contain translation XYZ, and scalars
-5–7 contain bone_000's complete XYZ Euler rotation. Unwrapped values beyond one
-turn are valid continuous Euler data, not a reason to discard the channel:
-
-```bash
-python tools/conversion/ddm_to_3d.py \
-  game_files/decompressed/KB/chara/chr300/chr300 output \
-  --animation-clips 0 --experimental-root-motion
-```
-
-The `boredom` clip proves that slots 5–7 are essential: scalar 0 stays zero
-while bone_000 leans and twists throughout the clip. On every chr301
-`turn_90/180` clip, slot 6 carries the same signed delta as scalar 0. Therefore
-slots 5–7 alone preserve the complete root pose and the correct turn exactly
-once. Multiplying scalar 0 into that triplet doubles the turn and is retained
-as `--experimental-root-rotation-source combined` for comparison only;
-`heading` is a diagnostic Y-only projection.
-Per-clip initial/final root transforms are recorded in `analysis.json`.
-The full verification, including the cross-character byte comparison, is in
-[`research/MOTION_ANALYSIS.md`](research/MOTION_ANALYSIS.md).
-
-Cross-character comparison invalidated the former contiguous joint-suffix
-interpretation. After the eight verified root scalars, related humanoid rigs
-store ordered three-scalar transform groups for both skeleton joints and
-auxiliary rig controls. `chr302` has 66 groups for 42 non-root joints, leaving
-24 auxiliary groups; `chr303` inserts exactly 20 groups when its 20 additional
-bones appear; `chr301` has 30 auxiliary groups. The controls are interleaved by
-anatomical segment, not collected in a prefix or suffix. The two arm blocks
-were previously described as using a "verified functional FK/IK permutation
-rather than skeleton order"; the 2026-10-09 probes supersede that: channel
-blocks shift between clips (`REVERSE_DDM.md` §28.5), so arm/leg binding must
-first be derived per clip. `chr301`'s
-45-triplet head-accessory block has the width of 39 joints plus 6 controls, but
-contains no mode-6/7 animation in any clip and its constant controller values
-cannot be assigned sequentially to hair bones. It is therefore left unbound;
-the hair/tentacles remain in their DDM bind pose. The Euler space/order
-interpretation remains experimental, while root motion remains independently
-available. The count variants are handled by `remap_humanoid_scalar_starts`
-(difference 2/4: no shift; 6: shift −2), but per-clip probes
-(`REVERSE_DDM.md` §28.5) show further mid-stream shifts the remap does not
-cover, so this path remains partly inaccurate until step 5d lands.
-Cross-character equality identifies
-model-space IK targets for both wrists and ankles. The opt-in
-`--experimental-humanoid-ik-mode bake` probe bakes those targets through
-two-bone chains instead of interpreting their position values as Euler angles.
-Use `--experimental-humanoid-ik-mode godot` to preserve the decoded FK curves
-and export four targets for a Godot runtime solver. Elbows and knees use the
-same anatomical fallback poles. The triplet following each
-target can be disabled with `--experimental-ik-target-orientation none`. Its
-default `source-row` interpretation treats it as an absolute Euler orientation
-using the same row-vector-to-Godot transpose established for HSC instances,
-then cancels the selected reference pose. Its exact semantics remain
-experimental. The legacy `--experimental-humanoid-ik` and
-`--experimental-export-ik-targets` flags remain aliases for `bake` and `godot`.
-`--experimental-rotation-units auto` is retained for comparison. The bound
-joint curves use radians by default: their extrema repeatedly land near
-multiples of pi, consistently with the verified root Euler channels.
-
-`--experimental-rotation-axes` keeps the stored `xyz` component order and can
-emit separately named axis-permutation probes. Structurally bound humanoid
-triplets are composed as Euler deltas in each joint's local bind space. The
-default model is `bind_local * delta`; `--experimental-rotation-model` can emit
-the reversed composition as a separately named comparison probe.
-`--experimental-rotation-signs` independently controls the source-component
-signs. The `zyx` coordinate-basis probe uses `---` to account for the odd
-X/Z permutation's handedness change.
-
-The earlier `--experimental-controller-bake` probe is retained only for code
-comparison. It cannot repair the newly established interleaved layout and is
-not reached by automatic joint export.
-
-The command writes the animated character as `<name>/<name>.glb`, replacing
-the non-animated export in that output folder:
-
-```bash
-python tools/conversion/ddm_to_3d.py \
-  game_files/decompressed/KB/chara/chr300/chr300 output \
-  --animation-clips 0 --experimental-root-motion \
-  --experimental-rotation-joints 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61 \
-  --experimental-rotation-units degrees
-```
-
-For the 81-joint humanoid `chr301`, export a first complete test without
-spelling out every joint index:
-
-```bash
-python tools/conversion/ddm_to_3d.py \
-  game_files/decompressed/KB/chara/chr301/chr301 output \
-  --animation-clips 0 --experimental-root-motion \
-  --experimental-rotation-joints all
-```
-
-For reference-pose diagnostics, a clip endpoint can be cancelled before the
-Euler curves are composed with the local bind pose. Root rotation defaults to
-the complete slots 5–7 triplet; `heading` selects the diagnostic scalar-0
-Y-only projection and `combined` selects the rejected double-turn probe:
-
-```bash
-python tools/conversion/ddm_to_3d.py \
-  game_files/decompressed/KB/chara/chr301/chr301 output \
-  --animation-clips 0,2,3,8 --experimental-root-motion \
-  --experimental-root-rotation-source local \
-  --experimental-rotation-joints all \
-  --experimental-rotation-reference-clip 8 \
-  --experimental-rotation-reference-frame end
-```
-
-The state-sequence table supplies original clip names. For example,
-`motion_000` is `c300_0000_boredom_01_00`; these names are preserved in the
-analysis report and exported glTF animation.
-
-Earlier four-scalars-per-joint and contiguous three-scalars-per-joint layouts
-were both rejected. Descriptor counts are rig-dependent, and arithmetic
-identities such as `253 = 5 + 4*62` or `338 = 95 + 3*81` do not establish a
-scalar-to-joint binding.
-
-`chr300.crg` is a separate character-rig graph. Its eight fixed 128-byte
-records are now exposed in `analysis.json`, including referenced bone IDs,
-float parameters, and flags. Values such as `-30`, `25`, `35`, `70`, `90`, and
-`120` may describe controller limits, physical constraints, or collision
-volumes; `.crg` has not yet been proven to drive animation. The final motion
-segment is decoded separately as 150 variable-size per-clip metadata records.
-Its leading flags and event bytes correlate with motion classes and events,
-not with a global scalar-to-joint binding.
-
-Each source produces `<name>/<name>.glb`. With `--final`, a fresh PBR output
-folder contains only the self-contained GLB. Omit it for the JSON diagnostics
-used during reverse engineering. Positions are
-scaled by `0.01` to convert the observed centimeter-like units to meters;
-use `--scale` to override this.
+Research details: [REVERSE_MOTION.md](REVERSE_MOTION.md),
+[CURRENT_WORK.md](CURRENT_WORK.md), and
+[the compact-program evidence](research/TRANSFORM_LAYOUT_FINDINGS.md).
+The former `motion_decode.py` prototypes and their anatomical mappings are
+archived under `research/legacy/`; old experimental animation overrides are
+retired. Run the maintained inspector with `python -m tools.conversion.motion`.
 
 ### Material output modes
 
