@@ -48,6 +48,10 @@ func _ready() -> void:
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 		dropdown.item_selected.connect(_customize.bind(slot))
 	equipment.get_node("Cinematic").toggled.connect(_change_render_mode)
+	var hair: OptionButton = equipment.get_node("Hair")
+	for label in ["Automatic", "Show all", "Hide ponytail", "Hide forelock", "Hide both"]:
+		hair.add_item(label)
+	hair.item_selected.connect(_change_hair)
 	equipment.get_node("Health").value_changed.connect(_change_health)
 	equipment.get_node("AppearanceToggle").toggled.connect(func(value: bool): equipment.get_node("Appearance").visible = value)
 	var appearance_properties := {"Feather": "darkness_mask_feather", "Reflection": "darkness_reflection", "Normal": "darkness_normal_strength", "Flow": "darkness_flow_speed"}
@@ -198,10 +202,13 @@ func _setup_customization() -> void:
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 		dropdown.clear()
 		for asset in options:
-			dropdown.add_item("None" if asset == "none" else asset)
+			var note: String = model.equipment_source_note(asset)
+			dropdown.add_item("None" if asset == "none" else asset + (" [source placeholder]" if not note.is_empty() else ""))
 			dropdown.set_item_metadata(dropdown.item_count - 1, asset)
+			dropdown.set_item_tooltip(dropdown.item_count - 1, note)
 		dropdown.select(maxi(0, options.find(model.get(slot))))
 	equipment.get_node("Health").set_value_no_signal(model.health_ratio)
+	equipment.get_node("Hair").select(model.head_hair_mode)
 	_change_health(model.health_ratio)
 	_sync_appearance_controls()
 	_sync_render_mode()
@@ -218,8 +225,10 @@ func _sync_render_mode() -> void:
 	for i in range(dropdown.item_count):
 		var cinematic: String = dropdown.get_item_metadata(i)
 		var gameplay: String = model.ARMOR_PAIRS[cinematic]
-		dropdown.set_item_text(i, cinematic if model.cinematic_render else gameplay)
-		dropdown.set_item_tooltip(i, "Cinematic: %s / Gameplay: %s" % [cinematic, gameplay])
+		var asset: String = cinematic if model.cinematic_render else gameplay
+		var note: String = model.equipment_source_note(asset)
+		dropdown.set_item_text(i, asset + (" [source placeholder]" if not note.is_empty() else ""))
+		dropdown.set_item_tooltip(i, "Cinematic: %s / Gameplay: %s\n%s" % [cinematic, gameplay, note])
 	equipment.get_node("Cinematic").set_pressed_no_signal(model.cinematic_render)
 	for field in ["HealthLabel", "Health", "Note", "AppearanceToggle"]:
 		equipment.get_node(field).visible = not model.cinematic_render
@@ -237,6 +246,11 @@ func _change_health(value: float) -> void:
 	if customization.visible and is_instance_valid(model):
 		model.health_ratio = value
 		equipment.get_node("HealthLabel").text = "Health: %d%%" % roundi(value * 100.0)
+
+
+func _change_hair(index: int) -> void:
+	if customization.visible and is_instance_valid(model):
+		model.head_hair_mode = index
 
 
 func _change_appearance(value: Variant, property: String) -> void:

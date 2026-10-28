@@ -9,6 +9,43 @@ from tools.conversion.player_armor import partition_player_parts, is_player_asse
 
 
 class PlayerArmorTests(unittest.TestCase):
+    def test_accessory_tar_uses_shader_feature_even_with_unrecognized_names(self):
+        names = ['T_cap', 'T_hat', 'Tkannmuri', 'chr725_T', 'chr726T_kamen',
+                 'T_gauntlet', 'T_kote', 'Tude', 'chr745_T', 'chr746T_kote']
+        materials = [dict(index=i, name=name, render_state=dict(shader_key='0x00a07367'))
+                     for i, name in enumerate(names)]
+        materials.append(dict(index=len(names), name='hat',
+                              render_state=dict(shader_key='0x0084737f')))
+        self.assertEqual(darkness_material_indices(materials), set(range(len(names))))
+        parts = [dict(material_index=i, triangles=[(0, 1, 2)]) for i in range(len(materials))]
+        result = partition_player_render_parts(parts, materials)
+        self.assertTrue(all(p['armor_slot'] == 'body_darkness' for p in result[:-1]))
+        self.assertEqual(result[-1]['armor_slot'], 'body')
+
+    def test_hair_groups_keep_authored_triangles_and_tar_with_their_hair_chain(self):
+        skeleton = {'joints': [dict(global_id=bone) for bone in [110, 193, 191, 120]]}
+        vertices = [dict(joints=(joint,), weights=(1.0,)) for joint in (0, 1, 2, 3)]
+        parts = [dict(material_index=material, triangles=[(joint,) * 3])
+                 for material, joint in [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (0, 3)]]
+        result = partition_player_render_parts(parts,
+            [dict(index=0, name='hear'), dict(index=1, name='T_body')],
+            vertices, skeleton=skeleton)
+        self.assertEqual([p['armor_slot'] for p in result],
+                         ['body', 'hair_palm', 'hair_fringe', 'hair_palm_darkness', 'hair_fringe_darkness', 'body'])
+        self.assertEqual([p['triangles'] for p in result], [p['triangles'] for p in parts])
+
+    def test_mixed_tar_surface_keeps_face_and_torso_when_hiding_hair(self):
+        skeleton = {'joints': [dict(global_id=bone) for bone in [193, 191, 120, 13]]}
+        vertices = [dict(joints=(joint,), weights=(1.0,)) for joint in (0, 1, 2, 3)]
+        triangles = [(0, 0, 0), (1, 1, 1), (2, 2, 2), (3, 3, 3), (0, 2, 3)]
+        result = partition_player_render_parts(
+            [dict(material_index=0, triangles=triangles)], [dict(index=0, name='T_body')],
+            vertices, skeleton=skeleton)
+        by_slot = {p['armor_slot']:p['triangles'] for p in result}
+        self.assertEqual(by_slot['hair_palm_darkness'], [triangles[0]])
+        self.assertEqual(by_slot['hair_fringe_darkness'], [triangles[1]])
+        self.assertEqual(by_slot['body_darkness'], triangles[2:])
+
     def test_player_texture_color_does_not_use_unverified_legacy_tint(self):
         from copy import deepcopy
         from tools.conversion.player_armor import apply_player_material_policy

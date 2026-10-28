@@ -434,7 +434,9 @@ def analyze_skinned_file(path, data, out_dir, args, header):
         except ImportError:
             from player_armor import is_player_asset, is_player_accessory, partition_player_render_parts
         if is_player_asset(path.stem) or is_player_accessory(path.stem):
-            mesh_parts = partition_player_render_parts(mesh_parts, materials, vertices, bracelets=path.stem.startswith("chr74"))
+            mesh_parts = partition_player_render_parts(
+                mesh_parts, materials, vertices, bracelets=path.stem.startswith("chr74"),
+                skeleton=skeleton if is_player_asset(path.stem) else None)
     image_data = {}
     if not args.no_textures:
         with tempfile.TemporaryDirectory(prefix="ddm-glb-textures-") as temp:

@@ -19,6 +19,12 @@ extends Node3D
 		head = value
 		if is_node_ready():
 			_equip_accessory("head", value)
+## Automatic coverage is a Godot preview policy, not a decoded original switch.
+@export_enum("Automatic", "Show all", "Hide palm", "Hide fringe", "Hide both") var head_hair_mode := 0:
+	set(value):
+		head_hair_mode = value
+		if is_node_ready():
+			_refresh_hair_visibility()
 @export var bracelets := "none":
 	set(value):
 		bracelets = value
@@ -31,6 +37,21 @@ const ARMOR_PAIRS := {
 	"chr121": "chr120", "chr126": "chr125", "chr131": "chr130",
 	"chr136": "chr135", "chr141": "chr140", "chr151": "chr150",
 	"chr156": "chr155", "chr146": "chr145",
+}
+
+# Coverage observed from the accessory geometry; crowns leave the hair exposed.
+const HEAD_HAIR_COVERAGE := {
+	"chr720": 3, "chr721": 1, "chr722": 1, "chr723": 3,
+	"chr725": 3, "chr726": 2,
+}
+# Exact gray source textures, confirmed against the original XET files.
+const SOURCE_PLACEHOLDER_NOTES := {
+	"chr145": "Original costume texture is uniform gray (128, 128, 128).",
+	"chr146": "Original costume texture is uniform gray (128, 128, 128).",
+	"chr150": "Original clothing texture is uniform gray; skin and hair textures exist.",
+	"chr151": "Original clothing texture is uniform gray; skin and hair textures exist.",
+	"chr155": "Original clothing texture is uniform gray; skin and hair textures exist.",
+	"chr156": "Original clothing texture is uniform gray; skin and hair textures exist.",
 }
 
 ## Health-to-mask mapping is a preview; the game's CPU PV->tarHP curve is unknown.
@@ -174,6 +195,12 @@ func get_animation_tree() -> AnimationTree:
 	return get_node_or_null("AnimationTree") as AnimationTree
 
 
+func equipment_source_note(asset: String) -> String:
+	if asset in ["chr727", "chr728", "chr729", "chr747", "chr748", "chr749"]:
+		return "Original test mesh: 24 vertices, with a uniform gray texture named test."
+	return SOURCE_PLACEHOLDER_NOTES.get(asset, "")
+
+
 func _find_skeleton(root: Node) -> Skeleton3D:
 	if root is Skeleton3D:
 		return root as Skeleton3D
@@ -211,6 +238,7 @@ func _equip_body() -> void:
 	_pieces["body"] = piece
 	add_child(piece)
 	_prepare_tar_materials(piece)
+	_refresh_hair_visibility()
 	_refresh_darkness()
 	_refresh_tar_textures()
 	_sync_poses()
@@ -221,10 +249,12 @@ func _equip_accessory(slot: String, asset: String) -> void:
 		if key == slot or String(key).begins_with(slot + "_"):
 			_remove_piece(key)
 	if asset == "none" or not is_instance_valid(_skeleton):
+		_refresh_hair_visibility()
 		return
 	var prefix := "chr72" if slot == "head" else "chr74"
 	if not asset.begins_with(prefix) or not _catalog.has(asset):
 		push_warning("Missing " + slot + " accessory: " + asset)
+		_refresh_hair_visibility()
 		return
 	var sides := [""] if slot == "head" else ["positive", "negative"]
 	for side in sides:
@@ -237,6 +267,7 @@ func _equip_accessory(slot: String, asset: String) -> void:
 			mesh.visible = selected
 			mesh.set_meta("player_equipped_surface", selected)
 		_prepare_tar_materials(piece)
+	_refresh_hair_visibility()
 	_refresh_tar_textures()
 	_refresh_darkness()
 	_sync_poses()
@@ -256,6 +287,22 @@ func _tar_meshes() -> Array[MeshInstance3D]:
 			if String(mesh.name).ends_with("_darkness") and mesh.get_meta("player_equipped_surface", true):
 				result.append(mesh)
 	return result
+
+
+func _refresh_hair_visibility() -> void:
+	if not _pieces.has("body"):
+		return
+	var hidden: int = HEAD_HAIR_COVERAGE.get(head, 0) if _pieces.has("head") else 0
+	if head_hair_mode > 0:
+		hidden = [0, 0, 1, 2, 3][head_hair_mode]
+	for mesh in _pieces["body"].find_children("*", "MeshInstance3D", true, false):
+		var mask := 1 if String(mesh.name).begins_with("armor_hair_palm") else (2 if String(mesh.name).begins_with("armor_hair_fringe") else 0)
+		if mask == 0:
+			continue
+		var shown := (mask & hidden) == 0
+		mesh.set_meta("player_hair_visible", shown)
+		mesh.visible = shown and (not String(mesh.name).ends_with("_darkness") or (not cinematic_render and (darkness_show_mask or use_original_tar_hp or health_ratio < 1.0)))
+	_refresh_darkness()
 
 
 func _prepare_tar_materials(piece: Node3D) -> void:
@@ -315,7 +362,7 @@ func _process(delta: float) -> void:
 
 
 func _update_tar_frame() -> void:
-	if not is_instance_valid(_skeleton):
+	if not is_inside_tree() or not is_instance_valid(_skeleton) or not _skeleton.is_inside_tree():
 		return
 	var root_world := _skeleton.to_global(_skeleton.get_bone_global_pose(0).origin)
 	for mesh in _tar_meshes():
@@ -332,7 +379,7 @@ func _refresh_darkness() -> void:
 	var cutoff := (1.0 - health_ratio) * (1.0 + width)
 	var parameters := tar_hp if use_original_tar_hp else Vector3(cutoff, cutoff - width, 1.0 / width)
 	for mesh in _tar_meshes():
-		mesh.visible = not cinematic_render and (darkness_show_mask or use_original_tar_hp or health_ratio < 1.0)
+		mesh.visible = mesh.get_meta("player_hair_visible", true) and not cinematic_render and (darkness_show_mask or use_original_tar_hp or health_ratio < 1.0)
 		mesh.set_instance_shader_parameter("tar_depth_bias", darkness_depth_bias)
 		mesh.set_instance_shader_parameter("tar_hp", parameters)
 		mesh.set_instance_shader_parameter("tar_color", darkness_color)

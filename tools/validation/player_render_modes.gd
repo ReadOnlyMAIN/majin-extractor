@@ -5,7 +5,7 @@ static func run(lab: Node) -> Dictionary:
 	var player: Node3D = lab.model
 	var animation_player: AnimationPlayer = player.get_animation_player()
 	var clip := animation_player.current_animation
-	var time := animation_player.current_animation_position
+	var time := animation_player.current_animation_position if clip != "" else 0.0
 	var saved_body: String = player.body
 	var saved_head: String = player.head
 	var saved_bracelets: String = player.bracelets
@@ -22,7 +22,7 @@ static func run(lab: Node) -> Dictionary:
 			var expected: String = body if mode else player.ARMOR_PAIRS[body]
 			if player._pieces["body"].scene_file_path.get_file() != expected + ".glb":
 				failures.append("Wrong body family: " + body)
-			if player.get_animation_player() != animation_player or animation_player.current_animation != clip or abs(animation_player.current_animation_position-time)>0.0001:
+			if player.get_animation_player() != animation_player or animation_player.current_animation != clip or (clip != "" and abs(animation_player.current_animation_position-time)>0.0001):
 				failures.append("Animation changed when switching " + body)
 			for mesh in player._tar_meshes():
 				if mesh.is_visible_in_tree() == mode:

@@ -219,6 +219,14 @@ text = "Head accessory"
 [node name="Head" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 
+[node name="HairLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Hair under headwear"
+
+[node name="Hair" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+tooltip_text = "Choose which hair parts remain visible under the head accessory. Automatic follows headwear coverage."
+
 [node name="BraceletsLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 text = "Bracelets"

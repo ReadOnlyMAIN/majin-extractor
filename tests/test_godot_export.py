@@ -26,6 +26,19 @@ from tools.conversion.godot_export import (
 
 
 class GodotExportTests(unittest.TestCase):
+    def test_accessory_tar_feature_selects_player_darkness_shader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            materials = [dict(index=0, name='chr726T_kamen',
+                              render_state=dict(shader_key='0x00a07377', mode='alpha_blend'),
+                              textures=[dict(role='diffuse', output='textures/tar.png')])]
+            result = write_godot_material_assets(root, materials,
+                {'textures/tar.png': b'\x89PNG\r\n\x1a\n'}, asset_kind='character')
+            manifest = json.loads((root / 'materials/material_bindings.json').read_text())
+            entry = manifest['materials'][0]
+            self.assertEqual(entry['shader'], 'res://majin_utility/player_darkness.gdshader')
+            self.assertNotIn('albedo_modulate', entry['colors'])
+
     def test_writes_shader_textures_and_material_bindings(self):
         with tempfile.TemporaryDirectory() as root:
             out = Path(root)
