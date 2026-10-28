@@ -85,7 +85,7 @@ Health and the expandable **Darkness appearance** controls are visible only in
 gameplay mode. They provide edge softness, reflections, normals, color, flow,
 coverage-mask display and reset. Flow defaults to .1 and the original global tar
 textures load automatically. Reset preserves equipment and health. The panel
-scrolls on smaller windows and is hidden for other characters.
+scrolls on smaller windows. Other compatible characters show only hand equipment.
 
 Named clips are shown by default. **Show unnamed segments** reveals unnamed
 physical segments with stable source IDs in tooltips. chr1 retains 391 named
@@ -135,3 +135,47 @@ existing strands and folds; no new motifs, material colors or rendered lighting.
 `build_texture_pack.gd.generate_normals()` accepts a `normal_sources` dictionary
 mapping original PNG names to generated input paths and normalizes the output
 on a worker thread. AI edits may alter fine relief and require on-model review.
+
+## Hand equipment
+
+The right panel exposes **Right hand weapon** and **Left hand accessory**,
+with **None** to remove an item. Imported `chr9xx` models are discovered beside
+the characters and excluded from the character list. The user's confirmed
+compatibility table is stored in `hand_equipment.gd`:
+
+| Character | Right hand | Left hand |
+| --- | --- | --- |
+| chr1 (including individual body variants) | chr900, chr980, chr990–992 (DLC placeholders) | chr905 |
+| chr300 | chr910 | none |
+| chr301 | chr910 | chr920 |
+| chr302 | chr911 | chr921 |
+| chr303 | chr912 | chr922 |
+
+All slots start empty; **None** remains available. chr900/905/980/990–992 are
+exclusive to chr1, including during previews on other characters. Unmapped chr3
+rigs retain a preview of the remaining right-hand items and chr920–922 shields
+on hand chains with an authored grip bone. Their panel explicitly says compatibility is unconfirmed,
+so these candidates are not presented as recovered game equipment restrictions.
+
+The controller uses the authored model origin without recentering or rescaling.
+Right-hand items follow the authored palm grip `bone_250`, a child of hand 45
+(arm chain 41 → 43 → 45); left-hand items follow `bone_251`, a child of hand 15
+(11 → 13 → 15). These grip transforms contain both the palm offset and orientation;
+attaching directly to the wrist bones 45/15 loses that information. Attachments follow the visible body's skeleton after
+pose updates, including scrubbing, costume changes and cinematic/gameplay switches.
+Switching equipment does not restart the character animation. Changing character
+removes equipment. The controller stays outside the character tree, so equipment
+meshes do not interfere with skeleton selection or texture replacement.
+
+Imported all 19 available chr3 packages into the user's project. The 14 additions
+are chr310, chr312, chr314, chr320, chr321, chr330, chr331, chr332, chr340, chr341,
+chr350, chr360, chr361 and chr380. They retain their source animations and use
+the project's saved import preset. The running Lab is left on chr310 for review.
+
+MCP validation: exact lists and rejection of forbidden equipment on chr1,
+chr100 and chr300–303; no chr1-exclusive items exposed on other chr3; all 19 chr3
+models load with their exported materials (2,346 animation entries). Grip
+transforms match at three clip times on chr300–303 and for all five chr1
+right-hand items across eleven costumes in both rendering modes (110 cases).
+The final run has no game errors. These checks validate attachment to the authored
+grip frames, not every source animation's fidelity.

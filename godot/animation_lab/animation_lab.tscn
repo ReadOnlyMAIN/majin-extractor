@@ -205,6 +205,28 @@ theme_override_constants/separation = 10
 layout_mode = 2
 text = "CHR1 / CUSTOMIZATION"
 
+[node name="RightWeaponLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Right hand weapon"
+
+[node name="RightWeapon" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+tooltip_text = "Preview imported chr9xx equipment at this hand. None removes it."
+
+[node name="LeftWeaponLabel" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+text = "Left hand accessory"
+
+[node name="LeftWeapon" type="OptionButton" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+tooltip_text = "Preview imported chr9xx equipment at this hand. None removes it."
+
+[node name="EquipmentNote" type="Label" parent="UI/Customization/Scroll/Margin/Controls"]
+layout_mode = 2
+custom_minimum_size = Vector2(260, 0)
+text = "Equipment preview: compatibility for this character is still to be confirmed."
+autowrap_mode = 2
+
 [node name="Cinematic" type="CheckButton" parent="UI/Customization/Scroll/Margin/Controls"]
 layout_mode = 2
 text = "Cinematic rendering"

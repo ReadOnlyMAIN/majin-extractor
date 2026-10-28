@@ -28,6 +28,8 @@ extends Node3D
 
 var texture_pack := preload("res://animation_lab/texture_pack.gd").new()
 
+var hand_equipment := preload("res://animation_lab/hand_equipment.gd").new()
+
 var model: Node3D
 var player: AnimationPlayer
 var skeleton: Skeleton3D
@@ -47,6 +49,9 @@ var bone_material := StandardMaterial3D.new()
 
 
 func _ready() -> void:
+	add_child(hand_equipment)
+	for hand in ["right", "left"]:
+		equipment.get_node(hand.capitalize() + "Weapon").item_selected.connect(_equip_weapon.bind(hand))
 	texture_pack_toggle.toggled.connect(_apply_texture_pack)
 	texture_pack_toggle.disabled = not texture_pack.available()
 	unnamed.toggled.connect(func(_value: bool): _filter_animations())
@@ -99,7 +104,7 @@ func _find_glbs(directory: String, result: Array[String]) -> void:
 		if file.get_extension().to_lower() == "glb":
 			result.append(directory.path_join(file))
 	for child in folder.get_directories():
-		var costume := child.length() == 6 and child.substr(3).is_valid_int() and (child.begins_with("chr1") or child.begins_with("chr72") or child.begins_with("chr74") or (child.begins_with("chr2") and ResourceLoader.exists(characters_directory.path_join("chr2.tscn"))))
+		var costume := child.length() == 6 and child.substr(3).is_valid_int() and (child.begins_with("chr1") or child.begins_with("chr72") or child.begins_with("chr74") or child.begins_with("chr9") or (child.begins_with("chr2") and ResourceLoader.exists(characters_directory.path_join("chr2.tscn"))))
 		if not child.begins_with(".") and not costume:
 			_find_glbs(directory.path_join(child), result)
 
@@ -139,6 +144,7 @@ func _refresh_characters() -> void:
 
 
 func _clear_model() -> void:
+	hand_equipment.clear()
 	texture_pack.clear()
 	_set_overlay_skeleton(null)
 	customization.hide()
@@ -181,7 +187,9 @@ func _select_character(index: int) -> void:
 	var is_player := model.has_method("available_equipment")
 	if is_player:
 		player = model.get_animation_player()
-		_setup_customization()
+	_setup_customization()
+	hand_equipment.configure(model, characters_directory)
+	_setup_weapons()
 	var sidecar := path.get_basename() + ".motion.json"
 	if is_player:
 		var master: String = model.animation_master()
@@ -218,7 +226,13 @@ func _apply_texture_pack(enabled: bool) -> void:
 
 
 func _setup_customization() -> void:
+	var customizable := model.has_method("available_equipment")
+	for child in equipment.get_children():
+		child.visible = customizable
+	if not customizable:
+		return
 	customization.show()
+	equipment.get_node("Title").text = model.character_family.to_upper() + " / CUSTOMIZATION"
 	var player_equipment: bool = model.character_family == "chr1"
 	for field in ["Cinematic", "HeadLabel", "Head", "HairLabel", "Hair", "BraceletsLabel", "Bracelets"]:
 		equipment.get_node(field).visible = player_equipment
@@ -239,11 +253,40 @@ func _setup_customization() -> void:
 	_sync_render_mode()
 
 
+func _setup_weapons() -> void:
+	var supported := false
+	for hand in ["right", "left"]:
+		var dropdown: OptionButton = equipment.get_node(hand.capitalize() + "Weapon")
+		var options: Array = hand_equipment.available(hand)
+		dropdown.clear()
+		dropdown.visible = not options.is_empty()
+		equipment.get_node(hand.capitalize() + "WeaponLabel").visible = dropdown.visible
+		for asset in options:
+			var label: String = "None" if asset == "none" else asset
+			if asset in ["chr990", "chr991", "chr992"]:
+				label += " [DLC placeholder]"
+			dropdown.add_item(label)
+			dropdown.set_item_metadata(dropdown.item_count - 1, asset)
+		dropdown.select(0 if not options.is_empty() else -1)
+		supported = supported or not options.is_empty()
+	equipment.get_node("EquipmentNote").visible = supported and not hand_equipment.compatibility_confirmed()
+	customization.visible = model.has_method("available_equipment") or supported
+	if supported and not model.has_method("available_equipment"):
+		equipment.get_node("Title").show()
+		equipment.get_node("Title").text = model.scene_file_path.get_file().get_basename().to_upper() + " / EQUIPMENT"
+
+
+func _equip_weapon(index: int, hand: String) -> void:
+	var dropdown: OptionButton = equipment.get_node(hand.capitalize() + "Weapon")
+	hand_equipment.equip(hand, dropdown.get_item_metadata(index))
+
+
 func _change_render_mode(enabled: bool) -> void:
 	if customization.visible and is_instance_valid(model):
 		model.cinematic_render = enabled
 		_apply_texture_pack(texture_pack_toggle.button_pressed)
 		_sync_render_mode()
+		hand_equipment.update_attachment()
 
 
 func _sync_render_mode() -> void:
@@ -266,6 +309,7 @@ func _customize(index: int, slot: String) -> void:
 		return
 	var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 	model.set(slot, dropdown.get_item_metadata(index))
+	hand_equipment.update_attachment()
 	_apply_texture_pack(texture_pack_toggle.button_pressed)
 
 
@@ -318,7 +362,7 @@ func _reset_appearance() -> void:
 
 
 func _update_tar_lighting() -> void:
-	if not customization.visible or not is_instance_valid(model):
+	if not customization.visible or not is_instance_valid(model) or not model.has_method("set_tar_lighting"):
 		return
 	var key: DirectionalLight3D = $KeyLight
 	var environment: Environment = $WorldEnvironment.environment
@@ -383,6 +427,7 @@ func _select_animation(index: int) -> void:
 	timeline.set_value_no_signal(0.0)
 	player.play(clip)
 	player.advance(0.0)
+	hand_equipment.update_attachment()
 	_apply_speed()
 	var bone_count := skeleton.get_bone_count() if skeleton != null else 0
 	var details: Dictionary = metadata.get(String(clip), {})
@@ -422,6 +467,7 @@ func _seek(value: float) -> void:
 	if not player.is_playing():
 		player.play(clip)
 	player.seek(value, true)
+	hand_equipment.update_attachment()
 	_apply_speed()
 
 

@@ -132,7 +132,11 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
     parent_offset = id_offset + padded_count
     translation_offset = parent_offset + padded_count
     rotation_offset = translation_offset + transform_count * 16
-    flags_offset = rotation_offset + transform_count * 16
+    # Layout 0x13 stores translations and flags but no quaternion array.
+    # Layout 0x1b adds rotations (bit 0x08). Translation-only weapon rigs
+    # can have more than two bones and nonzero attachment translations.
+    translation_only = be_u32(data, 0xAC) == 0x13
+    flags_offset = rotation_offset if translation_only else rotation_offset + transform_count * 16
     if flags_offset + transform_count * 4 > len(data):
         raise RuntimeError("Skeleton arrays exceed the DDM file.")
 
@@ -175,9 +179,6 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
     id_to_joint = {
         bone_id: index for index, bone_id in enumerate(transform_bone_ids)
     }
-    # Static attachment DDMs (chr72x/74x) omit TR arrays: layout 0x13,
-    # unlike the animated 0x1b layout. Their two-node bind rig is identity.
-    static_attachment = be_u32(data, 0xAC) == 0x13 and transform_count == 2
     joints = []
     for index, bone_id in enumerate(transform_bone_ids):
         parent_id = parent_by_id[bone_id]
@@ -189,9 +190,9 @@ def decode_skinned_skeleton(data: bytes, transform_bone_ids=None):
             raise RuntimeError(
                 f"Bone {bone_id} references unknown parent id {parent_id}."
             )
-        translation = ((0.0, 0.0, 0.0) if static_attachment else struct.unpack_from(
-            ">3f", data, translation_offset + index * 16))
-        rotation = ((0.0, 0.0, 0.0, 1.0) if static_attachment else struct.unpack_from(
+        translation = struct.unpack_from(
+            ">3f", data, translation_offset + index * 16)
+        rotation = ((0.0, 0.0, 0.0, 1.0) if translation_only else struct.unpack_from(
             ">4f", data, rotation_offset + index * 16))
         if not finite3(translation) or not all(math.isfinite(x) for x in rotation):
             raise RuntimeError(f"Bone {bone_id} has a non-finite bind transform.")

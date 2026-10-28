@@ -107,7 +107,7 @@ class PlayerArmorTests(unittest.TestCase):
         self.assertEqual([p['armor_slot'] for p in result], ['bracelet_positive_darkness', 'bracelet_negative_darkness'])
         self.assertEqual([p['triangles'] for p in result], [[(0, 1, 2)], [(3, 4, 5)]])
 
-    def test_static_attachment_rig_omits_tr_arrays(self):
+    def test_static_attachment_rig_omits_rotations(self):
         import struct
         data = bytearray(0x110)
         struct.pack_into('>II', data, 0xac, 0x13, 2)
@@ -119,6 +119,21 @@ class PlayerArmorTests(unittest.TestCase):
         struct.pack_into('>I', data, 0xac, 0x1b)
         with self.assertRaisesRegex(RuntimeError, 'quaternion norm'):
             decode_skinned_skeleton(bytes(data))
+
+    def test_translation_only_weapon_preserves_offsets_without_rotation_array(self):
+        import struct
+        # Three translations followed immediately by three flags: no room
+        # for the quaternion array expected by layout 0x1b.
+        data = bytearray(0xbc + 3 * 16 + 3 * 4)
+        struct.pack_into('>II', data, 0xac, 0x13, 3)
+        data[0xb4:0xb8] = bytes([0, 2, 1, 0])
+        data[0xb8:0xbc] = bytes([0, 1, 0, 255])
+        struct.pack_into('>3f', data, 0xbc + 2 * 16, 1.5, -2.0, 180.5)
+        struct.pack_into('>3I', data, 0xbc + 3 * 16, 2, 2, 2)
+        skeleton = decode_skinned_skeleton(bytes(data))
+        self.assertEqual([j['parent'] for j in skeleton['joints']], [None, 0, 1])
+        self.assertEqual(skeleton['joints'][2]['translation'], (1.5, -2.0, 180.5))
+        self.assertTrue(all(j['rotation'] == (0, 0, 0, 1) for j in skeleton['joints']))
 
     def test_darkness_surfaces_are_separate_from_equipment(self):
         materials = [dict(index=i, name=name) for i, name in enumerate(

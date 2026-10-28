@@ -171,8 +171,8 @@ also work, because the controller retains every source body mesh.
 The hidden chr100 master keeps the 477 animation clips. Changing body or mode
 preserves the AnimationPlayer, playback time, health and accessories. Visible
 body rigs receive source deformation through their global bind matrices, which
-preserves the cinematic jaw's different bind axes. Static accessories omit the
-animated TR arrays in their two-node DDM rig. Head follows the head anchor;
+preserves the cinematic jaw's different bind axes. Translation-only accessories retain their DDM bind translations and use
+identity rotations (layout `0x13` omits the quaternion array). Head follows the head anchor;
 bracelets are split by their authored positive/negative X geometry and follow
 bones 13/43. This is a preview attachment reconstruction, not a recovered complete
 cinematic cloth/accessory simulation.
