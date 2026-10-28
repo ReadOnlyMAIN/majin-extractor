@@ -50,3 +50,8 @@ the test accessories also have entries in LinkItemData. This does not establish
 that they were finished or obtainable. Their source textures are retained and
 the Animation Lab labels these variants as source placeholders. No replacement
 texture or material appearance is invented.
+
+User context (2026-10-28): the last three costumes are expected to be DLC
+placeholders while their dedicated DLC PAKs have not been extracted. Keep
+these entries as placeholders and defer DLC extraction until the end. The
+association with particular DLC archives has not yet been independently checked.

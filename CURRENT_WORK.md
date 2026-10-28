@@ -1,5 +1,40 @@
 # Reprise — animations génériques et IK (2026-10-27)
 
+## Noms d’animation chr1 — hypothèse réfutée le 2026-10-28
+
+[Audit corrigé](research/PLAYER_ANIMATION_AVAILABILITY.md). L’association par
+égalité d’offset et de durée a été **réfutée par observation utilisateur** :
+`segment_294` montre une variante d'idle avec bâillement, pas `run_wall_01`.
+Les 23 noms/alias ajoutés sur cette hypothèse ont été retirés, ainsi que le
+résolveur de références partagées et les changements Godot associés.
+Les fichiers GLB, rapport motion et script de post-import du projet ont été
+restaurés octet pour octet depuis leur sauvegarde antérieure.
+
+Retour à **477 entrées : 391 noms existants et 86 segments anonymes**. Les
+23 états sans payload propre restent non résolus ; un offset répété ne prouve
+ni un alias ni un lien sémantique avec le payload suivant. Les tests numériques
+et l’import Godot validaient la lecture/les poses, **pas l’identité des noms**.
+Les 54 concordances de durée ne constituent donc pas une preuve de mapping.
+Aucun des quatre nouveaux noms n’est retenu. Le bâillement est une observation
+utilisateur, pas la récupération d’un nom source. Il faut établir le lien par
+le chemin de sélection du jeu et/ou une référence visuelle indépendante.
+
+
+Nouvelle piste numérique (28 octobre) :
+[PLAYER_MOTION_SELECTION_FINDINGS.md](research/PLAYER_MOTION_SELECTION_FINDINGS.md).
+Les observations utilisateur sont enregistrées comme repères, jamais comme des
+renommages. Les deux chaînes attendues pour 311/312 restent des **requêtes de
+recherche**, conformément à sa précision. Le chemin PPU `0x2d2f50` →
+`0xbfd770` → `0x71a490` traduit des IDs logiques en numéros moteur puis offsets
+physiques. Les cellules lues donnent IDs 78/82 → moteur 313 → segment 311,
+79/83 → 314 → 312 ; leurs contrôles passent de 0 à ±pi/2. Les mêmes IDs 58/59
+sélectionnent 100/101 ou 341/342 selon le pointeur de table, avec décalage explicite
++196 octets. Aucun nom original n’est encore récupéré ; aucun export modifié.
+La sonde vérifie 20 instructions et les offsets physiques sur les sources.
+
+Contexte utilisateur : les trois dernières tenues sont attendues comme
+placeholders de DLC non encore extraits ; traiter les DLC à la toute fin.
+
 Objectif : exporter les modèles et leurs animations pour Godot 4 depuis VS Code,
 sans règles par personnage. Convention : **Evidence over guessing**.
 

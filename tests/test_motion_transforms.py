@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.conversion.ddm.skinned import decode_skinned_skeleton
 from tools.conversion.motion.curves import DecodedCurveBlock, ScalarTrack, decode_curve_block
@@ -235,6 +236,40 @@ class TransformCorpusTests(unittest.TestCase):
         record_start = record.qstm_offset - name_size - 20
         self.assertEqual(struct.unpack_from('>I', data, record_start)[0], record.type_id)
         self.assertEqual(records[0].qstm_offset + len(records[0].qstm.raw), record_start)
+
+    def test_repeated_offsets_do_not_establish_animation_names(self):
+        info = discover_character_motion(ROOT / 'chara/chr100/chr100')
+        with patch('tools.conversion.motion.pose.decode_transform_clip', return_value={}):
+            clips = decode_character_animations(info)
+        names = {clip['name'] for clip in clips}
+        self.assertEqual(len(clips), 477)
+        self.assertEqual(sum(name.startswith('segment_') for name in names), 86)
+        # User visual counterexample: physical segment 294 shows a yawning
+        # idle, contradicting the proposed run_wall label from zero-span 293.
+        self.assertIn('segment_294', names)
+        self.assertNotIn('c100_0010_run_wall_01_00', names)
+        self.assertNotIn('c100_0010_walk_01_00', names)
+        for slot in (27, 111, 217):
+            self.assertIn(f'segment_{slot:03d}', names)
+        package = self.package('chr100')
+        self.assertEqual(package.slots[293].start, package.slots[295].start)
+        self.assertEqual(package.slots[293].size, 0)
+        missing = info['export_diagnostics']['unresolved_states']
+        self.assertEqual(len(missing), 23)
+        self.assertEqual({state['reason_code'] for state in missing}, {'zero_storage_span'})
+
+    def test_unselected_and_rejected_states_are_distinguished(self):
+        info = discover_character_motion(ROOT / 'gimmick/gim103/gim103')
+        with patch('tools.conversion.motion.pose.decode_transform_clip', return_value={}):
+            decode_character_animations(info, animations='no_such_animation')
+        self.assertEqual({s['reason_code'] for s in info['export_diagnostics']['unresolved_states']},
+                         {'not_selected'})
+        with patch('tools.conversion.motion.pose.decode_transform_clip',
+                   side_effect=UnsupportedMotion('invalid curves')):
+            decode_character_animations(info)
+        self.assertEqual({s['reason_code'] for s in info['export_diagnostics']['unresolved_states']},
+                         {'decode_rejected'})
+        self.assertTrue(info['export_diagnostics']['rejected'])
 
     def test_chr301_baked_ik_reaches_targets(self):
         package = self.package('chr301')

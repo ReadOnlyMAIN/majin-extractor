@@ -138,6 +138,7 @@ def decode_character_animations(motion_info, skeleton=None, clip_indices=None,
     diagnostics = dict(mapping='compact_trs_program', rotation='Rz Ry Rx, radians, local absolute',
                        source_package=str(Path(motion_info['package_path']).resolve()),
                        source_sequence=str(Path(motion_info['sequence_path']).resolve()),
+                       name_binding='physical_slot_and_duration',
                        state_index_decoded=True, segments=[], rejected=[],
                        unresolved_states=[],
                        rig_controls_raw=[record.hex() for record in package.rig_controls.records]
@@ -147,6 +148,9 @@ def decode_character_animations(motion_info, skeleton=None, clip_indices=None,
     patterns = [value.strip() for value in selection.split(',') if value.strip()]
     selected_slots = set(clip_indices) if clip_indices is not None else None
     resolved_records = set()
+    record_slots = {record: slot for table in index.tables
+                    for slot, record in enumerate(table) if record != 0xFFFFFFFF}
+    blocks_by_slot = {block.slot_index: block for block in package.curve_blocks}
     for block in package.curve_blocks:
         slot = block.slot_index - 1
         name = f'segment_{slot:03d}'
@@ -168,18 +172,42 @@ def decode_character_animations(motion_info, skeleton=None, clip_indices=None,
         except (UnsupportedMotion, ValueError) as exc:
             diagnostics['rejected'].append(dict(slot=slot, reason=str(exc)))
             continue
-        for record in named:
-            resolved_records.add(record.index)
         for chosen_name in chosen:
+            record = next((r for r in named if r.short_name == chosen_name), None)
+            if record is not None:
+                resolved_records.add(record.index)
             output = dict(clip, name=chosen_name, name_source=(
                 'sequence_slot_index_and_duration' if named else 'physical_segment'))
             animations.append(output)
             diagnostics['segments'].append({key: value for key, value in output.items()
                                             if key != 'channels'})
+    instruction_groups = package.curve_index.groups if package.curve_index else []
     for record in records:
         if record.index not in resolved_records:
+            package_slot = record_slots[record.index]
+            block = blocks_by_slot.get(package_slot)
+            frames = duration_frames_of(record)
+            segment_frames = (int.from_bytes(block.header[2:], 'big') - 1
+                              if block is not None else None)
+            if package_slot >= len(package.slots):
+                code, reason = 'outside_package', 'sequence slot is outside this package'
+            elif package.slots[package_slot].size == 0:
+                code, reason = 'zero_storage_span', 'slot has no own curve payload; repeated offset does not establish a name binding'
+            elif block is None:
+                code, reason = 'non_curve_slot', 'sequence slot does not contain a curve block'
+            elif segment_frames != frames:
+                code, reason = 'duration_mismatch', 'state duration differs from its physical segment; composition remains undecoded'
+            elif any(item['slot'] == block.slot_index - 1 for item in diagnostics['rejected']):
+                code, reason = 'decode_rejected', 'physical curve decoding failed; see rejected diagnostics'
+            else:
+                code, reason = 'not_selected', 'animation excluded by the requested selection'
+            # Preserve the slot's instructions as evidence for future state
+            # reconstruction. Empty storage does not establish a static pose.
             diagnostics['unresolved_states'].append(dict(
                 record=record.index, name=record.short_name,
-                duration_frames=duration_frames_of(record),
-                reason='not selected, absent segment, or composite duration'))
+                duration_frames=frames, package_slot=package_slot,
+                source_slot=package_slot - 1, segment_duration_frames=segment_frames,
+                reason_code=code, reason=reason,
+                slot_instructions_raw=(instruction_groups[package_slot - 1]
+                                       if 0 < package_slot <= len(instruction_groups) else [])))
     return animations
