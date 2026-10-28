@@ -547,12 +547,14 @@ class GodotUtilityTests(unittest.TestCase):
             names = sorted(path.name for path in written)
             self.assertEqual(names, [
                 "assign_materials.gd",
+                "cloth_constraints.gd",
                 "majin_foliage.gdshader",
                 "majin_material_common.gdshaderinc",
                 "majin_multitexture.gdshader",
                 "majin_multitexture_alpha.gdshader",
                 "majin_multitexture_cutout.gdshader",
                 "player_darkness.gdshader",
+                "spring_collision_update.gd",
             ])
             shader = (destination / "majin_multitexture.gdshader").read_text()
             script = (destination / "assign_materials.gd").read_text()

@@ -147,6 +147,14 @@ func _ready() -> void:
 		_base.name = "AnimationRig"
 		add_child(_base)
 	_skeleton = _find_skeleton(_base)
+	# Simulate on each visible body's own bind rig, after _sync_poses(). The
+	# hidden master supplies animation/IK only; simulating it too doubles sway.
+	for modifier in _base.find_children("MajinClothConstraints", "", true, false):
+		modifier.set("active", false)
+	for modifier in _base.find_children("MajinSecondaryMotion", "", true, false):
+		modifier.set("active", false)
+	for modifier in _base.find_children("MajinSpringCollisionUpdate", "", true, false):
+		modifier.set("active", false)
 	for mesh in _base.find_children("*", "MeshInstance3D", true, false):
 		mesh.hide()
 	if _skeleton == null:

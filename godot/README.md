@@ -167,6 +167,95 @@ bracelets are split by their authored positive/negative X geometry and follow
 bones 13/43. This is a preview attachment reconstruction, not a recovered complete
 cinematic cloth/accessory simulation.
 
+Godot exports also write a `spring_bone_chains` profile in each chr1xx material
+manifest. On reimport, `assign_materials.gd` adds a `MajinSecondaryMotion`
+SpringBoneSimulator3D under the skeleton (Godot 4.4+). The profile includes the
+two hair chains, three upper cloth/cape chains, lower cloth panels and leg
+ornaments only when their bones form the expected chain and influence exported
+triangles. Face, limbs, IK controls and unrelated characters are excluded.
+Leaf bones receive a local +X tail scaled to the GLB units.
+
+In chr1 the hidden animation master has its spring modifier disabled; each
+visible body simulates on its own rig after receiving the animation pose.
+Switching costume or gameplay/cinematic mode instantiates that body's profile.
+Standalone chr1xx GLBs also simulate after animation/IK. Stiffness and drag are
+editable in the imported modifier's settings; they are preview defaults, not
+decoded original physics parameters. The native simulator uses
+`external_force = Vector3.ZERO` and `individual_config = true` for each chain.
+Each bone explicitly stores stiffness, drag, radius, gravity and gravity direction.
+The previous 2 cm native particle radius is preserved; the individual-mode
+default of 10 cm must not be inherited accidentally.
+Gravity is a positive magnitude (default 1) with direction `(0,-1,0)`: this
+preserves the old `(0,-1,0)` external bias in Godot's native spring formula.
+It is not a metric acceleration of 1 or 9.8 m/s^2. New manifests expose
+`joint_settings` by bone name, including individual overrides. Legacy manifests
+are upgraded on import by transferring their former global bias into gravity.
+Resolved bone indices and joint slots are serialized explicitly so native
+enter-tree joint discovery does not discard those settings.
+
+Collision volumes come from the original CSR soft-body collision resource:
+17 capsules and one sphere for chr100, shared explicitly with the costume
+variants. The manifest preserves source records and provenance. Spheres attach
+to their source bone; `spring_collision_update.gd` updates capsule endpoints
+from both animated bones before spring simulation. The one tapered capsule
+uses the smaller original radius (CSR_01: 10 cm instead of 15 cm), as selected
+for the preview, because Godot capsules have one radius. No
+planes or mesh-fitted shapes are invented. The adjacent SSR group masks select
+the collision list per spring chain: CSR 9--14 apply only to the cape, CSR 15
+only to the left hip cloth. The 18 volumes are never globally enabled for every
+bone chain. See `research/PLAYER_COLLISIONS.md`
+for the decoded fields and conversion limits.
+
+SSR CLOTH groups additionally export `cloth_surfaces`. `cloth_constraints.gd`
+creates `MajinClothConstraints`, an XPBD grid modifier for the cape (3 by 8
+bones) and left hip cloth (3 by 5), including virtual end tips. Those columns
+are excluded from the independent spring settings. Longitudinal and transverse
+links limit extension; diagonal and two-segment bending links
+couple the surface. Roots follow animation, and particles collide against only
+their group's CSR volumes. Hidden animation rigs disable this modifier too.
+
+The source kt/ks/kb (70/50/50), mass (0.3), air damping (0.15 cape, 0.2 hip)
+and update delta (0.005) drive the conversion. The decoded scalar law is
+`k * (L-L0)/L0`, with half response in compression. For each metric link,
+`K = source_scale * k / L0` and XPBD compliance is `1/K` (twice that in
+compression). The source longitudinal extension correction targets `1.001*L0`;
+the preview's transverse extension cap remains 2%. Compression is allowed so
+panels can fold. Decoded air resistance is
+`-airDamping * abs(v.normalized().dot(normal)) * v`, integrated with particle
+mass and timestep, rather than a per-frame velocity loss. The user-tuned preview
+uses `air_resistance_scale = 4` and `tangential_air_ratio = 0.15` to curb
+pendulum motion: directional resistance blends from 15% edge-on to 100% normal
+to the panel. Drag uses exponential velocity retention, preventing reversal at
+high resistance and avoiding dependence on render FPS. These two controls are
+preview tuning, not extracted SSR values; set them to 1 and 0 respectively to
+use the decoded directional coefficient without that tuning.
+
+This remains an approximation: the grid, ks/kb geometric projections, cell mass
+distribution and normal averaging are not a full replay of the original solver.
+The XPBD update also introduces different numerical damping from the game's
+semi-implicit Euler integration. Cloth gravity is a separate metric acceleration:
+`gravity_acceleration = Vector3(0, -9.8, 0)`, independent of particle mass. Cloth
+`external_force` defaults to zero and is reserved for additional physical forces;
+it no longer reads the native spring bias. Native spring chains retain their
+independently tuned per-joint `gravity = 1`, downward, with zero external force. Up to four substeps are
+processed per frame; long pauses and teleports reset simulation state.
+
+Unverified per-cell angle/twist table indexing and moveStrength meanings are
+retained as source metadata rather than assigned to arbitrary bones. Particle
+radius conservatively uses the maximum radius in each source cloth table
+(5 cm cape, 3 cm hip). Near embedded anchors, only the added cloth padding is
+reduced to keep the first links reachable; the CSR body radius is preserved.
+Collision projection can take precedence over a link's
+strain limit where an obstacle makes both constraints incompatible. Collision
+is particle-based, without triangle-level surface collision or self-collision.
+See `research/PLAYER_CLOTH_PHYSICS.md` and `research/CLOTH_STIFFNESS_CONVERSION.md`
+for evidence, scalar replay checks and remaining unknowns.
+
+Re-export the body models and reinstall `majin_utility/assign_materials.gd`,
+`majin_utility/spring_collision_update.gd`, `majin_utility/cloth_constraints.gd`
+and `player_armor.gd`, then reimport the GLBs
+to update an existing Godot project. Older Godot versions warn and skip physics.
+
 The Animation Lab starts on chr1 when present. Its right panel exposes body,
 head, bracelets and **Cinematic rendering**. Body labels follow the active family
 and tooltips show both IDs. Health and tar appearance controls appear only in

@@ -476,6 +476,20 @@ def analyze_skinned_file(path, data, out_dir, args, header):
     )
     godot_materials = None
     if uses_godot_materials(args):
+        try:
+            from ..player_physics import player_spring_chains
+            from ..cloth_physics import player_cloth_surfaces
+            from ..softbody_collision import apply_collision_filters, player_collision_profile
+        except ImportError:
+            from player_physics import player_spring_chains
+            from cloth_physics import player_cloth_surfaces
+            from softbody_collision import apply_collision_filters, player_collision_profile
+        collision_profile = player_collision_profile(path, skeleton, args.scale)
+        spring_chains = apply_collision_filters(player_spring_chains(
+            path.stem, skeleton, vertices, mesh_parts, args.scale,
+        ), skeleton, collision_profile)
+        cloth_surfaces = player_cloth_surfaces(
+            path, skeleton, spring_chains, collision_profile, args.scale)
         godot_materials = write_godot_material_assets(
             out_dir, materials, image_data,
             vertices=vertices,
@@ -483,6 +497,10 @@ def analyze_skinned_file(path, data, out_dir, args, header):
             scale=args.scale,
             radius=getattr(args, "blend_radius", DEFAULT_BLEND_RADIUS),
             asset_kind="character",
+            spring_bone_chains=spring_chains,
+            cloth_surfaces=cloth_surfaces,
+            spring_bone_collisions=collision_profile["collisions"],
+            spring_collision_source=collision_profile["source"],
             ik_target_orientation=(
                 getattr(args, "experimental_ik_target_orientation", "none")
                 if getattr(args, "experimental_export_ik_targets", False)

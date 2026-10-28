@@ -175,6 +175,10 @@ PLAYER_DARKNESS_SHADER = (
     Path(__file__).resolve().parents[2] / "godot" / "utility" / "player_darkness.gdshader"
 ).read_text(encoding="utf-8")
 PLAYER_DARKNESS_SHADER_FILE_NAME = "player_darkness.gdshader"
+SPRING_COLLISION_SCRIPT_FILE_NAME = "spring_collision_update.gd"
+SPRING_COLLISION_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "godot" / "utility" / SPRING_COLLISION_SCRIPT_FILE_NAME
+).read_text(encoding="utf-8")
 
 GODOT_CUSTOM_CUTOUT_SHADER = GODOT_CUSTOM_SHADER.replace(
     'MATERIAL_ALPHA_MODE 0', 'MATERIAL_ALPHA_MODE 1')
@@ -247,6 +251,8 @@ def write_godot_utility(destination, overwrite=True):
         (SHADER_COMMON_FILE_NAME, GODOT_SHADER_COMMON),
         (ASSIGN_SCRIPT_FILE_NAME, GODOT_ASSIGN_SCRIPT),
         (PLAYER_DARKNESS_SHADER_FILE_NAME, PLAYER_DARKNESS_SHADER),
+        (SPRING_COLLISION_SCRIPT_FILE_NAME, SPRING_COLLISION_SCRIPT),
+        ("cloth_constraints.gd", (Path(__file__).resolve().parents[2] / "godot/utility/cloth_constraints.gd").read_text()),
     ):
         path = destination / name
         if overwrite or not path.exists():
@@ -737,6 +743,10 @@ def write_godot_material_assets(
     detail_folds: list[dict] | None = None,
     asset_kind: str = "model",
     ik_target_orientation: str = "none",
+    spring_bone_chains: list[dict] | None = None,
+    spring_bone_collisions: list[dict] | None = None,
+    spring_collision_source: dict | None = None,
+    cloth_surfaces: list[dict] | None = None,
 ) -> dict:
     """Write the Godot shader, external PNGs, and their material bindings.
 
@@ -922,6 +932,10 @@ def write_godot_material_assets(
             "asset_kind": asset_kind,
             "model_scale": scale,
             "ik_target_orientation": ik_target_orientation,
+            "spring_bone_chains": spring_bone_chains or [],
+            "spring_bone_collisions": spring_bone_collisions or [],
+            "spring_collision_source": spring_collision_source,
+            "cloth_surfaces": cloth_surfaces or [],
             "materials": bindings,
             "detail_folds": detail_folds,
         }, indent=2)

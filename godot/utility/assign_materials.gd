@@ -14,7 +14,8 @@ extends EditorScenePostImport
 ##
 ## Each model manifest is discovered from the imported scene's own directory.
 ## Character files that contain the four exported IK controls additionally get
-## a TwoBoneIK3D modifier. Other GLBs simply skip that step.
+## a TwoBoneIK3D modifier. chr1 body manifests also describe the supported
+## cloth/hair chains, imported as a SpringBoneSimulator3D after animation/IK.
 
 const IK_CHAINS := [
 	[&"bone_011", &"bone_013", &"bone_015", &"ik_hand_l_target", Vector3(0, -50, 25)],
@@ -28,6 +29,9 @@ const BINDINGS_RELATIVE_PATH := "materials/material_bindings.json"
 var _asset_kind := "model"
 var _ik_target_orientation := "none"
 var _model_scale := 1.0
+var _cloth_surfaces: Array = []
+var _spring_bone_chains: Array = []
+var _spring_bone_collisions: Array = []
 
 func _post_import(scene: Node) -> Object:
 	var assignments := _load_bindings()
@@ -38,6 +42,7 @@ func _post_import(scene: Node) -> Object:
 		if not missing.is_empty():
 			push_warning("majin_import: unmatched material names: %s" % str(missing.keys()))
 	_setup_humanoid_ik(scene)
+	_setup_spring_bones(scene)
 	if _asset_kind == "instance":
 		_extract_instance_mesh(scene, assignments)
 	return scene
@@ -50,6 +55,155 @@ func _find_skeleton(node: Node) -> Skeleton3D:
 		if result != null:
 			return result
 	return null
+
+func _setup_spring_bones(scene: Node) -> void:
+	if _spring_bone_chains.is_empty():
+		return
+	var skeleton := _find_skeleton(scene)
+	if skeleton == null or skeleton.has_node("MajinSecondaryMotion") or skeleton.has_node("MajinClothConstraints"):
+		return
+	if not ClassDB.class_exists(&"SpringBoneSimulator3D"):
+		push_warning("majin_import: secondary motion requires SpringBoneSimulator3D (Godot 4.4+)")
+		return
+	# A modifier runs after animation and the IK modifiers added above. Keep
+	# the node owned by the imported scene so it survives packing/reimport.
+	var spring := ClassDB.instantiate(&"SpringBoneSimulator3D") as Node
+	spring.name = "MajinSecondaryMotion"
+	skeleton.add_child(spring)
+	spring.owner = scene
+	spring.set("external_force", Vector3.ZERO)
+	var count := 0
+	var configured_chains: Array = []
+	var cloth_bones: Array = []
+	for surface in _cloth_surfaces:
+		for column in surface.bone_columns:
+			cloth_bones.append_array(column)
+	for chain in _spring_bone_chains:
+		if chain["root_bone"] in cloth_bones:
+			continue # CLOTH grids have their own coupled solver.
+		var root := skeleton.find_bone(chain["root_bone"])
+		var end := skeleton.find_bone(chain["end_bone"])
+		if root < 0 or end < 0:
+			continue
+		var ancestor := end
+		var bone_indices: Array[int] = []
+		while ancestor >= 0:
+			bone_indices.push_front(ancestor)
+			if ancestor == root:
+				break
+			ancestor = skeleton.get_bone_parent(ancestor)
+		if ancestor != root:
+			continue
+		spring.set("setting_count", count + 1)
+		spring.call("set_root_bone_name", count, chain["root_bone"])
+		spring.call("set_end_bone_name", count, chain["end_bone"])
+		# Persist resolved indices too: resolving an initially invalid end
+		# on enter_tree would clear already serialized individual settings.
+		spring.call("set_root_bone", count, root)
+		spring.call("set_end_bone", count, end)
+		spring.call("set_extend_end_bone", count, true)
+		spring.call("set_end_bone_direction", count, 0) # local +X in DDM
+		spring.call("set_end_bone_length", count, float(chain["end_length"]))
+		spring.call("set_stiffness", count, float(chain["stiffness"]))
+		spring.call("set_drag", count, float(chain["drag"]))
+		# Upgrade old manifests which supplied (0,-1,0) globally, while
+		# respecting an explicit zero in new per-joint profiles.
+		var gravity := float(chain.get("gravity", 0.0))
+		if chain.get("gravity_mode", "external_force") != "per_joint":
+			gravity += 1.0
+		spring.call("set_gravity", count, gravity)
+		spring.call("set_gravity_direction", count, Vector3.DOWN)
+		var radius := float(chain.get("radius", spring.call("get_radius", count)))
+		spring.call("set_individual_config", count, true)
+		# Imports are built outside SceneTree: native joint discovery has not
+		# run yet. Allocate serialized joint slots from the verified hierarchy.
+		spring.set("settings/%d/joint_count" % count, bone_indices.size())
+		var joint_values := {}
+		for joint in chain.get("joint_settings", []):
+			joint_values[joint["bone"]] = joint
+		for joint_index in bone_indices.size():
+			var bone_name := skeleton.get_bone_name(bone_indices[joint_index])
+			var joint: Dictionary = joint_values.get(bone_name, {})
+			spring.call("set_joint_stiffness", count, joint_index, float(joint.get("stiffness", chain["stiffness"])))
+			spring.call("set_joint_drag", count, joint_index, float(joint.get("drag", chain["drag"])))
+			spring.call("set_joint_radius", count, joint_index, float(joint.get("radius", radius)))
+			spring.call("set_joint_gravity", count, joint_index, float(joint.get("gravity", gravity)))
+			var direction: Array = joint.get("gravity_direction", [0.0, -1.0, 0.0])
+			spring.call("set_joint_gravity_direction", count, joint_index, Vector3(direction[0], direction[1], direction[2]))
+		configured_chains.append(chain)
+		count += 1
+	if count == 0:
+		skeleton.remove_child(spring)
+		spring.free()
+	else:
+		_setup_spring_collisions(scene, skeleton, spring, configured_chains)
+		print("majin_import: connected %d secondary-motion chains for %s." % [count, scene.name])
+	if not _cloth_surfaces.is_empty():
+		var script := load("res://majin_utility/cloth_constraints.gd") as Script
+		if script == null or not script.can_instantiate():
+			push_error("majin_import: install majin_utility/cloth_constraints.gd")
+			return
+		var cloth := SkeletonModifier3D.new()
+		cloth.set_script(script)
+		cloth.name = "MajinClothConstraints"
+		cloth.set("gravity_acceleration", Vector3(0, -9.8, 0))
+		cloth.set("external_force", Vector3.ZERO)
+		cloth.set("surfaces", _cloth_surfaces)
+		cloth.set("collisions", _spring_bone_collisions)
+		skeleton.add_child(cloth)
+		cloth.owner = scene
+
+func _setup_spring_collisions(scene: Node, skeleton: Skeleton3D, spring: Node, chains: Array) -> void:
+	if _spring_bone_collisions.is_empty():
+		return
+	var capsule_count := 0
+	for entry in _spring_bone_collisions:
+		var kind := "SpringBoneCollisionSphere3D" if entry["shape"] == "sphere" else "SpringBoneCollisionCapsule3D"
+		if not ClassDB.class_exists(kind):
+			push_warning("majin_import: missing collision class " + kind)
+			continue
+		var bone_a := skeleton.find_bone(entry["bone_a"])
+		if bone_a < 0 or (entry["shape"] == "capsule" and skeleton.find_bone(entry["bone_b"]) < 0):
+			push_warning("majin_import: missing CSR attachment bone for " + entry["name"])
+			continue
+		var collider := ClassDB.instantiate(kind) as Node3D
+		collider.name = entry["name"]
+		spring.add_child(collider)
+		collider.owner = scene
+		collider.set("radius", float(entry["radius"]))
+		collider.set_meta("majin_csr_source", entry["source_record"])
+		if entry["shape"] == "sphere":
+			var point: Array = entry["point_a"]
+			collider.set("bone_name", entry["bone_a"])
+			collider.set("position_offset", Vector3(point[0], point[1], point[2]))
+		else:
+			collider.set_meta("majin_csr_endpoints", entry)
+			capsule_count += 1
+	# CSR contains several collision domains. SSR chooses a mask per simulated
+	# group: a collider for the cape must not also repel hair or hip cloth.
+	for index in range(chains.size()):
+		var paths: Array[NodePath] = []
+		for name in chains[index].get("collision_names", []):
+			var collider := spring.get_node_or_null(NodePath(name))
+			if collider != null:
+				paths.append(spring.get_path_to(collider))
+		spring.call("set_enable_all_child_collisions", index, false)
+		spring.call("set_collision_count", index, paths.size())
+		for collision_index in range(paths.size()):
+			spring.call("set_collision_path", index, collision_index, paths[collision_index])
+	if capsule_count > 0:
+		var script := load("res://majin_utility/spring_collision_update.gd") as Script
+		if script == null or not script.can_instantiate():
+			push_error("majin_import: install majin_utility/spring_collision_update.gd for CSR capsules")
+			return
+		var updater := SkeletonModifier3D.new()
+		updater.set_script(script)
+		updater.name = "MajinSpringCollisionUpdate"
+		skeleton.add_child(updater)
+		updater.owner = scene
+		skeleton.move_child(updater, spring.get_index())
+		updater.call("update_collisions", skeleton, spring)
+	print("majin_import: connected %d original CSR collision volumes." % spring.get_child_count())
 
 func _setup_humanoid_ik(scene: Node) -> bool:
 	var skeleton := _find_skeleton(scene)
@@ -147,6 +301,12 @@ func _load_bindings() -> Dictionary:
 	# Load only this GLB's manifest. Searching child folders recursively can
 	# accidentally pick up an instance manifest and extract an ordinary model.
 	# Resource paths are relative to the model directory, not to ``materials/``.
+	_asset_kind = "model"
+	_model_scale = 1.0
+	_ik_target_orientation = "none"
+	_cloth_surfaces = []
+	_spring_bone_chains = []
+	_spring_bone_collisions = []
 	var result := {}
 	var model_base := get_source_file().get_base_dir()
 	var manifest_path := model_base.path_join(BINDINGS_RELATIVE_PATH)
@@ -163,6 +323,9 @@ func _load_bindings() -> Dictionary:
 		push_warning("majin_import: invalid model_scale; using 1.0")
 		_model_scale = 1.0
 	_ik_target_orientation = data.get("ik_target_orientation", "none")
+	_cloth_surfaces = data.get("cloth_surfaces", [])
+	_spring_bone_chains = data.get("spring_bone_chains", [])
+	_spring_bone_collisions = data.get("spring_bone_collisions", [])
 	for entry in data.get("materials", []):
 		var name: String = entry.get("material_name", "")
 		# ``shader_material`` is the legacy manifest key used before native
