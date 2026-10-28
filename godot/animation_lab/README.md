@@ -23,7 +23,9 @@ Controls are saved nodes, editable in the scene tree:
 Camera follow is **off by default**. A fixed camera lets source root motion
 move the character through the scene; enabling **Follow** follows the animated
 root bone. Neither mode edits the animation or removes its root motion.
-The skeleton overlay displays the final imported bone poses. The scene loads
+The skeleton overlay follows the visible body's rig and updates after its
+cloth and spring modifiers, including when switching costume or render mode.
+The scene loads
 Godot's normal imported PackedScenes, including their material post-import
 settings, rather than decoding the GLB separately at runtime.
 
@@ -69,7 +71,7 @@ the sampled walking pose. The final run produced no game errors. These are
 viewer checks, not proof of fidelity for every source animation.
 
 The player has one `chr1` entry backed by `chara/chr1.tscn`, selected initially
-when available. Individual chr1xx/chr72x/chr74x packages are hidden from the
+when available. Individual chr1xx/chr72x/chr74x packages, except chr100, are hidden from the
 character dropdown. The right panel provides **Body costume**, **Head accessory**,
 **Bracelets**, and a **Cinematic rendering** switch enabled by default.
 
@@ -93,3 +95,43 @@ health-curve limits remain documented in the research findings.
 `tools/validation/player_render_modes.gd` checks all 22 body/mode combinations,
 20 accessories, texture availability and animation preservation in the imported
 project. `research/PLAYER_MODEL_USAGE.md` explains the original family selection.
+
+## chr100 upscaled texture pack
+
+**Upscaled textures ×4 (chr100)** switches the displayed instance between
+original textures and `res://original_files/decoded/chara/chr100/textures_upscaled/`.
+It works with the standalone chr100 entry and chr1's chr100 gameplay body.
+Other costumes retain their own textures. The selection survives character,
+equipment and render-mode changes; playback is not restarted.
+
+The installed pack contains all 14 original PNG names at four times their
+original width and height. c01 (skin/hair) and c02 (clothing/equipment) use
+AI-enhanced color atlases, resized to 8192 × 4096; the AI output itself was
+1774 × 887, so the saved 8K dimensions do not imply native 8K generated detail.
+c03 and the reflection and utility maps use faithful Lanczos resizing.
+The four normal maps use AI smoothing followed by Lanczos resizing and
+linear RGB vector normalization: n01/n02 are 4096 × 4096, n03/n04 are
+2048 × 2048. Their AI sources were 1254 × 1254; final dimensions do not
+imply native generated detail at that resolution. Original alpha, import
+settings and the DirectX Y convention are retained. The earlier Lanczos-only
+normals are backed up in `textures_upscaled/.normals_before_ai/`.
+The color atlas alpha channels and all texture import settings come from
+the originals. Imported materials are duplicated per instance before texture replacement.
+Disabling the pack restores the original texture resources and retains live
+shader adjustments such as darkness/health.
+
+AI prompt (built-in imagegen; one call per atlas): faithful UV-atlas remaster;
+preserve normalized island coordinates, silhouettes, orientation, colors,
+shading and character identity; enhance skin pores, hair and beard for c01,
+and cloth weave, stitching, leather and metal for c02; no new motifs,
+rearrangement, crop, labels or lighting changes. Generated detail can differ
+from the source; use the toggle to compare on the model.
+
+Normal-map AI prompt (built-in imagegen, one edit per n01–n04): smooth pixel
+blocks, stair-stepping, compression and speckled noise; preserve UV coordinates,
+island placement, seams, feature locations and normal directions; retain the
+DirectX RGB convention without a green-channel flip; reconstruct continuous
+existing strands and folds; no new motifs, material colors or rendered lighting.
+`build_texture_pack.gd.generate_normals()` accepts a `normal_sources` dictionary
+mapping original PNG names to generated input paths and normalizes the output
+on a worker thread. AI edits may alter fine relief and require on-model review.

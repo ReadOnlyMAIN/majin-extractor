@@ -23,11 +23,15 @@ extends Node3D
 
 @onready var customization: PanelContainer = $UI/Customization
 @onready var equipment: VBoxContainer = $UI/Customization/Scroll/Margin/Controls
+@onready var texture_pack_toggle: CheckButton = controls.get_node("TexturePack")
 @onready var unnamed: CheckButton = controls.get_node("Unnamed")
+
+var texture_pack := preload("res://animation_lab/texture_pack.gd").new()
 
 var model: Node3D
 var player: AnimationPlayer
 var skeleton: Skeleton3D
+var overlay_skeleton: Skeleton3D
 var clip: StringName = &""
 var paused := false
 var scrubbing := false
@@ -43,6 +47,8 @@ var bone_material := StandardMaterial3D.new()
 
 
 func _ready() -> void:
+	texture_pack_toggle.toggled.connect(_apply_texture_pack)
+	texture_pack_toggle.disabled = not texture_pack.available()
 	unnamed.toggled.connect(func(_value: bool): _filter_animations())
 	for slot in ["body", "head", "bracelets"]:
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
@@ -76,6 +82,7 @@ func _ready() -> void:
 		scrubbing = false
 		_apply_speed())
 	timeline.value_changed.connect(_seek)
+	bones.toggled.connect(func(_enabled: bool): _draw_bones())
 	bone_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	bone_material.albedo_color = Color(0.2, 1.0, 0.8)
 	bone_material.no_depth_test = true
@@ -105,6 +112,9 @@ func _refresh_characters() -> void:
 	var player_scene := characters_directory.path_join("chr1.tscn")
 	if ResourceLoader.exists(player_scene):
 		paths.append(player_scene)
+	var chr100 := characters_directory.path_join("chr100/chr100.glb")
+	if ResourceLoader.exists(chr100) and not paths.has(chr100):
+		paths.append(chr100)
 	paths.sort()
 	characters.clear()
 	for path in paths:
@@ -127,6 +137,8 @@ func _refresh_characters() -> void:
 
 
 func _clear_model() -> void:
+	texture_pack.clear()
+	_set_overlay_skeleton(null)
 	customization.hide()
 	player = null
 	skeleton = null
@@ -192,7 +204,14 @@ func _select_character(index: int) -> void:
 		_select_animation(initial)
 	else:
 		info.text = "This model has no playable animations."
+	_apply_texture_pack(texture_pack_toggle.button_pressed)
 	_frame_model()
+
+
+func _apply_texture_pack(enabled: bool) -> void:
+	if is_instance_valid(model):
+		texture_pack.apply(model, enabled)
+	texture_pack_toggle.visible = is_instance_valid(model) and (model.has_method("available_equipment") or model.scene_file_path.get_file() == "chr100.glb")
 
 
 func _setup_customization() -> void:
@@ -217,6 +236,7 @@ func _setup_customization() -> void:
 func _change_render_mode(enabled: bool) -> void:
 	if customization.visible and is_instance_valid(model):
 		model.cinematic_render = enabled
+		_apply_texture_pack(texture_pack_toggle.button_pressed)
 		_sync_render_mode()
 
 
@@ -240,6 +260,7 @@ func _customize(index: int, slot: String) -> void:
 		return
 	var dropdown: OptionButton = equipment.get_node(slot.capitalize())
 	model.set(slot, dropdown.get_item_metadata(index))
+	_apply_texture_pack(texture_pack_toggle.button_pressed)
 
 
 func _change_health(value: float) -> void:
@@ -445,19 +466,53 @@ func _process(_delta: float) -> void:
 	camera.h_offset = 0.0 if customization.visible else -distance * 0.19
 	camera.far = maxf(200.0, distance * 20.0)
 	camera.look_at(target)
+	_sync_overlay_skeleton()
+	if not bones.button_pressed:
+		bone_lines.clear_surfaces()
+
+
+func _sync_overlay_skeleton() -> void:
+	var target := skeleton
+	if is_instance_valid(model):
+		# The hidden animation master does not run cloth/spring modifiers.
+		# Follow the skeleton actually used by a visible skinned mesh.
+		for instance in model.find_children("*", "MeshInstance3D", true, false):
+			var mesh := instance as MeshInstance3D
+			if mesh.skin == null or not mesh.is_visible_in_tree():
+				continue
+			var rig := mesh.get_node_or_null(mesh.skeleton) as Skeleton3D
+			if rig != null:
+				target = rig
+				break
+	_set_overlay_skeleton(target)
+
+
+func _set_overlay_skeleton(target: Skeleton3D) -> void:
+	if overlay_skeleton == target:
+		return
+	if is_instance_valid(overlay_skeleton):
+		overlay_skeleton.skeleton_updated.disconnect(_draw_bones)
+	overlay_skeleton = target
+	if is_instance_valid(overlay_skeleton):
+		# This signal runs after all modifiers, before Godot restores the
+		# animation poses. Reading in _process misses the physical pose.
+		overlay_skeleton.skeleton_updated.connect(_draw_bones)
 	_draw_bones()
 
 
 func _draw_bones() -> void:
 	bone_lines.clear_surfaces()
-	if not bones.button_pressed or skeleton == null or skeleton.get_bone_count() < 2:
+	if not bones.button_pressed or not is_instance_valid(overlay_skeleton):
 		return
+	if not overlay_skeleton.is_inside_tree() or overlay_skeleton.get_bone_count() < 2:
+		return
+	var to_overlay := overlay.global_transform.affine_inverse() * overlay_skeleton.global_transform
 	bone_lines.surface_begin(Mesh.PRIMITIVE_LINES, bone_material)
-	for index in range(skeleton.get_bone_count()):
-		var parent := skeleton.get_bone_parent(index)
+	for index in range(overlay_skeleton.get_bone_count()):
+		var parent := overlay_skeleton.get_bone_parent(index)
 		if parent >= 0:
-			bone_lines.surface_add_vertex(skeleton.global_transform * skeleton.get_bone_global_pose(parent).origin)
-			bone_lines.surface_add_vertex(skeleton.global_transform * skeleton.get_bone_global_pose(index).origin)
+			bone_lines.surface_add_vertex(to_overlay * overlay_skeleton.get_bone_global_pose(parent).origin)
+			bone_lines.surface_add_vertex(to_overlay * overlay_skeleton.get_bone_global_pose(index).origin)
 	bone_lines.surface_end()
 
 
