@@ -139,6 +139,16 @@ example, importing `ins107.glb` creates
 `res://terrain/foliage/meshes/ins107.res`, matching the default paths emitted
 by `hsc_to_foliage.py`.
 
+### Customizable Majin (`chr2`)
+
+Exporting any `chr2XX` folder exports all available `chr2XX` siblings and creates
+`chara/chr2.tscn`. Its `body` selector switches complete armor variants, from
+`chr200` through `chr290` in the current sources. The hidden `chr200` rig holds
+the animations and drives each visible variant using its own bind skeleton.
+The scene exposes an AnimationTree and is selectable in the Animation Lab.
+The chr1 gameplay/cinematic pairs and head/bracelet accessories are specific to
+chr1; chr2 lists every exported body directly.
+
 ### Player character (`chr1`)
 
 Exporting a chr1xx folder collects the body families and chr72x/74x accessories

@@ -99,7 +99,8 @@ func _find_glbs(directory: String, result: Array[String]) -> void:
 		if file.get_extension().to_lower() == "glb":
 			result.append(directory.path_join(file))
 	for child in folder.get_directories():
-		if not child.begins_with(".") and not (child.length() == 6 and (child.begins_with("chr1") or child.begins_with("chr72") or child.begins_with("chr74")) and child.substr(3).is_valid_int()):
+		var costume := child.length() == 6 and child.substr(3).is_valid_int() and (child.begins_with("chr1") or child.begins_with("chr72") or child.begins_with("chr74") or (child.begins_with("chr2") and ResourceLoader.exists(characters_directory.path_join("chr2.tscn"))))
+		if not child.begins_with(".") and not costume:
 			_find_glbs(directory.path_join(child), result)
 
 
@@ -109,9 +110,10 @@ func _refresh_characters() -> void:
 		previous = paths[characters.selected]
 	paths.clear()
 	_find_glbs(characters_directory, paths)
-	var player_scene := characters_directory.path_join("chr1.tscn")
-	if ResourceLoader.exists(player_scene):
-		paths.append(player_scene)
+	for family in ["chr1", "chr2"]:
+		var player_scene := characters_directory.path_join(family + ".tscn")
+		if ResourceLoader.exists(player_scene):
+			paths.append(player_scene)
 	var chr100 := characters_directory.path_join("chr100/chr100.glb")
 	if ResourceLoader.exists(chr100) and not paths.has(chr100):
 		paths.append(chr100)
@@ -176,13 +178,14 @@ func _select_character(index: int) -> void:
 		skeleton = skeletons[0] as Skeleton3D
 	if not players.is_empty():
 		player = players[0] as AnimationPlayer
-	var is_player := path.get_file() == "chr1.tscn"
+	var is_player := model.has_method("available_equipment")
 	if is_player:
 		player = model.get_animation_player()
 		_setup_customization()
 	var sidecar := path.get_basename() + ".motion.json"
 	if is_player:
-		sidecar = characters_directory.path_join("chr100/chr100.motion.json")
+		var master: String = model.animation_master()
+		sidecar = characters_directory.path_join(master + "/" + master + ".motion.json")
 	if FileAccess.file_exists(sidecar):
 		var data: Variant = JSON.parse_string(FileAccess.get_file_as_string(sidecar))
 		if data is Dictionary:
@@ -211,11 +214,14 @@ func _select_character(index: int) -> void:
 func _apply_texture_pack(enabled: bool) -> void:
 	if is_instance_valid(model):
 		texture_pack.apply(model, enabled)
-	texture_pack_toggle.visible = is_instance_valid(model) and (model.has_method("available_equipment") or model.scene_file_path.get_file() == "chr100.glb")
+	texture_pack_toggle.visible = is_instance_valid(model) and ((model.has_method("available_equipment") and model.character_family == "chr1") or model.scene_file_path.get_file() == "chr100.glb")
 
 
 func _setup_customization() -> void:
 	customization.show()
+	var player_equipment: bool = model.character_family == "chr1"
+	for field in ["Cinematic", "HeadLabel", "Head", "HairLabel", "Hair", "BraceletsLabel", "Bracelets"]:
+		equipment.get_node(field).visible = player_equipment
 	for slot in ["body", "head", "bracelets"]:
 		var options: Array = model.available_equipment(slot)
 		var dropdown: OptionButton = equipment.get_node(slot.capitalize())
@@ -244,15 +250,15 @@ func _sync_render_mode() -> void:
 	var dropdown: OptionButton = equipment.get_node("Body")
 	for i in range(dropdown.item_count):
 		var cinematic: String = dropdown.get_item_metadata(i)
-		var gameplay: String = model.ARMOR_PAIRS[cinematic]
+		var gameplay: String = model.body_pairs()[cinematic]
 		var asset: String = cinematic if model.cinematic_render else gameplay
 		var note: String = model.equipment_source_note(asset)
 		dropdown.set_item_text(i, asset + (" [source placeholder]" if not note.is_empty() else ""))
 		dropdown.set_item_tooltip(i, "Cinematic: %s / Gameplay: %s\n%s" % [cinematic, gameplay, note])
 	equipment.get_node("Cinematic").set_pressed_no_signal(model.cinematic_render)
 	for field in ["HealthLabel", "Health", "Note", "AppearanceToggle"]:
-		equipment.get_node(field).visible = not model.cinematic_render
-	equipment.get_node("Appearance").visible = not model.cinematic_render and equipment.get_node("AppearanceToggle").button_pressed
+		equipment.get_node(field).visible = model.character_family == "chr1" and not model.cinematic_render
+	equipment.get_node("Appearance").visible = model.character_family == "chr1" and not model.cinematic_render and equipment.get_node("AppearanceToggle").button_pressed
 
 
 func _customize(index: int, slot: String) -> void:

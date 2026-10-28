@@ -4,6 +4,7 @@ extends Node3D
 ## Visible bodies retain their complete geometry and their own tar surfaces.
 
 @export_dir var characters_directory := "res://original_files/decoded/chara"
+@export_enum("chr1", "chr2") var character_family := "chr1"
 @export var cinematic_render := true:
 	set(value):
 		cinematic_render = value
@@ -128,22 +129,36 @@ var _pieces: Dictionary = {}
 var _catalog: Dictionary = {}
 
 
+func body_pairs() -> Dictionary:
+	if character_family == "chr1":
+		return ARMOR_PAIRS
+	var variants: Dictionary = {}
+	for asset in _catalog:
+		variants[asset] = asset
+	return variants
+
+
+func animation_master() -> String:
+	return character_family + "00"
+
+
 func _ready() -> void:
 	for folder in DirAccess.get_directories_at(characters_directory):
-		if folder.length() == 6 and (folder.begins_with("chr1") or folder.begins_with("chr72") or folder.begins_with("chr74")) and folder.substr(3).is_valid_int():
+		if folder.length() == 6 and (folder.begins_with(character_family) or (character_family == "chr1" and (folder.begins_with("chr72") or folder.begins_with("chr74")))) and folder.substr(3).is_valid_int():
 			var path := characters_directory.path_join(folder).path_join(folder + ".glb")
 			if ResourceLoader.exists(path):
 				_catalog[folder] = path
 	notify_property_list_changed()
-	if not _catalog.has("chr100"):
-		push_warning("Player armor requires an exported chr100 in " + characters_directory)
+	var master := animation_master()
+	if not _catalog.has(master):
+		push_warning("Character armor requires an exported " + master + " in " + characters_directory)
 		return
 	_load_tar_globals()
 	# The serialized rig exposes its AnimationPlayer to AnimationTree's editor.
 	# Keep the fallback for scenes generated before AnimationRig was included.
 	_base = get_node_or_null("AnimationRig") as Node3D
 	if _base == null:
-		_base = (load(_catalog["chr100"]) as PackedScene).instantiate()
+		_base = (load(_catalog[master]) as PackedScene).instantiate()
 		_base.name = "AnimationRig"
 		add_child(_base)
 	_skeleton = _find_skeleton(_base)
@@ -158,7 +173,7 @@ func _ready() -> void:
 	for mesh in _base.find_children("*", "MeshInstance3D", true, false):
 		mesh.hide()
 	if _skeleton == null:
-		push_error("chr100 has no Skeleton3D")
+		push_error(master + " has no Skeleton3D")
 		return
 	_skeleton.skeleton_updated.connect(_sync_poses)
 	_equip_body()
@@ -168,6 +183,8 @@ func _ready() -> void:
 
 
 func _validate_property(property: Dictionary) -> void:
+	if character_family == "chr2" and (property.name in ["cinematic_render", "head", "head_hair_mode", "bracelets", "health_ratio", "use_original_tar_hp", "tar_hp"] or String(property.name).begins_with("darkness_")):
+		property.usage = PROPERTY_USAGE_NO_EDITOR
 	if property.name in ["body", "head", "bracelets"]:
 		property.hint = PROPERTY_HINT_ENUM
 		property.hint_string = ",".join(available_equipment(property.name))
@@ -176,11 +193,16 @@ func _validate_property(property: Dictionary) -> void:
 func available_equipment(slot: String) -> Array[String]:
 	var names: Array[String] = []
 	if slot == "body":
-		for asset in ARMOR_PAIRS:
-			if _catalog.has(asset) and _catalog.has(ARMOR_PAIRS[asset]):
+		var pairs := body_pairs()
+		for asset in pairs:
+			if _catalog.has(asset) and _catalog.has(pairs[asset]):
 				names.append(asset)
+		if character_family != "chr1":
+			names.sort()
 	else:
 		names.append("none")
+		if character_family != "chr1":
+			return names
 		var prefix := "chr72" if slot == "head" else "chr74"
 		for asset in _catalog:
 			if String(asset).begins_with(prefix):
@@ -231,13 +253,14 @@ func _equip_body() -> void:
 	if not is_instance_valid(_skeleton):
 		return
 	var selected := body
-	for clean in ARMOR_PAIRS:
-		if ARMOR_PAIRS[clean] == selected:
+	var pairs := body_pairs()
+	for clean in pairs:
+		if pairs[clean] == selected:
 			selected = clean
-	if not ARMOR_PAIRS.has(selected):
+	if not pairs.has(selected):
 		push_warning("Unknown body costume: " + body)
 		return
-	var asset: String = selected if cinematic_render else ARMOR_PAIRS[selected]
+	var asset: String = selected if cinematic_render else pairs[selected]
 	if not _catalog.has(asset):
 		push_warning("Missing body model: " + asset)
 		return

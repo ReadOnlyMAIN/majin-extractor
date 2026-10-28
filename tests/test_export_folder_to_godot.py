@@ -112,6 +112,48 @@ class ExportFolderToGodotTests(unittest.TestCase):
             arguments = execute.call_args_list[0].args[0]
             self.assertIn(str(project / 'original_files/decoded/chara'), arguments)
 
+    def test_chr2_export_collects_all_variants_and_animates_only_master(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            variants = ['chr200', 'chr210', 'chr220', 'chr230', 'chr240',
+                        'chr250', 'chr260', 'chr270', 'chr280', 'chr290']
+            for name in variants + ['chr100', 'chr720', 'chr300', 'chr2extra']:
+                (root / 'KB/chara' / name).mkdir(parents=True)
+            output = root / 'project/custom/decoded'
+            project = root / 'project'
+            project.mkdir()
+            (project / 'project.godot').write_text('config_version=5\n')
+            with mock.patch('tools.conversion.export_folder_to_godot.run') as execute, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main([str(root / 'KB/chara/chr250'),
+                                       '--output-root', str(output),
+                                       '--godot-project', str(project),
+                                       '--animations', 'idle*', '--ik', 'off']), 0)
+            commands = [call.args[0] for call in execute.call_args_list]
+            self.assertEqual([Path(command[2]).name for command in commands], variants)
+            self.assertEqual([command[command.index('--animations') + 1]
+                              for command in commands], ['idle*'] + ['none'] * 9)
+            self.assertTrue(all(command[-2:] == ['--ik', 'off'] for command in commands))
+            scene = (output / 'chara/chr2.tscn').read_text()
+            self.assertIn('path="chr200/chr200.glb"', scene)
+            self.assertIn('character_family = "chr2"', scene)
+            self.assertIn('body = "chr200"', scene)
+            self.assertIn('characters_directory = "res://custom/decoded/chara"', scene)
+            self.assertIn('[node name="AnimationTree"', scene)
+            self.assertTrue((output / 'chara/player_armor.gd').is_file())
+            self.assertFalse((output / 'chara/chr1.tscn').exists())
+
+    def test_chr2_dry_run_does_not_write_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'KB/chara/chr200'
+            source.mkdir(parents=True)
+            output = root / 'decoded'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main([str(source), '--output-root', str(output),
+                                       '--dry-run']), 0)
+            self.assertFalse(output.exists())
+
     def test_project_preset_is_also_applied_to_static_exports(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

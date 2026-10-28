@@ -85,11 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    # Equipment packages share the chr100 animation rig. Export the family
-    # together even when one chr1xx folder was selected.
-    player_family = re.fullmatch(r"chr1\d{2}", source.name) is not None and source.parent.name == "chara"
+    # Export costume families together, with animation on their master rig only.
+    player_family = (source.name[:4] if re.fullmatch(r"chr[12]\d{2}", source.name)
+                     and source.parent.name == "chara" else None)
+    family_pattern = r"chr(?:1\d{2}|7[24]\d)" if player_family == "chr1" else r"chr2\d{2}"
     sources = sorted(folder for folder in source.parent.iterdir()
-                     if folder.is_dir() and re.fullmatch(r"chr(?:1\d{2}|7[24]\d)", folder.name)) if player_family else [source]
+                     if folder.is_dir() and re.fullmatch(family_pattern, folder.name)) if player_family else [source]
     if not args.dry_run:
         output_folder.mkdir(parents=True, exist_ok=True)
     for folder in sources:
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             "--recursive", "--final", "--material-mode", "godot",
             "--object-mode", "auto", "--scale", "0.01",
             "--texture-root", str(kb_root),
-            "--animations", args.animations if folder.name == "chr100" or not player_family else "none",
+            "--animations", args.animations if not player_family or folder.name == player_family + "00" else "none",
             "--ik", args.ik,
         ], dry_run=args.dry_run)
         if args.godot_project and not args.dry_run:
@@ -106,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                 apply_scene_import_preset(glb, args.godot_project)
 
     if player_family:
-        scene = output_folder.parent / "chr1.tscn"
+        scene = output_folder.parent / f"{player_family}.tscn"
         print(f"Player armor scene: {scene}")
         if not args.dry_run:
             try:
@@ -122,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             script = PROJECT_ROOT / "godot/utility/player_armor.gd"
             shutil.copyfile(script, scene.with_name("player_armor.gd"))
             # Relative paths work when output/decoded is later copied into Godot.
-            shutil.copyfile(PROJECT_ROOT / "godot/utility/chr1.tscn", scene)
+            shutil.copyfile(PROJECT_ROOT / f"godot/utility/{player_family}.tscn", scene)
             if args.godot_project:
                 relative = scene.parent.relative_to(args.godot_project.resolve())
                 scene.write_text(scene.read_text().replace(
